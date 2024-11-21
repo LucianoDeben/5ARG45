@@ -1,0 +1,7 @@
+[core]
+    remote = gdrive
+['remote "gdrive"']
+    url = gdrive://1XMtBFf3d-5hoxsl-RAmiFqvsMAlS0PBo/DVC
+    gdrive_acknowledge_abuse = true
+    gdrive_client_id = ${GDRIVE_CLIENT_ID}
+    gdrive_client_secret = ${GDRIVE_CLIENT_SECRET}
