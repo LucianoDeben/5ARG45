@@ -1,9 +1,11 @@
 import pandas as pd
 import torch
-from molecule_graph import collect_continuous_atom_features, mol_to_graph
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from torch_geometric.data import DataLoader
+from torch_geometric.data import DataLoader as GeometricDataLoader
+
+from .molecule_graph import collect_continuous_atom_features, mol_to_graph
 
 
 def prepare_chemical_data(smiles_list, targets, batch_size=32):
@@ -13,29 +15,28 @@ def prepare_chemical_data(smiles_list, targets, batch_size=32):
     Args:
         smiles_list (List[str]): List of SMILES strings.
         targets (List[float]): List of target values.
-        batch_size (int): Batch size for the DataLoader.
+        batch_size (int): Batch size for DataLoader.
 
     Returns:
-        DataLoader: PyTorch Geometric DataLoader for the chemical data.
+        DataLoader: DataLoader for chemical data.
     """
-    # Collect continuous features and fit scaler
+    # Ensure smiles_list contains only strings
+    smiles_list = [str(smiles) for smiles in smiles_list]
+
+    # Collect continuous atom features and fit scaler
     continuous_atom_features = collect_continuous_atom_features(smiles_list)
     scaler = StandardScaler()
     scaler.fit(continuous_atom_features)
 
-    # Convert SMILES to graphs with scaled features and add targets
-    graph_list = []
+    # Convert SMILES to graph data
+    data_list = []
     for smiles, target in zip(smiles_list, targets):
-        graph = mol_to_graph(smiles, scaler)
-        if graph is not None:
-            graph.y = torch.tensor(
-                [target], dtype=torch.float
-            )  # Add target to data object
-            graph_list.append(graph)
+        data = mol_to_graph(smiles, scaler)
+        if data is not None:
+            data.y = torch.tensor([target], dtype=torch.float)
+            data_list.append(data)
 
-    # Create DataLoader
-    data_loader = DataLoader(graph_list, batch_size=batch_size, shuffle=True)
-    return data_loader
+    return GeometricDataLoader(data_list, batch_size=batch_size, shuffle=True)
 
 
 def prepare_transcriptomics_data(transcriptomics_df, targets, batch_size=32):

@@ -1,5 +1,6 @@
 import argparse
 import logging
+from typing import Tuple
 
 import pandas as pd
 import yaml
@@ -79,6 +80,7 @@ def merge_chemical_and_y(y_df: pd.DataFrame, compound_df: pd.DataFrame) -> pd.Da
     merged_df = pd.merge(
         y_df, compound_df, left_on="pert_mfc_id", right_on="pert_id", how="inner"
     )
+
     if merged_df.empty:
         logging.error(
             "Merging chemical data and Y-labels resulted in an empty DataFrame"
@@ -86,7 +88,7 @@ def merge_chemical_and_y(y_df: pd.DataFrame, compound_df: pd.DataFrame) -> pd.Da
         raise ValueError(
             "Merged DataFrame is empty after merging Y-labels and chemical data"
         )
-    logging.info(f"Shape after merging chemical and Y datasets: {merged_df.shape}")
+    merged_df.drop(columns=["pert_id"], inplace=True)
     return merged_df
 
 
@@ -110,6 +112,7 @@ def merge_with_transcriptomic(
     final_df = pd.merge(
         merged_df, x_df, left_on="sig_id", right_on="cell_line", how="inner"
     )
+    final_df.drop(columns=["cell_line"], inplace=True)
     if final_df.empty:
         logging.error("Merging with transcriptomic data resulted in an empty DataFrame")
         raise ValueError(
@@ -168,6 +171,33 @@ def save_dataset(final_df: pd.DataFrame, file_path: str):
     except IOError as e:
         logging.error(f"Error saving the final dataset: {e}")
         raise
+
+
+def partition_data(
+    final_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Partition the merged dataset into chemical compounds, target viability scores, and gene expression data.
+
+    Args:
+        final_df (pd.DataFrame): The merged DataFrame containing all data.
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+            - DataFrame containing chemical compounds (SMILES strings).
+            - DataFrame containing target viability scores.
+            - DataFrame containing gene expression data.
+    """
+    # Extract chemical compounds (SMILES strings)
+    chemical_compounds_df = final_df[["canonical_smiles"]].copy()
+
+    # Extract target viability scores
+    viability_df = final_df[["viability"]].copy()
+
+    # Extract gene expression data (assuming columns are labeled from 1 to 682 and are the last columns)
+    gene_expression_df = final_df.iloc[:, -682:].copy()
+
+    return chemical_compounds_df, viability_df, gene_expression_df
 
 
 def preprocess_data(config: dict):

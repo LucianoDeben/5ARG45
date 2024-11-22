@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
 
-def collect_continuous_atom_features(smiles_list):
+def collect_continuous_atom_features(smiles_list: List[str]) -> np.ndarray:
     """
     Collect continuous atom features from all molecules in the dataset.
 
@@ -157,6 +157,7 @@ def mol_to_graph(smiles: str, scaler: StandardScaler) -> Optional[Data]:
 
     Args:
         smiles (str): SMILES representation of the molecule.
+        scaler (StandardScaler): Fitted scaler for continuous features.
 
     Returns:
         Optional[Data]: PyTorch Geometric Data object or None if parsing fails.

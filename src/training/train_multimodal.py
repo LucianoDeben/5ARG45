@@ -1,12 +1,20 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader as TorchDataLoader
-from torch_geometric.data import DataLoader as GeometricDataLoader
 
-from models.gnn import GNN
-from models.multimodal_nn import MultimodalNN
-from models.transcriptomics_nn import TranscriptomicsNN
-from preprocess.data_loader import prepare_chemical_data, prepare_transcriptomics_data
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from preprocess.preprocess import partition_data
+from src.models.gnn import GNN
+from src.models.multimodal_nn import MultimodalNN
+from src.models.transcriptomics_nn import TranscriptomicsNN
+from src.preprocess.data_loader import (
+    prepare_chemical_data,
+    prepare_transcriptomics_data,
+)
 
 
 def train_multimodal_model(
@@ -24,6 +32,7 @@ def train_multimodal_model(
     multimodal_model.train()
 
     for epoch in range(epochs):
+        print("Starting epoch", epoch + 1)
         total_loss = 0
         for chem_data, (trans_data, target) in zip(chem_data_loader, trans_data_loader):
             optimizer.zero_grad()
@@ -44,13 +53,12 @@ def train_multimodal_model(
 # Example usage
 if __name__ == "__main__":
     # Load data
-    compoundinfo_df = pd.read_csv("data/raw/compoundinfo.csv")
-    transcriptomics_df = pd.read_csv("data/raw/X.tsv", sep="\t")
-    y_df = pd.read_csv("data/raw/Y.tsv", sep="\t")
+    final_df = pd.read_csv("data/processed/final_dataset.csv")
+    chem_df, viability_df, transcriptomics_df = partition_data(final_df)
 
     # Prepare chemical data
-    smiles_list = compoundinfo_df["canonical_smiles"].tolist()
-    targets = y_df["viability"].tolist()
+    smiles_list = chem_df["canonical_smiles"].tolist()
+    targets = viability_df["viability"].tolist()
     chem_data_loader = prepare_chemical_data(smiles_list, targets, batch_size=32)
 
     # Prepare transcriptomics data
@@ -76,6 +84,7 @@ if __name__ == "__main__":
         lr=0.001,
     )
     criterion = torch.nn.MSELoss()
+    print("Start training the MODELS!!!")
 
     # Train the model
     train_multimodal_model(
@@ -86,5 +95,5 @@ if __name__ == "__main__":
         transcriptomics_data_loader,
         optimizer,
         criterion,
-        epochs=50,
+        epochs=10,
     )
