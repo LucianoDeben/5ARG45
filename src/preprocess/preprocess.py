@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 
 import pandas as pd
 import yaml
@@ -128,7 +129,7 @@ def preprocess_transcriptomic_features(
         pd.DataFrame: DataFrame with preprocessed transcriptomic features.
 
     Raises:
-        Exception: If there is an error during scaling.
+        ValueError: If there is an error during scaling.
     """
     if scale_features:
         logging.info("Scaling transcriptomic features")
@@ -138,9 +139,9 @@ def preprocess_transcriptomic_features(
             final_df[transcriptomic_features] = scaler.fit_transform(
                 final_df[transcriptomic_features]
             )
-        except Exception as e:
+        except ValueError as e:
             logging.error(f"Error scaling transcriptomic features: {e}")
-            raise
+            raise ValueError(f"Error scaling transcriptomic features: {e}")
     return final_df
 
 
