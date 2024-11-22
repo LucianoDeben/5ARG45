@@ -1,5 +1,11 @@
+# Add src to the Python path
+import sys
+from pathlib import Path
+
 import pandas as pd
 import pytest
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.preprocess.preprocess import load_dataset
 

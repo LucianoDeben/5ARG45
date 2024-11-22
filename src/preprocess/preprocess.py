@@ -1,6 +1,5 @@
 import argparse
 import logging
-import os
 
 import pandas as pd
 import yaml
@@ -47,6 +46,12 @@ def load_dataset(file_path: str, delimiter: str = ",", header: int = 0) -> pd.Da
     try:
         df = pd.read_csv(file_path, delimiter=delimiter, header=header)
         logging.info(f"Successfully loaded dataset with shape {df.shape}")
+        # Check if the number of columns matches the expected number
+        expected_columns = len(df.columns)
+        if delimiter == "," and expected_columns == 1:
+            raise pd.errors.ParserError(
+                f"Expected multiple columns but got {expected_columns} column with delimiter '{delimiter}'"
+            )
         return df
     except FileNotFoundError:
         logging.error(f"File not found: {file_path}")
