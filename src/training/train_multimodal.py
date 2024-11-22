@@ -1,11 +1,11 @@
 import pandas as pd
 import torch
-from models.gnn import GNN
-from models.multimodal_nn import MultimodalNN
-from models.transcriptomics_nn import TranscriptomicsNN
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch_geometric.data import DataLoader as GeometricDataLoader
 
+from models.gnn import GNN
+from models.multimodal_nn import MultimodalNN
+from models.transcriptomics_nn import TranscriptomicsNN
 from preprocess.data_loader import prepare_chemical_data, prepare_transcriptomics_data
 
 

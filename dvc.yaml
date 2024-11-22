@@ -4,7 +4,8 @@ stages:
     deps:
       - src/preprocess/preprocess.py
       - config.yaml
-      - data/raw
-
+      - data/raw/compoundinfo.csv
+      - data/raw/X.tsv
+      - data/raw/Y.tsv
     outs:
       - data/processed/final_dataset.csv
