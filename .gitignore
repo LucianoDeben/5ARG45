@@ -163,6 +163,7 @@ cython_debug/
 
 # Data sources
 /data
+!data/*.dvc
 *.csv
 *.json
 *.xls
