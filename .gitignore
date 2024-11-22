@@ -162,6 +162,8 @@ cython_debug/
 #.idea/
 
 # Data sources
+data/raw
+data/processed
 *.csv
 *.json
 *.xls
