@@ -1,0 +1,8 @@
+data_paths:
+  compoundinfo_file: "data/raw/compoundinfo.csv"
+  x_file: "data/raw/X.tsv"
+  y_file: "data/raw/Y.tsv"
+  output_file: "data/processed/final_dataset.csv"
+
+preprocess_params:
+  scale_features: true

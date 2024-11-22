@@ -1,0 +1,10 @@
+stages:
+  preprocess:
+    cmd: python preprocess.py --config_file config.yaml
+    deps:
+      - preprocess.py
+      - config.yaml
+      - data/raw
+
+    outs:
+      - data/processed/final_dataset.csv
