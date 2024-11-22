@@ -1,8 +1,8 @@
 stages:
   preprocess:
-    cmd: python preprocess.py --config_file config.yaml
+    cmd: python src/preprocess/preprocess.py --config_file config.yaml
     deps:
-      - preprocess.py
+      - src/preprocess/preprocess.py
       - config.yaml
       - data/raw
 
