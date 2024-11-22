@@ -1,0 +1,8 @@
+[core]
+    remote = gdrive
+    autostage = true
+['remote "gdrive"']
+    url = gdrive://1FMV3WxzqgRVBv7MStwnpSNZ2BCQeXaJ7/Data
+    gdrive_acknowledge_abuse = true
+    gdrive_client_id = ${GDRIVE_CLIENT_ID}
+    gdrive_client_secret = ${GDRIVE_CLIENT_SECRET}
