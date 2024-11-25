@@ -1,5 +1,4 @@
-from concurrent.futures import ProcessPoolExecutor
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -10,64 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
 # Cache for computed features
-_feature_cache: Dict[str, Tuple[np.ndarray, List[List[int]], List[List[float]]]] = {}
-
-
-def collect_continuous_atom_features_parallel(
-    smiles_list: List[str], n_jobs: int = -1
-) -> np.ndarray:
-    """
-    Collect continuous atom features from all molecules in parallel.
-
-    Args:
-        smiles_list (List[str]): List of SMILES strings.
-        n_jobs (int): Number of parallel jobs. -1 means using all processors.
-
-    Returns:
-        np.ndarray: Array of continuous features from all atoms.
-    """
-    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-        features_lists = list(executor.map(_collect_single_mol_features, smiles_list))
-
-    continuous_features = [f for f in features_lists if f is not None]
-    return np.vstack(continuous_features) if continuous_features else np.array([])
-
-
-def _collect_single_mol_features(smiles: str) -> Optional[np.ndarray]:
-    """Helper function to collect features from a single molecule."""
-    try:
-        if smiles in _feature_cache:
-            return _feature_cache[smiles][0]
-
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            print(f"Invalid SMILES: {smiles}")
-            return None
-
-        mol = Chem.AddHs(mol)
-        success = AllChem.EmbedMolecule(mol, randomSeed=42)
-        if success != 0:
-            print(f"Failed to embed molecule: {smiles}")
-            return None
-
-        AllChem.ComputeGasteigerCharges(mol)
-        features = []
-
-        for atom in mol.GetAtoms():
-            partial_charge = float(
-                atom.GetProp("_GasteigerCharge")
-                if atom.HasProp("_GasteigerCharge")
-                else "0.0"
-            )
-            degree = atom.GetDegree()
-            formal_charge = atom.GetFormalCharge()
-            num_h = atom.GetTotalNumHs()
-            features.append([partial_charge, degree, formal_charge, num_h])
-
-        return np.array(features)
-    except Exception as e:
-        print(f"Error processing {smiles}: {str(e)}")
-        return None
+_feature_cache: Dict[str, Data] = {}
 
 
 def one_hot_encode(value: str, allowable_values: List[str]) -> List[int]:
@@ -76,16 +18,8 @@ def one_hot_encode(value: str, allowable_values: List[str]) -> List[int]:
 
 
 def get_atom_features(atom: Chem.Atom, scaler: StandardScaler) -> List[float]:
-    """
-    Extract features from an RDKit Atom object.
-
-    Args:
-        atom: RDKit Atom object
-        scaler: Fitted StandardScaler for continuous features
-
-    Returns:
-        List of numerical features
-    """
+    """Extract features from an RDKit Atom object."""
+    # Continuous features
     partial_charge = (
         float(atom.GetProp("_GasteigerCharge"))
         if atom.HasProp("_GasteigerCharge")
@@ -98,6 +32,7 @@ def get_atom_features(atom: Chem.Atom, scaler: StandardScaler) -> List[float]:
     continuous_features = [partial_charge, degree, formal_charge, num_h]
     scaled_features = scaler.transform([continuous_features])[0].tolist()
 
+    # Categorical features
     hybridization_types = [
         HybridizationType.SP,
         HybridizationType.SP2,
@@ -118,19 +53,19 @@ def get_atom_features(atom: Chem.Atom, scaler: StandardScaler) -> List[float]:
 
     in_ring = [int(atom.IsInRing())]
 
-    features = scaled_features + hybridization + aromatic + chirality + in_ring
-
-    return features
+    return scaled_features + hybridization + aromatic + chirality + in_ring
 
 
 def get_bond_features(bond: Chem.Bond) -> List[float]:
     """Extract bond features."""
     features = []
 
+    # Bond type
     bond_types = [BondType.SINGLE, BondType.DOUBLE, BondType.TRIPLE, BondType.AROMATIC]
     bond_type = one_hot_encode(str(bond.GetBondType()), [str(bt) for bt in bond_types])
     features.extend(bond_type)
 
+    # Stereo configuration
     stereo = one_hot_encode(
         str(bond.GetStereo()),
         [
@@ -145,6 +80,7 @@ def get_bond_features(bond: Chem.Bond) -> List[float]:
     )
     features.extend(stereo)
 
+    # Additional features
     features.append(int(bond.GetIsConjugated()))
     features.append(int(bond.IsInRing()))
 
@@ -153,67 +89,74 @@ def get_bond_features(bond: Chem.Bond) -> List[float]:
 
 def mol_to_graph(smiles: str, scaler: StandardScaler) -> Optional[Data]:
     """Convert SMILES to PyTorch Geometric Data object."""
-    try:
-        if smiles in _feature_cache:
-            cached_features = _feature_cache[smiles]
-            return _create_graph_from_features(*cached_features)
+    if smiles in _feature_cache:
+        return _feature_cache[smiles]
 
+    try:
+        # Create molecule
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            print(f"Invalid SMILES: {smiles}")
             return None
 
+        # Add hydrogens and generate 3D coordinates
         mol = Chem.AddHs(mol)
-        success = AllChem.EmbedMolecule(mol, randomSeed=42)
-        if success != 0:
-            print(f"Failed to embed molecule: {smiles}")
+        if AllChem.EmbedMolecule(mol, randomSeed=42) != 0:
             return None
 
+        # Compute charges
         AllChem.ComputeGasteigerCharges(mol)
 
+        # Get atom features
         atom_features = [get_atom_features(atom, scaler) for atom in mol.GetAtoms()]
+        x = torch.tensor(atom_features, dtype=torch.float)
 
+        # Get bond features
         edge_index = []
         edge_attr = []
         for bond in mol.GetBonds():
             i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
             bond_features = get_bond_features(bond)
 
+            # Add edges in both directions
             edge_index.extend([[i, j], [j, i]])
             edge_attr.extend([bond_features, bond_features])
 
-        if len(edge_index) != len(edge_attr):
-            raise ValueError(f"Inconsistent edges in molecule: {smiles}")
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float)
 
-        _feature_cache[smiles] = (np.array(atom_features), edge_index, edge_attr)
-
-        return _create_graph_from_features(
-            np.array(atom_features), edge_index, edge_attr
-        )
+        # Create graph
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        _feature_cache[smiles] = data
+        return data
 
     except Exception as e:
         print(f"Error creating graph for {smiles}: {str(e)}")
         return None
 
 
-def _create_graph_from_features(
-    atom_features: np.ndarray, edge_index: List[List[int]], edge_attr: List[List[float]]
-) -> Data:
-    x = torch.tensor(atom_features, dtype=torch.float)
-    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-    edge_attr = torch.tensor(edge_attr, dtype=torch.float)
+def collect_continuous_features(smiles_list: List[str]) -> np.ndarray:
+    """Collect continuous features for fitting the scaler."""
+    features = []
+    for smiles in smiles_list:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            continue
 
-    if edge_index.shape[1] != edge_attr.shape[0]:
-        raise ValueError(
-            f"Edge index and edge attribute shapes do not match: {edge_index.shape[1]} != {edge_attr.shape[0]}"
-        )
+        mol = Chem.AddHs(mol)
+        AllChem.ComputeGasteigerCharges(mol)
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        for atom in mol.GetAtoms():
+            partial_charge = (
+                float(atom.GetProp("_GasteigerCharge"))
+                if atom.HasProp("_GasteigerCharge")
+                else 0.0
+            )
+            degree = atom.GetDegree()
+            formal_charge = atom.GetFormalCharge()
+            num_h = atom.GetTotalNumHs()
+            features.append([partial_charge, degree, formal_charge, num_h])
 
-
-def process_smiles(smiles: str, scaler: StandardScaler) -> Optional[Data]:
-    """Process a single SMILES string to a graph."""
-    return mol_to_graph(smiles, scaler)
+    return np.array(features)
 
 
 def clear_cache():
