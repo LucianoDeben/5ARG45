@@ -3,7 +3,7 @@ from sklearn.metrics import mean_squared_error
 from utils.evaluation import evaluate_regression_metrics
 
 
-def train_shallow_model_with_loss(model, X_train, y_train, X_val, y_val, epochs=50):
+def train_shallow_model(model, X_train, y_train, X_val, y_val, epochs=50):
     """
     Train shallow models with loss tracking for training and validation.
 

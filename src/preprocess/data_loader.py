@@ -28,8 +28,12 @@ def prepare_chemical_data(
     smiles_list = [str(smiles) for smiles in smiles_list]
     valid_smiles = validate_smiles_list(smiles_list)
 
+    # Raise error if the length of valid_smiles is not equal to the length of targets
+    if len(valid_smiles) != len(targets):
+        raise ValueError("Number of valid SMILES doesn't match number of targets")
+
     if not valid_smiles:
-        raise ValueError("No valid SMILES strings found in input")
+        raise ValueError("No valid graphs were created")
 
     # Fit scaler on continuous features
     continuous_features = collect_continuous_features(valid_smiles)

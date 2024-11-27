@@ -13,11 +13,9 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from src.preprocess.molecule_graph import (
     _feature_cache,
     clear_cache,
-    collect_continuous_atom_features_parallel,
     get_atom_features,
     get_bond_features,
     mol_to_graph,
-    process_smiles,
 )
 
 
@@ -76,28 +74,56 @@ def test_get_bond_features(sample_smiles):
     assert isinstance(features, list)
 
 
-def test_process_smiles_valid(sample_smiles, scaler):
-    """Test SMILES processing for a valid string."""
-    graph = process_smiles(sample_smiles, scaler)
-    assert graph is not None
-    assert isinstance(graph, Data)
-
-
-def test_process_smiles_invalid(invalid_smiles, scaler):
-    """Test SMILES processing for an invalid string."""
-    graph = process_smiles(invalid_smiles, scaler)
-    assert graph is None
-
-
-def test_collect_continuous_atom_features_parallel(sample_smiles):
-    """Test parallel feature collection."""
-    smiles_list = [sample_smiles, sample_smiles, "INVALID_SMILES"]
-    features = collect_continuous_atom_features_parallel(smiles_list, n_jobs=2)
-    assert isinstance(features, np.ndarray)
-    assert features.shape[1] > 0  # Continuous features
-
-
 def test_clear_cache():
     """Test clearing the feature cache."""
     clear_cache()
     assert len(_feature_cache) == 0
+
+
+def test_mol_to_graph_valid(sample_smiles, scaler):
+    """Test graph creation for a valid SMILES string."""
+    graph = mol_to_graph(sample_smiles, scaler)
+    assert graph is not None
+    assert isinstance(graph, Data)
+    assert graph.x.shape[1] > 0  # Atom features
+    assert graph.edge_index.shape[0] == 2  # Edge index
+    assert graph.edge_attr.shape[0] == graph.edge_index.shape[1]  # Matching edges
+
+
+def test_mol_to_graph_invalid(invalid_smiles, scaler):
+    """Test graph creation for an invalid SMILES string."""
+    graph = mol_to_graph(invalid_smiles, scaler)
+    assert graph is None
+
+
+def test_mol_to_graph_cache(sample_smiles, scaler):
+    """Test graph creation with caching."""
+    clear_cache()
+    graph1 = mol_to_graph(sample_smiles, scaler)
+    graph2 = mol_to_graph(sample_smiles, scaler)
+    assert graph1 is not None
+    assert graph2 is not None
+    assert graph1 is graph2  # Should be the same object from cache
+
+
+def test_mol_to_graph_no_hydrogens(sample_smiles, scaler):
+    """Test graph creation without adding hydrogens."""
+    mol = Chem.MolFromSmiles(sample_smiles)
+    graph = mol_to_graph(Chem.MolToSmiles(mol), scaler)
+    assert graph is not None
+    assert isinstance(graph, Data)
+    assert graph.x.shape[1] > 0  # Atom features
+    assert graph.edge_index.shape[0] == 2  # Edge index
+    assert graph.edge_attr.shape[0] == graph.edge_index.shape[1]  # Matching edges
+
+
+def test_mol_to_graph_no_3d_coordinates(sample_smiles, scaler):
+    """Test graph creation without generating 3D coordinates."""
+    mol = Chem.MolFromSmiles(sample_smiles)
+    mol = Chem.AddHs(mol)
+    graph = mol_to_graph(Chem.MolToSmiles(mol), scaler)
+    assert graph is not None
+    assert isinstance(graph, Data)
+    assert graph.x.shape[1] > 0  # Atom features
+    assert graph.edge_index.shape[0] == 2  # Edge index
+    assert graph.edge_attr.shape[0] == graph.edge_index.shape[1]  # Matching edges
