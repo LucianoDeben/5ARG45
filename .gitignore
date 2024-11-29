@@ -171,3 +171,4 @@ data/processed
 *.db
 *.sqlite
 *.tsv
+*.bin
