@@ -164,6 +164,7 @@ cython_debug/
 # Data sources
 data/raw
 data/processed
+data/test
 *.csv
 *.json
 *.xls
@@ -172,3 +173,4 @@ data/processed
 *.sqlite
 *.tsv
 *.bin
+*.zip
