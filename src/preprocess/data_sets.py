@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import pandas as pd
 import torch
@@ -10,95 +10,98 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data as GeometricData
 from torch_geometric.data import Dataset as GeometricDataset
 
+from origin.core.molecule import Molecule
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class ChemicalDataset(GeometricDataset):
-
+class MoleculeDataset(Dataset):
     def __init__(
         self,
-        smiles_list: List[str],
-        root: str = "./",
-        transform=None,
-        pre_transform=None,
-        pre_filter=None,
-        representation: str = "graph",  # Optional: 'graph', 'fingerprint', etc.
+        smiles_list: Optional[List[str]] = None,
+        molecule_list: Optional[List[Molecule]] = None,
     ):
         """
-        Custom Dataset for chemical data using PyTorch Geometric's Data class.
+        A flexible dataset for managing molecules and their representations.
 
         Args:
-            root (str): Root directory where the dataset is stored.
-            smiles_list (List[str]): List of SMILES strings.
-            transform (callable, optional): Function to transform Data objects.
-            pre_transform (callable, optional): Function to transform Data objects before saving.
-            pre_filter (callable, optional): Function to filter Data objects.
-            representation (str): Molecular representation type.
+            smiles_list (Optional[List[str]]): List of SMILES strings.
+            molecule_list (Optional[List[Molecule]]): List of precomputed Molecule objects.
         """
-        self.smiles_list = smiles_list
-        self.representation = representation
-        super().__init__(root, transform, pre_transform, pre_filter)
-        self.processed_file_paths = [
-            os.path.join(self.processed_dir, f"data_{i}.pt")
-            for i in range(len(self.smiles_list))
-        ]
+        if molecule_list:
+            self.molecules = molecule_list
+        elif smiles_list:
+            self.smiles_list = smiles_list
+            self.molecules = [Molecule(smiles) for smiles in smiles_list]
+        else:
+            raise ValueError(
+                "Provide at least one of smiles_list, mol_list, or molecule_list."
+            )
 
-    @property
-    def raw_file_names(self):
-        # No raw files since data is provided directly
-        return []
+    def __len__(self) -> int:
+        return len(self.molecules)
 
-    @property
-    def processed_file_names(self):
-        # List of processed files
-        return [f"data_{i}.pt" for i in range(len(self.smiles_list))]
+    def __getitem__(self, idx: int) -> Molecule:
+        return self.molecules[idx]
 
-    def download(self):
-        # No download needed as data is provided directly
-        pass
+    # CRUD operations
+    def add_representation(self, representation: str, featurizer: Callable) -> None:
+        """
+        Add a new representation for all molecules in the dataset.
 
-    def process(self):
-        # Process SMILES strings into Data objects and save them
-        for idx, smiles in enumerate(self.smiles_list):
-            try:
-                data = self.smiles_to_graphs(smiles)
-                if data is None:
-                    logger.warning(f"Data is None for SMILES: {smiles}")
-                    continue
-                if self.pre_filter is not None and not self.pre_filter(data):
-                    continue
-                if self.pre_transform is not None:
-                    data = self.pre_transform(data)
-                torch.save(data, self.processed_paths[idx])
-            except Exception as e:
-                logger.error(f"Error processing SMILES {smiles}: {e}")
+        Args:
+            representation (str): Name of the representation.
+            featurizer (Callable): Function to compute the representation.
+        """
+        for molecule in self.molecules:
+            molecule.featurize(featurizer, representation)
 
-    def len(self):
-        return len(self.processed_file_names)
+    def get_representation(self, representation: str) -> List[Optional[torch.Tensor]]:
+        """
+        Retrieve a specific representation for all molecules.
 
-    def get(self, idx):
-        # Load the Data object from disk
-        data = torch.load(self.processed_paths[idx], weights_only=False)
-        if self.transform:
-            data = self.transform(data)
-        return data
+        Args:
+            representation (str): Name of the representation to retrieve.
 
-    def smiles_to_graphs(self, smiles: str) -> Optional[GeometricData]:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            logger.warning(f"Invalid SMILES string: {smiles}")
-            return None
+        Returns:
+            List[Optional[torch.Tensor]]: Representation for each molecule.
+        """
+        return [molecule.get_features(representation) for molecule in self.molecules]
 
-        featurizer = MolGraphConvFeaturizer()
-        try:
-            graph = featurizer.featurize([mol])
-        except Exception as e:
-            logger.error(f"Error featurizing molecule {smiles}: {e}")
-            return None
+    def update_representation(self, representation: str, featurizer: Callable) -> None:
+        """
+        Update an existing representation for all molecules.
 
-        return graph
+        Args:
+            representation (str): Name of the representation.
+            featurizer (Callable): Function to compute the updated representation.
+        """
+        for molecule in self.molecules:
+            molecule.featurize(featurizer, representation)
+
+    def delete_representation(self, representation: str) -> None:
+        """
+        Delete a specific representation for all molecules.
+
+        Args:
+            representation (str): Name of the representation to delete.
+        """
+        for molecule in self.molecules:
+            if representation in molecule._features:
+                del molecule._features[representation]
+
+    def list_representations(self) -> List[str]:
+        """
+        List all available representations across all molecules.
+
+        Returns:
+            List[str]: Names of available representations.
+        """
+        return list(
+            set().union(*(molecule._features.keys() for molecule in self.molecules))
+        )
 
 
 class TranscriptomicsDataset(Dataset):
@@ -118,7 +121,7 @@ class TranscriptomicsDataset(Dataset):
         """
         self.features_df = features_df
         self.targets = targets
-        self.features = torch.tensor(self.features_df, dtype=torch.float)
+        self.features = torch.tensor(self.features_df.values, dtype=torch.float)
         self.targets_tensor = torch.tensor(targets.values, dtype=torch.float).unsqueeze(
             1
         )
@@ -146,12 +149,14 @@ class MultimodalDataset(Dataset):
 
 
 if __name__ == "__main__":
-    # Test the ChemicalDataset class
+    # Test the MoleculeDataset class
     smiles_list = ["CCO", "CCN", "CC(=O)OC1=CC=CC=C1C(=O)O"]
-    dataset = ChemicalDataset(smiles_list, root="data/processed/chemical_data/")
+    dataset = MoleculeDataset(smiles_list=smiles_list)
+    dataset.add_representation("graph", MolGraphConvFeaturizer())
 
-    print(dataset.smiles_list)
+    print("SMILES List:", dataset.smiles_list)
 
     # Print the items in the dataset
     for i in range(len(dataset)):
-        print(dataset[i])
+        molecule = dataset[i]
+        print(molecule.graph)

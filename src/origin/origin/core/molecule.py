@@ -3,9 +3,10 @@ from typing import Any, Dict, Optional
 
 import torch
 from deepchem.feat import Featurizer
-from origin.core.entity import Entity
 from rdkit import Chem
 from torch_geometric.data import Data as GeometricData
+
+from origin.core.entity import Entity
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class Molecule(Entity):
         self.smiles = smiles
         self._mol = None  # RDKit molecule object
         self._features: Dict[str, Any] = {}  # Cache for molecule representations
+        super().__init__(id=smiles)
 
     @property
     def mol(self) -> Chem.Mol:
@@ -135,3 +137,16 @@ class Molecule(Entity):
 
     def __repr__(self) -> str:
         return f"Molecule(smiles={self.smiles})"
+
+    def summary(self) -> str:
+        """
+        Provides a summary of the molecule and its computed representations.
+
+        Returns:
+            str: Summary of the molecule.
+        """
+        summary = f"Molecule(smiles={self.smiles})\n"
+        summary += "Computed representations:\n"
+        for key in self._features.keys():
+            summary += f"  - {key}\n"
+        return summary
