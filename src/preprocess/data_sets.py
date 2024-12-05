@@ -46,6 +46,15 @@ class MoleculeDataset(Dataset):
     def __getitem__(self, idx: int) -> Molecule:
         return self.molecules[idx]
 
+    def add_graphs(self, featurizer: MolGraphConvFeaturizer) -> None:
+        """
+        Add a new graph representation for all molecules in the dataset.
+
+        Args:
+            featurizer (Callable): Function to compute the graph representation.
+        """
+        self.graphs_list = featurizer.featurize(self.smiles_list)
+
     # CRUD operations
     def add_representation(self, representation: str, featurizer: Callable) -> None:
         """
@@ -152,11 +161,9 @@ if __name__ == "__main__":
     # Test the MoleculeDataset class
     smiles_list = ["CCO", "CCN", "CC(=O)OC1=CC=CC=C1C(=O)O"]
     dataset = MoleculeDataset(smiles_list=smiles_list)
-    dataset.add_representation("graph", MolGraphConvFeaturizer())
-
-    print("SMILES List:", dataset.smiles_list)
+    dataset.add_graphs(MolGraphConvFeaturizer())
 
     # Print the items in the dataset
-    for i in range(len(dataset)):
-        molecule = dataset[i]
-        print(molecule.graph)
+    print(dataset.graphs_list)
+    print(type(dataset.graphs_list[0]))
+    print(type(dataset.graphs_list[0].x))

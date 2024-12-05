@@ -8,6 +8,7 @@ from torch_geometric.data import Data as GeometricData
 
 from origin.core.entity import Entity
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

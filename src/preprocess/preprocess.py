@@ -2,9 +2,16 @@ import argparse
 import logging
 from typing import Tuple
 
+import numpy as np
 import pandas as pd
-import yaml
 from sklearn.preprocessing import StandardScaler
+
+import src
+
+# Add the src directory to the path
+src_dir = src.__path__[0]
+
+from utils.utils import load_config
 
 # Configure logging
 logging.basicConfig(
@@ -12,53 +19,159 @@ logging.basicConfig(
 )
 
 
-def load_config(config_file: str) -> dict:
+def preprocess_tf_data(config: dict, standardize: bool = True):
     """
-    Load the configuration from a YAML file.
+    Preprocess data according to the configuration.
 
     Args:
-        config_file (str): Path to the configuration file.
-
-    Returns:
-        dict: Configuration dictionary.
-    """
-    with open(config_file, "r") as file:
-        config = yaml.safe_load(file)
-    return config
-
-
-def load_dataset(file_path: str, delimiter: str = ",", header: int = 0) -> pd.DataFrame:
-    """
-    Load a dataset from a specified file path.
-
-    Args:
-        file_path (str): The path to the dataset file.
-        delimiter (str, optional): Delimiter used in the file. Defaults to ','.
-        header (int, optional): Row number to use as column names. Defaults to 0.
-
-    Returns:
-        pd.DataFrame: The loaded dataset.
+        config (dict): Configuration dictionary.
 
     Raises:
-        FileNotFoundError: If the file does not exist.
-        pd.errors.ParserError: If there is an error parsing the file.
+        Exception: If any step in the preprocessing fails.
     """
-    logging.info(f"Loading dataset from {file_path}")
     try:
-        df = pd.read_csv(file_path, delimiter=delimiter, header=header)
-        logging.info(f"Successfully loaded dataset with shape {df.shape}")
-        # Check if the number of columns matches the expected number
-        expected_columns = len(df.columns)
-        if delimiter == "," and expected_columns == 1:
-            raise pd.errors.ParserError(
-                f"Expected multiple columns but got {expected_columns} column with delimiter '{delimiter}'"
+        # Load datasets
+        logging.debug("Loading datasets.")
+        x_df = pd.read_csv(config["data_paths"]["x_file"], delimiter="\t")
+        y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
+
+        # Remove the first column from x_df
+        logging.debug("Removing the first column from x_df.")
+        x_df = x_df.iloc[:, 1:]
+
+        # Standardize x_df
+        if standardize:
+            logging.debug("Standardizing x_df.")
+            scaler = StandardScaler()
+            x_df = pd.DataFrame(scaler.fit_transform(x_df), columns=x_df.columns)
+
+        # Only select the 'viability' column from y_df
+        logging.debug("Selecting the 'viability' column from y_df.")
+        y_df = y_df[["viability"]]
+
+        # Check if x_df and y_df have the same length, then concatenate/merge them
+        if x_df.shape[0] != y_df.shape[0]:
+            logging.error(
+                "The number of rows in x_df and y_df do not match. Cannot merge."
             )
-        return df
-    except FileNotFoundError:
-        logging.error(f"File not found: {file_path}")
+            raise ValueError("The number of rows in x_df and y_df do not match.")
+
+        logging.debug("Concatenating x_df and y_df.")
+        final_df = pd.concat([x_df, y_df], axis=1)
+
+        # Handle missing data
+        logging.debug(f"Handling missing data, initial shape: {final_df.shape}")
+        final_df.dropna(inplace=True)
+        logging.debug(f"Shape after dropping missing data: {final_df.shape}")
+
+        # Save the final dataset
+        logging.debug("Saving the final dataset.")
+        final_df.to_csv(config["data_paths"]["preprocessed_tf_file"], index=False)
+        logging.info("Preprocessing completed successfully.")
+        return final_df
+
+    except FileNotFoundError as e:
+        logging.error(f"File not found: {e}")
+        raise
+    except pd.errors.EmptyDataError as e:
+        logging.error(f"Empty data error: {e}")
         raise
     except pd.errors.ParserError as e:
-        logging.error(f"Error parsing the file {file_path}: {e}")
+        logging.error(f"Parsing error: {e}")
+        raise
+    except ValueError as e:
+        logging.error(f"Value error: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Preprocessing failed: {e}")
+        raise
+
+
+def preprocess_gene_data(
+    config: dict, standardize: bool = True, use_landmarks: bool = True
+):
+    """
+    Preprocess data according to the configuration.
+
+    Args:
+        config (dict): Configuration dictionary.
+
+    Raises:
+        Exception: If any step in the preprocessing fails.
+    """
+    try:
+        # Load datasets
+        logging.debug("Loading datasets.")
+
+        # Get gene expressions data from binary file and reshape it
+        X_rna = np.fromfile(config["data_paths"]["rna_file"], dtype=np.float32)
+        X_rna = X_rna.reshape(31567, -1)
+
+        # Get the gene information
+        geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
+
+        # Get the cell line information and viability data
+        y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
+
+        # Select genes based on the user's choice
+        if use_landmarks:
+            logging.debug("Using landmark genes.")
+            selected_genes = geneinfo[geneinfo.feature_space == "landmark"]
+        else:
+            logging.debug("Using all genes.")
+            selected_genes = geneinfo
+
+        # Select the corresponding gene expression data
+        selected_gene_indices = selected_genes.index
+        X_selected = X_rna[:, selected_gene_indices]
+        X_selected_df = pd.DataFrame(
+            X_selected, index=y_df.index, columns=selected_genes.gene_symbol
+        )
+
+        # Remove the first column from X_selected_df
+        logging.debug("Removing the first column from X_selected_df.")
+        X_selected_df = X_selected_df.iloc[:, 1:]
+        logging.debug(
+            f"Shape of x_df after removing the first column: {X_selected_df.shape}"
+        )
+
+        # Standardize the gene expression data if required
+        if standardize:
+            logging.debug("Standardizing gene expression data.")
+            scaler = StandardScaler()
+            X_selected_df = pd.DataFrame(
+                scaler.fit_transform(X_selected_df), columns=X_selected_df.columns
+            )
+
+        # Merge the gene expression data with the viability scores
+        logging.debug("Merging gene expression data with viability scores.")
+        final_df = pd.concat([X_selected_df, y_df[["viability"]]], axis=1)
+
+        # Remove rows with any NaN values
+        logging.debug(f"Handling missing data, initial shape: {final_df.shape}")
+        final_df.dropna(inplace=True)
+        logging.debug(f"Shape after dropping missing data: {final_df.shape}")
+
+        # Save the final dataset
+        logging.debug("Saving the final dataset.")
+        final_df.to_csv(config["data_paths"]["preprocessed_gene_file"], index=False)
+        logging.info("Preprocessing completed successfully.")
+        return final_df
+
+    except FileNotFoundError as e:
+        logging.error(f"File not found: {e}")
+        raise
+    except pd.errors.EmptyDataError as e:
+        logging.error(f"Empty data error: {e}")
+        raise
+    except pd.errors.ParserError as e:
+        logging.error(f"Parsing error: {e}")
+        raise
+    except ValueError as e:
+        logging.error(f"Value error: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Preprocessing failed: {e}")
         raise
 
 
@@ -123,7 +236,7 @@ def merge_with_transcriptomic(
 
 
 def preprocess_transcriptomic_features(
-    final_df: pd.DataFrame, x_df: pd.DataFrame, scale_features: bool
+    final_df: pd.DataFrame, x_df: pd.DataFrame, scale_features: bool = True
 ) -> pd.DataFrame:
     """
     Preprocess transcriptomic features by scaling them if required.
@@ -151,26 +264,6 @@ def preprocess_transcriptomic_features(
             logging.error(f"Error scaling transcriptomic features: {e}")
             raise ValueError(f"Error scaling transcriptomic features: {e}")
     return final_df
-
-
-def save_dataset(final_df: pd.DataFrame, file_path: str):
-    """
-    Save the final DataFrame to a CSV file.
-
-    Args:
-        final_df (pd.DataFrame): Final DataFrame to save.
-        file_path (str): Path to the output file.
-
-    Raises:
-        IOError: If there is an error saving the file.
-    """
-    logging.info(f"Saving final dataset to {file_path}")
-    try:
-        final_df.to_csv(file_path, index=False)
-        logging.info("Final dataset saved successfully.")
-    except IOError as e:
-        logging.error(f"Error saving the final dataset: {e}")
-        raise
 
 
 def partition_data(
@@ -212,9 +305,9 @@ def preprocess_data(config: dict):
     """
     try:
         # Load datasets
-        compound_df = load_dataset(config["data_paths"]["compoundinfo_file"])
-        x_df = load_dataset(config["data_paths"]["x_file"], delimiter="\t", header=None)
-        y_df = load_dataset(config["data_paths"]["y_file"], delimiter="\t")
+        compound_df = pd.read_csv(config["data_paths"]["compoundinfo_file"])
+        x_df = pd.read_csv(config["data_paths"]["x_file"], delimiter="\t", header=None)
+        y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
 
         # Set the name of the first column in x_df to 'cell_line'
         x_df.columns = ["cell_line"] + x_df.columns.tolist()[1:]
@@ -237,7 +330,7 @@ def preprocess_data(config: dict):
         )
 
         # Save the final dataset
-        save_dataset(final_df, config["data_paths"]["output_file"])
+        final_df.to_csv(final_df, config["data_paths"]["output_file"])
     except Exception as e:
         logging.error(f"Preprocessing failed: {e}")
         raise
