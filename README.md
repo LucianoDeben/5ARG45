@@ -79,5 +79,14 @@ This repository contains the implementation of a multimodal deep learning framew
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/your_username/multimodal-drug-response.git
+   git clone https://github.com/LucianoDeben/5ARG45.git
    ```
+
+### Key Features of This README
+
+1. **Step-by-Step Tasks**: Tasks are divided into phases, with a logical progression from simple to complex models.
+2. **Progress Tracking**: Checkboxes allow for real-time tracking of milestones.
+3. **Deliverables and Usage**: Provides clarity on what to expect and how to use the repository.
+4. **Future Extendability**: Each phase is modular, making it easier to adapt as the project evolves.
+
+Let me know if you'd like further adjustments!

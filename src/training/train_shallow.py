@@ -1,3 +1,6 @@
+from typing import Dict
+
+from matplotlib import pyplot as plt
 from sklearn.metrics import mean_squared_error
 
 from utils.evaluation import evaluate_regression_metrics
@@ -69,15 +72,17 @@ def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     y_true = y_test.to_numpy() if hasattr(y_test, "to_numpy") else y_test
 
     if calculate_metrics:
-
         mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+
+        # Compute weighted score (average of R² and Pearson)
+        weighted_score = 0.5 * r2 + 0.5 * pearson_coef
 
         metrics = {
             "MSE": mse,
             "MAE": mae,
             "R²": r2,
             "Pearson Correlation": pearson_coef,
+            "Weighted Score": weighted_score,
         }
-        return test_loss, y_true, y_pred, metrics
-
-    return test_loss, y_true, y_pred
+        return test_loss, metrics
+    return test_loss

@@ -1,8 +1,14 @@
+import logging
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import seaborn as sns
 import torch
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 from sklearn.model_selection import learning_curve
 
 
@@ -206,3 +212,492 @@ def create_visualizations(models, X_test, y_test, train_losses=None, val_losses=
         print("Generating loss curves...")
         for name in models.keys():
             plot_loss_curves(train_losses[name], val_losses[name], name)
+
+
+def plot_pca_variance(pca, dataset_name="Dataset"):
+    """
+    Create an explained variance (scree) plot.
+
+    Args:
+        pca (PCA): Fitted PCA object.
+        dataset_name (str): Name of the dataset (default: "Dataset").
+    """
+    explained_var_cumul = np.cumsum(pca.explained_variance_ratio_) * 100
+    fig = px.area(
+        x=range(1, len(explained_var_cumul) + 1),
+        y=explained_var_cumul,
+        labels={"x": "# Components", "y": "Cumulative Explained Variance (%)"},
+        title=f"{dataset_name}: PCA Explained Variance",
+    )
+    fig.show()
+
+
+def create_pca_biplot(
+    pca,
+    X,
+    Y,
+    features,
+    dataset_name="Dataset",
+    top_n_loadings=10,
+    sample_size=1000,
+    loading_scale=10,
+    dimension="2D",
+):
+    """
+    Create a PCA biplot with Plotly for 2D or 3D.
+
+    Args:
+        pca (PCA): Fitted PCA object.
+        X (pd.DataFrame): Scaled feature data.
+        y (pd.Series): Target data.
+        features (list): List of feature names.
+        dataset_name (str): Name of the dataset.
+        top_n_loadings (int): Number of top loadings to display.
+        sample_size (int): Number of samples to plot.
+        loading_scale (int): Scaling factor for loadings.
+        dimension (str): '2D' or '3D' for the PCA dimensionality.
+
+    Returns:
+        plotly.graph_objects.Figure: The PCA biplot figure
+    """
+
+    # Downsample X for plotting
+    if len(X) > sample_size:
+        X = X.sample(sample_size, random_state=42)
+
+    # Calculate loadings
+    loadings = pca.components_.T * np.sqrt(pca.explained_variance_)
+    loadings *= loading_scale  # Scale the loadings
+
+    # Select top-n features contributing most to PC1, PC2, PC3
+    component_scores = np.abs(loadings[:, :3]).sum(axis=1)
+    top_features_idx = np.argsort(component_scores)[-top_n_loadings:]
+    top_features = [features[i] for i in top_features_idx]
+    top_loadings = loadings[top_features_idx]
+
+    # Create 2D traces
+    data_points_2d = go.Scatter(
+        x=X["PC1"],
+        y=X["PC2"],
+        mode="markers",
+        marker=dict(
+            size=5,
+            color=Y,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="Viability"),
+        ),
+        name="Data Points (2D)",
+        showlegend=False,
+        visible=True if dimension == "2D" else False,
+    )
+
+    loadings_2d = [
+        go.Scatter(
+            x=[0, top_loadings[i, 0]],
+            y=[0, top_loadings[i, 1]],
+            mode="lines+text",
+            line=dict(color="red", width=2),
+            text=[None, feature],
+            showlegend=False,
+            visible=True if dimension == "2D" else False,
+        )
+        for i, feature in enumerate(top_features)
+    ]
+
+    # Create 3D traces
+    data_points_3d = go.Scatter3d(
+        x=X["PC1"],
+        y=X["PC2"],
+        z=X["PC3"],
+        mode="markers",
+        marker=dict(
+            size=5,
+            color=Y,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="Viability"),
+        ),
+        name="Data Points (3D)",
+        showlegend=False,
+        visible=True if dimension == "3D" else False,
+    )
+
+    loadings_3d = [
+        go.Scatter3d(
+            x=[0, top_loadings[i, 0]],
+            y=[0, top_loadings[i, 1]],
+            z=[0, top_loadings[i, 2]],
+            mode="lines+text",
+            line=dict(color="red", width=2),
+            text=[None, feature],
+            showlegend=False,
+            visible=True if dimension == "3D" else False,
+        )
+        for i, feature in enumerate(top_features)
+    ]
+
+    # Combine all traces, but only 2D or 3D will be visible based on 'dimension'
+    all_traces = [data_points_2d] + loadings_2d + [data_points_3d] + loadings_3d
+
+    # Initialize figure
+    fig = go.Figure(data=all_traces)
+
+    if dimension == "2D":
+        fig.update_layout(
+            title=f"{dataset_name}: 2D PCA Biplot (Explained Variance: {sum(pca.explained_variance_ratio_[:3]) * 100:.2f}%)",
+            xaxis_title=f"PC1 ({pca.explained_variance_ratio_[0] * 100:.2f}%)",
+            yaxis_title=f"PC2 ({pca.explained_variance_ratio_[1] * 100:.2f}%)",
+            scene=dict(
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+                zaxis=dict(visible=False),
+            ),
+        )
+    else:  # 3D
+        fig.update_layout(
+            title=f"{dataset_name}: 3D PCA Biplot (Explained Variance: {sum(pca.explained_variance_ratio_[:3]) * 100:.2f}%)",
+            # Hide 2D axes in 3D mode
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            scene=dict(
+                xaxis=dict(
+                    visible=True,
+                    title=f"PC1 ({pca.explained_variance_ratio_[0] * 100:.2f}%)",
+                ),
+                yaxis=dict(
+                    visible=True,
+                    title=f"PC2 ({pca.explained_variance_ratio_[1] * 100:.2f}%)",
+                ),
+                zaxis=dict(
+                    visible=True,
+                    title=f"PC3 ({pca.explained_variance_ratio_[2] * 100:.2f}%)",
+                ),
+            ),
+        )
+
+    # Update menus for toggling visibility (data, loadings)
+    # Note: Dimension is fixed, so we only toggle among relevant traces.
+    if dimension == "2D":
+        # Indices: [data_points_2d] + loadings_2d
+        # data_points_2d at index 0, loadings_2d follow
+        # data_points_3d and loadings_3d are invisible
+        visibility_show_all = [True] * (1 + len(loadings_2d)) + [False] * (
+            1 + len(loadings_3d)
+        )
+        visibility_data_only = (
+            [True] + [False] * len(loadings_2d) + [False] * (1 + len(loadings_3d))
+        )
+        visibility_loadings_only = (
+            [False] + [True] * len(loadings_2d) + [False] * (1 + len(loadings_3d))
+        )
+    else:
+        # dimension == '3D'
+        # Indices: [data_points_2d, loadings_2d..., data_points_3d, loadings_3d...]
+        # 2D are invisible anyway
+        visibility_show_all = [False] * (1 + len(loadings_2d)) + [True] * (
+            1 + len(loadings_3d)
+        )
+        visibility_data_only = (
+            [False] * (1 + len(loadings_2d)) + [True] + [False] * len(loadings_3d)
+        )
+        visibility_loadings_only = (
+            [False] * (1 + len(loadings_2d)) + [False] + [True] * len(loadings_3d)
+        )
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                buttons=[
+                    dict(
+                        label="Show All",
+                        method="update",
+                        args=[{"visible": visibility_show_all}, {}],
+                    ),
+                    dict(
+                        label="Show Data Points Only",
+                        method="update",
+                        args=[{"visible": visibility_data_only}, {}],
+                    ),
+                    dict(
+                        label="Show Loadings Only",
+                        method="update",
+                        args=[{"visible": visibility_loadings_only}, {}],
+                    ),
+                ],
+                direction="down",
+                showactive=True,
+                x=0.1,
+                xanchor="left",
+                y=1.15,
+                yanchor="top",
+            ),
+        ]
+    )
+
+    fig.show()
+
+
+def create_tsne_plot(
+    X,
+    Y,
+    target_column,
+    dimension="2D",
+    dataset_name="Dataset",
+    sample_size=1000,
+    perplexity=50,
+    max_iter=1000,
+    random_state=42,
+):
+    """
+    Create a t-SNE plot in either 2D or 3D with Plotly Express.
+    This version is simplified for a regression task and does not include toggling menus.
+
+    Args:
+        X (pd.DataFrame or np.ndarray): Feature data.
+        y (pd.DataFrame or np.ndarray): Corresponding target data with a column `target_column`.
+        target_column (str): Name of the target column in y.
+        dimension (str): '2D' or '3D' for the t-SNE dimensionality.
+        dataset_name (str): Title prefix for the plot.
+        perplexity (float): t-SNE perplexity.
+        n_iter (int): Number of t-SNE iterations.
+        random_state (int): Random state for reproducibility.
+
+    Returns:
+        plotly.graph_objects.Figure: The t-SNE figure.
+    """
+
+    # Downsample X for plotting
+    if len(X) > sample_size:
+        X = X.sample(sample_size, random_state=42)
+
+    # Convert X to a numpy array if needed
+    if hasattr(X, "values"):
+        X_values = X.values
+    else:
+        X_values = X
+
+    # Reset indices and ensure y aligns if it's a DataFrame
+    if hasattr(Y, "reset_index"):
+        Y = Y.reset_index(drop=True)
+
+    # Determine dimensionality
+    n_components = 2 if dimension == "2D" else 3
+
+    # Run t-SNE
+    tsne = TSNE(
+        n_components=n_components,
+        perplexity=perplexity,
+        max_iter=max_iter,
+        random_state=random_state,
+    )
+    projections = tsne.fit_transform(X_values)
+
+    # Create a DataFrame for the projections and the target column
+    proj_df = pd.DataFrame(projections)
+    proj_df[target_column] = Y
+
+    if dimension == "2D":
+        fig = px.scatter(
+            proj_df,
+            x=0,
+            y=1,
+            color=target_column,
+            title=f"{dataset_name}: 2D t-SNE Plot",
+            labels={0: "t-SNE 1", 1: "t-SNE 2"},
+        )
+    else:
+        fig = px.scatter_3d(
+            proj_df,
+            x=0,
+            y=1,
+            z=2,
+            color=target_column,
+            title=f"{dataset_name}: 3D t-SNE Plot",
+            labels={0: "t-SNE 1", 1: "t-SNE 2", 2: "t-SNE 3"},
+        )
+        # Increase marker size for 3D for better visibility
+        fig.update_traces(marker_size=5)
+
+    fig.show()
+    return fig
+
+
+def create_coefficients_visualization(trained_models, feature_sets, top_n=10):
+    """
+    Create an interactive Plotly visualization for the top N coefficients for all models and feature sets.
+    Sets the initial view to the 'TF Data' feature set and 'Linear' model combination.
+    """
+
+    data_dict = {}
+    feature_models_map = {}
+
+    # Build data dictionary
+    for (feature_name, model_name), trained_model in trained_models.items():
+        X_train, _, _, _ = feature_sets[feature_name]
+
+        # Extract feature names
+        if isinstance(X_train, pd.DataFrame):
+            feature_names = X_train.columns
+        else:
+            feature_names = [f"Feature {i}" for i in range(X_train.shape[1])]
+
+        # Retrieve coefficients or feature importances
+        if hasattr(trained_model, "coef_"):
+            coefficients = trained_model.coef_.ravel()
+        elif hasattr(trained_model, "feature_importances_"):
+            coefficients = trained_model.feature_importances_
+        else:
+            continue
+
+        if len(feature_names) != len(coefficients):
+            raise ValueError(
+                f"Mismatch between feature names ({len(feature_names)}) and coefficients ({len(coefficients)})."
+            )
+
+        # Create DataFrame and select top_n
+        coeff_df = pd.DataFrame(
+            {
+                "Feature": feature_names,
+                "Coefficient": coefficients,
+            }
+        )
+        coeff_df["AbsCoefficient"] = coeff_df["Coefficient"].abs()
+        coeff_df = coeff_df.sort_values("AbsCoefficient", ascending=False).head(top_n)
+
+        # Split into positive and negative
+        pos_df = coeff_df[coeff_df["Coefficient"] > 0]
+        neg_df = coeff_df[coeff_df["Coefficient"] <= 0]
+
+        pos_trace = go.Bar(
+            x=pos_df["Feature"],
+            y=pos_df["Coefficient"],
+            marker_color="blue",
+            name="Positive",
+            showlegend=True,
+        )
+        neg_trace = go.Bar(
+            x=neg_df["Feature"],
+            y=neg_df["Coefficient"],
+            marker_color="red",
+            name="Negative",
+            showlegend=True,
+        )
+
+        data_dict[(feature_name, model_name)] = (pos_trace, neg_trace)
+        if feature_name not in feature_models_map:
+            feature_models_map[feature_name] = []
+        if model_name not in feature_models_map[feature_name]:
+            feature_models_map[feature_name].append(model_name)
+
+    # Combine all traces
+    all_traces = []
+    index_map = {}
+    for key, (pos_trace, neg_trace) in data_dict.items():
+        start_idx = len(all_traces)
+        all_traces.append(pos_trace)
+        all_traces.append(neg_trace)
+        index_map[key] = (start_idx, start_idx + 1)
+
+    fig = go.Figure(data=all_traces)
+
+    # Set default view to 'TF Data' and 'Linear'
+    default_feature = "TF Data"
+    default_model = "Linear"
+    # Check if this combination exists, if not, pick the first available
+    if (default_feature, default_model) not in data_dict:
+        if feature_models_map:
+            first_feature = sorted(feature_models_map.keys())[0]
+            first_model = sorted(feature_models_map[first_feature])[0]
+            default_feature, default_model = first_feature, first_model
+        else:
+            # No data at all
+            default_feature = None
+            default_model = None
+
+    def generate_visibility_array(selected_feature, selected_model):
+        visibility = [False] * len(all_traces)
+        if (selected_feature, selected_model) in index_map:
+            idx_pos, idx_neg = index_map[(selected_feature, selected_model)]
+            visibility[idx_pos] = True
+            visibility[idx_neg] = True
+        return visibility
+
+    # Set initial visibility
+    if default_feature is not None and default_model is not None:
+        initial_visibility = generate_visibility_array(default_feature, default_model)
+        for i, vis in enumerate(initial_visibility):
+            fig.data[i].visible = vis
+        fig.update_layout(
+            title=f"Top {top_n} Features: {default_feature} - {default_model}"
+        )
+    else:
+        fig.update_layout(title=f"Top {top_n} Coefficients for All Models and Datasets")
+
+    # Create dropdown buttons
+    # Feature dropdown
+    feature_buttons = []
+    for feat in sorted(feature_models_map.keys()):
+        # On feature selection, default to first model for that feature
+        first_model_for_feat = sorted(feature_models_map[feat])[0]
+        visibility = generate_visibility_array(feat, first_model_for_feat)
+        feature_buttons.append(
+            dict(
+                label=feat,
+                method="update",
+                args=[
+                    {"visible": visibility},
+                    {"title": f"Top {top_n} Features: {feat} - {first_model_for_feat}"},
+                ],
+            )
+        )
+
+    # Model dropdown
+    # We'll just base it on the currently displayed feature set (which defaults to default_feature)
+    # Without dynamic callbacks, we must stick to a chosen feature set for these model buttons.
+    model_buttons = []
+    if default_feature in feature_models_map:
+        for m in sorted(feature_models_map[default_feature]):
+            visibility = generate_visibility_array(default_feature, m)
+            model_buttons.append(
+                dict(
+                    label=m,
+                    method="update",
+                    args=[
+                        {"visible": visibility},
+                        {"title": f"Top {top_n} Features: {default_feature} - {m}"},
+                    ],
+                )
+            )
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                buttons=feature_buttons,
+                direction="down",
+                showactive=True,
+                x=0.3,
+                xanchor="center",
+                y=1.2,
+                yanchor="top",
+                pad={"r": 10, "t": 10},
+                name="Feature Set",
+            ),
+            dict(
+                buttons=model_buttons,
+                direction="down",
+                showactive=True,
+                x=0.7,
+                xanchor="center",
+                y=1.2,
+                yanchor="top",
+                pad={"r": 10, "t": 10},
+                name="Model Type",
+            ),
+        ],
+        xaxis_title="Feature Name",
+        yaxis_title="Coefficient Value",
+        legend_title="Coefficient Sign",
+    )
+
+    fig.show()

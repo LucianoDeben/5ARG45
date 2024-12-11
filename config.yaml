@@ -6,7 +6,16 @@ data_paths:
   geneinfo_file: "data/raw/geneinfo_beta.txt"
   preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
   preprocessed_gene_file: "data/processed/preprocessed_gene.csv"
-  output_file: "data/processed/final_dataset.csv"
+  preprocessed_merged_file: "data/processed/final_dataset.csv"
 
-preprocess_params:
+preprocess:
   scale_features: true
+  train_ratio: 0.5
+  val_ratio: 0.01
+  test_ratio: 0.49
+  use_vt: false
+  vt_threshold_tf: 0.2
+  vt_threshold_gene: 0.01
+  use_pca: true
+  pca_var_tf: 0.99
+  pca_var_gene: 0.99

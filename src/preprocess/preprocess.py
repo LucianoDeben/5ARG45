@@ -1,15 +1,14 @@
 import argparse
 import logging
+import sys
+
+sys.path.append("src")
+
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-
-import src
-
-# Add the src directory to the path
-src_dir = src.__path__[0]
 
 from utils.utils import load_config
 
@@ -17,6 +16,34 @@ from utils.utils import load_config
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+import pandas as pd
+from sklearn.decomposition import PCA
+
+
+def perform_pca(X, explained_variance_threshold=0.99):
+    """
+    Perform PCA on the dataset and return transformed data, PCA object, and features.
+
+    Args:
+        X (pd.DataFrame): The dataset containing features.
+        explained_variance_threshold (float): Threshold for cumulative explained variance (default: 0.99).
+
+    Returns:
+        X_transformed (pd.DataFrame): PCA-transformed dataset.
+        pca (PCA): Fitted PCA object.
+    """
+
+    # Initialize and fit PCA
+    pca = PCA(n_components=explained_variance_threshold)
+    X_pca = pca.fit_transform(X)
+
+    # Convert to DataFrame and add the target column
+    X_transformed = pd.DataFrame(
+        X_pca, columns=[f"PC{i+1}" for i in range(X_pca.shape[1])]
+    )
+
+    return (X_transformed, pca)
 
 
 def preprocess_tf_data(config: dict, standardize: bool = True):
@@ -346,4 +373,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = load_config(args.config_file)
-    preprocess_data(config)
+    preprocess_tf_data(config, standardize=True)
+    preprocess_gene_data(config, standardize=True, use_landmarks=True)
