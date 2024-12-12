@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from utils.evaluation import evaluate_regression_metrics
+from evaluation import evaluate_regression_metrics
 
 # It's better to set up your Python environment so you don't need to modify sys.path
 # But if necessary, adjust the path accordingly

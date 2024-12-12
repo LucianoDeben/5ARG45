@@ -19,3 +19,6 @@ preprocess:
   use_pca: true
   pca_var_tf: 0.99
   pca_var_gene: 0.99
+
+training:
+  cv_folds: 5

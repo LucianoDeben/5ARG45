@@ -1,92 +1,37 @@
-# Multimodal Deep Learning for Predicting Cancer Drug Response
+# Tumor Cell Viability Prediction Using Multimodal Data
 
-This repository contains the implementation of a multimodal deep learning framework for predicting cancer drug response by integrating perturbation transcriptomics data and drug chemical descriptors. The project follows a systematic progression from simple ML benchmarks to advanced multimodal DL models.
+## Background and Motivation
 
----
+Precision medicine is transforming cancer treatment by tailoring therapies to the molecular profiles of individual tumors. This personalized approach seeks to maximize treatment efficacy while minimizing side effects, enabling better outcomes for patients. Transcriptomics data, which provide insights into gene expression changes within tumors, play a critical role in understanding how cells respond to drugs. However, drug characteristics—such as their chemical structure and physicochemical properties—are equally vital for determining treatment success.
 
-## **Project Overview**
+This project aims to integrate **perturbation transcriptomics data** and **drug chemical descriptors** to develop a multimodal predictive framework for cancer drug response. By combining these two complementary data types, the project aspires to improve the accuracy of cell viability predictions, supporting the selection of effective therapies for individual patients.
 
-- **Objective:** Predict cancer cell viability in response to drug treatments using transcriptomics and drug descriptors.
-- **Milestones:** Establish baseline results, incrementally increase model complexity, and develop a multimodal framework.
-- **Status:** In progress.
+### Vision for the Multimodal Framework
 
----
+- **Transcriptomics Data**: Capturing the biological response of cancer cells to drug treatments.
+- **Chemical Descriptors**: Representing the molecular structure and activity of drugs.
+- **Multimodal Integration**: Combining these modalities through advanced deep learning techniques to predict tumor cell viability.
 
-## **Step-by-Step Plan**
-
-### **Phase 1: Reproducing Baseline Results with Simple ML Models**
-
-- [x] **Task 1.1:** Set up the project repository and environment.
-  - Install required packages (e.g., `scikit-learn`, `pandas`, `numpy`).
-  - Load and preprocess the gene expression derived TF dataset.
-- [x] **Task 1.2:** Implement Ridge and Lasso regression models.
-  - Train models on the TF dataset.
-  - Evaluate models using metrics (e.g., RMSE, R²).
-- [ ] **Task 1.3:** Compare results with earlier research.
-  - Report findings in a baseline results summary.
+The ultimate goal is to develop an explainable, scalable, and robust predictive tool that can generalize across diverse datasets, providing actionable insights for drug discovery and personalized medicine.
 
 ---
 
-### **Phase 2: Developing Unimodal Deep Learning Models**
+## Project Overview
 
-- [ ] **Task 2.1:** Design a pipeline for TF or gene expression data.
-  - Preprocess high-dimensional data for DL models.
-  - Apply dimensionality reduction (e.g., PCA, autoencoders) if necessary.
-- [ ] **Task 2.2:** Implement unimodal DL models.
-  - Train neural networks (e.g., MLPs, CNNs) on the TF dataset.
-  - Evaluate model performance using the same metrics as in Phase 1.
-- [ ] **Task 2.3:** Compare unimodal DL results with baseline.
-  - Highlight improvements and challenges in a summary report.
+This project is divided into multiple **phases**, each building upon the previous one to gradually increase the predictive power and complexity of the model:
 
----
+1. **Phase 1 - Baseline with Simple ML Models**  
+   Establish benchmarks for predictive performance using standard machine learning regression models on transcriptomics data. This phase will focus on understanding the baseline predictive capability of simpler models and setting the stage for comparisons with more advanced approaches in later phases.
 
-### **Phase 3: Multimodal Modeling with Drug Descriptors**
+2. **Phase 2 - Exploring Feature Representations**  
+   Introduce additional feature engineering methods and explore advanced regression models to improve performance beyond the baseline.
 
-- [ ] **Task 3.1:** Preprocess and integrate drug descriptor data.
-  - Represent drugs using molecular descriptors or SMILES strings.
-  - Prepare data loaders for both transcriptomics and drug datasets.
-- [ ] **Task 3.2:** Develop the multimodal integration framework.
-  - Combine transcriptomics and drug data using vector concatenation.
-  - Experiment with attention mechanisms or transformers.
-- [ ] **Task 3.3:** Train and evaluate the multimodal model.
-  - Assess model performance on internal and external datasets.
-  - Compare multimodal results with unimodal benchmarks.
+3. **Phase 3 - Multimodal Deep Learning**  
+   Integrate transcriptomics data with chemical descriptors into a unified deep learning framework, hypothesizing that this multimodal approach will significantly outperform unimodal models.
 
----
+4. **Phase 4 - Generalization and Robustness**  
+   Test the framework on external datasets to assess its ability to generalize and deliver consistent performance across diverse conditions.
 
-### **Phase 4: Validation and Results Analysis**
+## Notes
 
-- [ ] **Task 4.1:** Test on external datasets (e.g., MIX-Seq, clinical data).
-- [ ] **Task 4.2:** Perform interpretability analysis.
-  - Identify critical genes and chemical descriptors influencing predictions.
-- [ ] **Task 4.3:** Finalize visualizations for results.
-  - Generate plots for comparison and interpretability insights.
-
----
-
-## **Expected Deliverables**
-
-1. **Codebase:** Fully implemented models for all phases.
-2. **Baseline Results Report:** Analysis of Ridge and Lasso regression performance.
-3. **Model Comparisons:** Evaluation of unimodal and multimodal frameworks.
-4. **Final Report:** Comprehensive documentation of methods, results, and insights.
-5. **Presentation:** Slides summarizing key findings and future directions.
-
----
-
-## **How to Use This Repository**
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/LucianoDeben/5ARG45.git
-   ```
-
-### Key Features of This README
-
-1. **Step-by-Step Tasks**: Tasks are divided into phases, with a logical progression from simple to complex models.
-2. **Progress Tracking**: Checkboxes allow for real-time tracking of milestones.
-3. **Deliverables and Usage**: Provides clarity on what to expect and how to use the repository.
-4. **Future Extendability**: Each phase is modular, making it easier to adapt as the project evolves.
-
-Let me know if you'd like further adjustments!
+- Please note that all hyperparamters and other configuration settings are set in `config.yaml` for syncing between different scripts.

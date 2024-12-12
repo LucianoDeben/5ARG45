@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from utils.evaluation import evaluate_regression_metrics
+from evaluation import evaluate_regression_metrics
 
 
 # Updated Training Function with Best Practices

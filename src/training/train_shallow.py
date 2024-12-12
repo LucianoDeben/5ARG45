@@ -1,9 +1,6 @@
-from typing import Dict
-
-from matplotlib import pyplot as plt
 from sklearn.metrics import mean_squared_error
 
-from utils.evaluation import evaluate_regression_metrics
+from evaluation import evaluate_regression_metrics
 
 
 def train_shallow_model(model, X_train, y_train, X_val, y_val, epochs=50):
