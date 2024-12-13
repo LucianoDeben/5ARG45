@@ -84,19 +84,6 @@ def evaluate_model(
     device="cpu",
     calculate_metrics=True,
 ):
-    """
-    Evaluate a PyTorch model.
-
-    Args:
-        model (torch.nn.Module): Trained model.
-        test_loader (DataLoader): DataLoader for the test set.
-        criterion (torch.nn.Module): Loss function (e.g., MSELoss).
-        device (str): Device to run evaluation on.
-        calculate_metrics (bool): Whether to compute additional metrics.
-
-    Returns:
-        dict: Metrics including MSE, MAE, R², Pearson Correlation.
-    """
     model.to(device)
     model.eval()
 
@@ -107,7 +94,9 @@ def evaluate_model(
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            outputs = model(X_batch)
+            outputs = model(
+                X_batch
+            ).squeeze()  # Ensure the output has the correct shape
             loss = criterion(outputs, y_batch)
             test_loss += loss.item() * X_batch.size(0)
             y_true.append(y_batch)
@@ -120,7 +109,7 @@ def evaluate_model(
 
     metrics = {"MSE": test_loss}
     if calculate_metrics:
-        mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        _, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
         metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
 
     return metrics

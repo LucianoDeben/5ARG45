@@ -1,56 +1,67 @@
 import torch
 import torch.nn as nn
 
+ACTIVATION_MAP = {
+    "relu": nn.ReLU,
+    "leakyrelu": nn.LeakyReLU,
+    "tanh": nn.Tanh,
+    "sigmoid": nn.Sigmoid,
+    "gelu": nn.GELU,
+    "identity": nn.Identity,
+    "prelu": nn.PReLU,
+    "elu": nn.ELU,
+}
+
 
 class FlexibleFCNN(nn.Module):
     def __init__(
         self,
         input_dim,
-        hidden_layers=(512, 256, 128),
-        dropout_rate=0.3,
-        activation=nn.GELU,
-        output_activation=None,
-        regularization_weight=1e-4,
+        hidden_dims,
+        output_dim,
+        activation_fn="relu",
+        dropout_prob=0.0,
+        residual=False,
+        use_batchnorm=True,
     ):
-        """
-        A flexible fully connected neural network (FCNN) with advanced features.
-
-        Args:
-            input_dim (int): Input dimension of the data.
-            hidden_layers (tuple): Dimensions of hidden layers.
-            dropout_rate (float): Dropout rate for regularization.
-            activation (nn.Module): Activation function for hidden layers.
-            output_activation (nn.Module or None): Activation function for the output layer (e.g., nn.Sigmoid).
-            regularization_weight (float): Weight for L2 regularization.
-        """
         super(FlexibleFCNN, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = output_dim
+        self.residual = residual
+        self.use_batchnorm = use_batchnorm
+        self.dropout_prob = dropout_prob
 
+        if isinstance(activation_fn, str):
+            if activation_fn.lower() not in ACTIVATION_MAP:
+                raise ValueError(f"Unknown activation function {activation_fn}")
+            self.activation_fn = ACTIVATION_MAP[activation_fn.lower()]()
+        else:
+            self.activation_fn = activation_fn
+
+        layer_dims = [input_dim] + hidden_dims
         self.layers = nn.ModuleList()
-        self.film_scale = nn.ModuleList()
-        self.film_shift = nn.ModuleList()
-        self.layer_norms = nn.ModuleList()
-        self.dropout_rate = dropout_rate
-        self.activation = activation()
-        self.output_activation = output_activation() if output_activation else None
+        self.bns = nn.ModuleList() if use_batchnorm else None
+        self.dropouts = nn.ModuleList()
 
-        prev_dim = input_dim
-        for layer_dim in hidden_layers:
-            self.layers.append(nn.Linear(prev_dim, layer_dim))
-            self.layer_norms.append(nn.LayerNorm(layer_dim))
-            self.film_scale.append(nn.Linear(prev_dim, prev_dim))
-            self.film_shift.append(nn.Linear(prev_dim, prev_dim))
-            prev_dim = layer_dim
+        for i in range(len(layer_dims) - 1):
+            in_dim = layer_dims[i]
+            out_dim = layer_dims[i + 1]
+            self.layers.append(nn.Linear(in_dim, out_dim))
 
-        self.output_layer = nn.Linear(prev_dim, 1)
-        self.dropout = nn.Dropout(dropout_rate)
+            if use_batchnorm:
+                self.bns.append(nn.BatchNorm1d(out_dim))
 
-        self.regularization_weight = regularization_weight
+            if dropout_prob > 0.0:
+                self.dropouts.append(nn.Dropout(dropout_prob))
+            else:
+                self.dropouts.append(nn.Identity())
 
-        # Initialize weights
+        self.output_layer = nn.Linear(layer_dims[-1], output_dim)
+
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """Applies Xavier initialization to all layers."""
         for layer in self.layers:
             nn.init.xavier_uniform_(layer.weight)
             if layer.bias is not None:
@@ -61,14 +72,36 @@ class FlexibleFCNN(nn.Module):
             nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x):
-        for i, (layer, norm) in enumerate(zip(self.layers, self.layer_norms)):
-            x = layer(x)  # Apply the linear layer
-            if i > 0:  # Apply FiLM only after the first layer
-                scale = torch.sigmoid(self.film_scale[i](x))
-                shift = self.film_shift[i](x)
-                x = scale * x + shift
-            x = norm(x)  # Layer normalization
-            x = self.activation(x)  # Non-linear activation
-            x = self.dropout(x)  # Dropout
-        x = self.output_layer(x)  # Output layer
-        return x
+        for i, layer in enumerate(self.layers):
+            residual_input = x
+            x = layer(x)
+
+            if self.use_batchnorm:
+                x = self.bns[i](x)
+
+            x = self.dropouts[i](x)
+            x = self.activation_fn(x)
+
+            if self.residual and residual_input.shape == x.shape:
+                x = x + residual_input
+
+        x = self.output_layer(x)
+        return x.squeeze()  # Ensure the output has the correct shape
+
+    def get_regularization_loss(self, l1_lambda=0.0, l2_lambda=0.0):
+        reg_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+        if l1_lambda == 0.0 and l2_lambda == 0.0:
+            return reg_loss
+
+        for layer in self.layers:
+            if l1_lambda > 0.0:
+                reg_loss += l1_lambda * torch.sum(torch.abs(layer.weight))
+            if l2_lambda > 0.0:
+                reg_loss += l2_lambda * torch.sum(layer.weight**2)
+
+        if l1_lambda > 0.0:
+            reg_loss += l1_lambda * torch.sum(torch.abs(self.output_layer.weight))
+        if l2_lambda > 0.0:
+            reg_loss += l2_lambda * torch.sum(self.output_layer.weight**2)
+
+        return reg_loss

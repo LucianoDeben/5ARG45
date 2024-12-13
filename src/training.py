@@ -14,25 +14,6 @@ def train_model(
     early_stopping_patience=5,
     model_name="Model",
 ):
-    """
-    Train a PyTorch model with best practices.
-
-    Args:
-        model (torch.nn.Module): Model to be trained.
-        train_loader (DataLoader): DataLoader for the training set.
-        val_loader (DataLoader): DataLoader for the validation set.
-        criterion (torch.nn.Module): Loss function (e.g., MSELoss).
-        optimizer (torch.optim.Optimizer): Optimizer (e.g., Adam, SGD).
-        scheduler (torch.optim.lr_scheduler): Learning rate scheduler.
-        epochs (int): Number of training epochs.
-        device (str): Device to run training on (e.g., "cuda", "cpu").
-        gradient_clipping (float): Max norm for gradient clipping.
-        early_stopping_patience (int): Number of epochs to wait for improvement before stopping.
-        model_name (str): Name of the model for logging purposes.
-
-    Returns:
-        Tuple[list, list]: Training and validation losses per epoch.
-    """
     model.to(device)
     train_losses = []
     val_losses = []
@@ -49,7 +30,9 @@ def train_model(
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
-            outputs = model(X_batch)
+            outputs = model(
+                X_batch
+            ).squeeze()  # Ensure the output has the correct shape
             loss = criterion(outputs, y_batch)
             loss.backward()
 
@@ -68,7 +51,9 @@ def train_model(
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                outputs = model(X_batch)
+                outputs = model(
+                    X_batch
+                ).squeeze()  # Ensure the output has the correct shape
                 loss = criterion(outputs, y_batch)
                 val_loss += loss.item() * X_batch.size(0)
 

@@ -2,10 +2,14 @@ import logging
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.optim as optim
 from sklearn import clone
 from sklearn.model_selection import RandomizedSearchCV, cross_val_score
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from evaluation import evaluate_shallow_model
+from evaluation import evaluate_model, evaluate_shallow_model
+from training import train_model
 from visualizations import (
     create_coefficients_visualization,
     create_feature_importance_visualization,
@@ -170,3 +174,65 @@ class NonLinearModelPipeline:
         create_feature_importance_visualization(
             self.trained_models, self.feature_sets, top_n, save_path=save_path
         )
+
+
+class DLModelsPipeline:
+    def __init__(self, model_class, feature_sets, model_params, epochs=20):
+        self.model_class = model_class
+        self.feature_sets = feature_sets
+        self.model_params = model_params
+        self.trained_models = {}
+        self.results = {}
+        self.epochs = epochs
+
+    def train_and_evaluate(self):
+        for feature_name, (
+            train_loader,
+            val_loader,
+            test_loader,
+        ) in self.feature_sets.items():
+            logging.debug(f"Training model on {feature_name}...")
+
+            # Dynamically create the model for each feature set
+            input_dim = train_loader.dataset[0][0].shape[0]
+            model = self.model_class(input_dim=input_dim, **self.model_params)
+
+            # Train the model on the full training data
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            criterion = torch.nn.MSELoss()
+            optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+            scheduler = ReduceLROnPlateau(
+                optimizer, mode="min", patience=5, verbose=True
+            )
+            train_model(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epochs=self.epochs,
+                device=device,
+                gradient_clipping=1.0,
+                early_stopping_patience=10,
+            )
+
+            # Store the trained model
+            self.trained_models[feature_name] = model
+
+            # Evaluate the model on the test set
+            metrics = evaluate_model(
+                model=model,
+                test_loader=test_loader,
+                criterion=criterion,
+                device=device,
+                calculate_metrics=True,
+            )
+
+            # Store the evaluation metrics
+            self.results[feature_name] = metrics
+
+    def get_results(self):
+        results_df = pd.DataFrame.from_dict(self.results, orient="index")
+        results_df.index.name = "Feature Set"
+        return results_df.sort_index()
