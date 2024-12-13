@@ -5,7 +5,7 @@ import pandas as pd
 from sklearn import clone
 from sklearn.model_selection import RandomizedSearchCV, cross_val_score
 
-from training.train_shallow import evaluate_shallow_model
+from evaluation import evaluate_shallow_model
 from visualizations import (
     create_coefficients_visualization,
     create_feature_importance_visualization,

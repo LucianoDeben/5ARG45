@@ -182,8 +182,14 @@ def preprocess_gene_data(
         logging.debug(f"Shape after dropping missing data: {final_df.shape}")
 
         # Save the final dataset
-        logging.debug("Saving the final dataset.")
-        final_df.to_csv(config["data_paths"]["preprocessed_gene_file"], index=False)
+        if use_landmarks:
+            logging.debug("Saving the final dataset with landmark genes.")
+            final_df.to_csv(
+                config["data_paths"]["preprocessed_landmark_file"], index=False
+            )
+        else:
+            logging.debug("Saving the final dataset with all genes.")
+            final_df.to_csv(config["data_paths"]["preprocessed_gene_file"], index=False)
         logging.info("Preprocessing completed successfully.")
         return final_df
 
@@ -418,3 +424,4 @@ if __name__ == "__main__":
     config = load_config(args.config_file)
     preprocess_tf_data(config, standardize=True)
     preprocess_gene_data(config, standardize=True, use_landmarks=True)
+    preprocess_gene_data(config, standardize=True, use_landmarks=False)

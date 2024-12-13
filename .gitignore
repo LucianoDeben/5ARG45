@@ -174,3 +174,9 @@ data/test
 *.tsv
 *.bin
 *.zip
+
+# Assets
+assets/
+
+# Models
+models/
