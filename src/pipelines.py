@@ -177,62 +177,121 @@ class NonLinearModelPipeline:
 
 
 class DLModelsPipeline:
-    def __init__(self, model_class, feature_sets, model_params, epochs=20):
-        self.model_class = model_class
+    """
+    A flexible pipeline for training and evaluating multiple deep learning models
+    across multiple feature sets. Model, optimizer, scheduler, and training parameters
+    are all configurable via a dictionary. This allows quick iteration on different
+    architectures and training setups.
+    """
+
+    def __init__(self, feature_sets, model_configs):
+        """
+        Args:
+            feature_sets (dict): A dictionary of the form:
+                {
+                  "Feature Set Name": (train_loader, val_loader, test_loader),
+                  ...
+                }
+            model_configs (dict): A dictionary specifying model and training configurations:
+                {
+                  "ModelName": {
+                    "model_class": MyModelClass,
+                    "model_params": {...},  # Params passed to model_class
+                    "criterion": torch.nn.MSELoss(), # or any other loss
+                    "optimizer_class": torch.optim.AdamW, # or others
+                    "optimizer_params": {"lr": 0.001, "weight_decay": 1e-4},
+                    "scheduler_class": torch.optim.lr_scheduler.ReduceLROnPlateau,
+                    "scheduler_params": {"mode":"min", "patience":5, "verbose":True},
+                    "train_params": {
+                        "epochs": 20,
+                        "gradient_clipping": 1.0,
+                        "early_stopping_patience": 10
+                    }
+                  },
+                  ...
+                }
+        """
         self.feature_sets = feature_sets
-        self.model_params = model_params
-        self.trained_models = {}
-        self.results = {}
-        self.epochs = epochs
+        self.model_configs = model_configs
+        self.trained_models = {}  # {(feature_set, model_name): trained_model}
+        self.results = {}  # {(feature_set, model_name): metrics_df}
 
     def train_and_evaluate(self):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
         for feature_name, (
             train_loader,
             val_loader,
             test_loader,
         ) in self.feature_sets.items():
-            logging.debug(f"Training model on {feature_name}...")
+            logging.debug(f"Feature set: {feature_name}")
 
-            # Dynamically create the model for each feature set
-            input_dim = train_loader.dataset[0][0].shape[0]
-            model = self.model_class(input_dim=input_dim, **self.model_params)
-
-            # Train the model on the full training data
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            criterion = torch.nn.MSELoss()
-            optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-            scheduler = ReduceLROnPlateau(
-                optimizer, mode="min", patience=5, verbose=True
-            )
-            train_model(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                criterion=criterion,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epochs=self.epochs,
-                device=device,
-                gradient_clipping=1.0,
-                early_stopping_patience=10,
+            # Determine input dimension from the dataset
+            sample_x, _ = train_loader.dataset[0]
+            input_dim = (
+                sample_x.shape[0] if hasattr(sample_x, "shape") else len(sample_x)
             )
 
-            # Store the trained model
-            self.trained_models[feature_name] = model
+            for model_name, cfg in self.model_configs.items():
+                logging.debug(f"Training model '{model_name}' on {feature_name}...")
 
-            # Evaluate the model on the test set
-            metrics = evaluate_model(
-                model=model,
-                test_loader=test_loader,
-                criterion=criterion,
-                device=device,
-                calculate_metrics=True,
-            )
+                # Instantiate the model
+                model_class = cfg["model_class"]
+                model_params = cfg.get("model_params", {})
+                model = model_class(input_dim=input_dim, **model_params).to(device)
 
-            # Store the evaluation metrics
-            self.results[feature_name] = metrics
+                # Setup criterion, optimizer, scheduler
+                criterion = cfg["criterion"]
+                optimizer_class = cfg["optimizer_class"]
+                optimizer_params = cfg.get("optimizer_params", {})
+                optimizer = optimizer_class(model.parameters(), **optimizer_params)
+
+                scheduler_class = cfg.get("scheduler_class", None)
+                scheduler_params = cfg.get("scheduler_params", {})
+                scheduler = None
+                if scheduler_class is not None:
+                    scheduler = scheduler_class(optimizer, **scheduler_params)
+
+                # Training parameters
+                train_params = cfg.get("train_params", {})
+                epochs = train_params.get("epochs", 20)
+                gradient_clipping = train_params.get("gradient_clipping", None)
+                early_stopping_patience = train_params.get(
+                    "early_stopping_patience", None
+                )
+
+                # Train the model
+                train_model(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epochs=epochs,
+                    device=device,
+                    gradient_clipping=gradient_clipping,
+                    early_stopping_patience=early_stopping_patience,
+                )
+
+                # Evaluate on the test set
+                metrics = evaluate_model(
+                    model=model,
+                    test_loader=test_loader,
+                    criterion=criterion,
+                    device=device,
+                    calculate_metrics=True,
+                )
+
+                # Store the trained model and metrics
+                self.trained_models[(feature_name, model_name)] = model
+                self.results[(feature_name, model_name)] = metrics
 
     def get_results(self):
+        # Convert results to a DataFrame for easy viewing
+        # Keys are (Feature Set, Model Name)
         results_df = pd.DataFrame.from_dict(self.results, orient="index")
-        results_df.index.name = "Feature Set"
+        results_df.index = pd.MultiIndex.from_tuples(
+            results_df.index, names=["Feature Set", "Model Name"]
+        )
         return results_df.sort_index()

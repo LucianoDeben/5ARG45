@@ -2,7 +2,7 @@ import argparse
 import logging
 import sys
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 sys.path.append("src")
 
@@ -375,40 +375,73 @@ def split_data(
     df,
     config,
     target_name="target_name",
+    stratify_by=None,
     random_state=42,
 ):
     """
-    Split the DataFrame into train, validation, and test sets, and then into features and labels.
+    Split the DataFrame into train, validation, and test sets, optionally stratified by a column.
 
     Args:
         df (pd.DataFrame): The preprocessed DataFrame.
-        train_ratio (float): The ratio of the training set.
-        val_ratio (float): The ratio of the validation set.
-        test_ratio (float): The ratio of the test set.
+        config (dict): Configuration dictionary for train/val/test ratios.
         target_name (str): The name of the target column.
+        stratify_by (str): Column name to stratify by (e.g., 'cell_mfc_name').
         random_state (int): The random seed for reproducibility.
 
     Returns:
         tuple: Splits of the dataset into features and labels for train, validation, and test sets.
     """
-    # Split into train and temp (validation + test)
-    train_df, temp_df = train_test_split(
-        df, test_size=1 - config["preprocess"]["train_ratio"], random_state=random_state
-    )
+    if stratify_by:
+        groups = df[stratify_by]
 
-    # Split temp into validation and test
-    val_df, test_df = train_test_split(
-        temp_df,
-        test_size=config["preprocess"]["test_ratio"]
-        / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
-        random_state=random_state,
-    )
+        # Grouped split: train and temp (val + test)
+        gss = GroupShuffleSplit(
+            n_splits=1,
+            test_size=1 - config["preprocess"]["train_ratio"],
+            random_state=random_state,
+        )
+        train_idx, temp_idx = next(gss.split(df, groups=groups, groups=groups))
 
-    # Split the datasets into features and labels (X, y)
+        train_df = df.iloc[train_idx]
+        temp_df = df.iloc[temp_idx]
+
+        # Further split temp into validation and test
+        gss_temp = GroupShuffleSplit(
+            n_splits=1,
+            test_size=config["preprocess"]["test_ratio"]
+            / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
+            random_state=random_state,
+        )
+        val_idx, test_idx = next(
+            gss_temp.split(
+                temp_df, groups=temp_df[stratify_by], groups=temp_df[stratify_by]
+            )
+        )
+
+        val_df = temp_df.iloc[val_idx]
+        test_df = temp_df.iloc[test_idx]
+    else:
+        # Default randomized splitting if no stratification is specified
+        train_df, temp_df = train_test_split(
+            df,
+            test_size=1 - config["preprocess"]["train_ratio"],
+            random_state=random_state,
+        )
+        val_df, test_df = train_test_split(
+            temp_df,
+            test_size=config["preprocess"]["test_ratio"]
+            / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
+            random_state=random_state,
+        )
+
+    # Split datasets into features (X) and target labels (y)
     X_train, y_train = train_df.drop(target_name, axis=1), train_df[target_name]
     X_val, y_val = val_df.drop(target_name, axis=1), val_df[target_name]
     X_test, y_test = test_df.drop(target_name, axis=1), test_df[target_name]
 
+    print(
+        f"Train Shape: {X_train.shape}, Validation Shape: {X_val.shape}, Test Shape: {X_test.shape}"
+    )
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 

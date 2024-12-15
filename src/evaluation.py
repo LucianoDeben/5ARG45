@@ -3,29 +3,7 @@ import torch
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-
-def evaluate_regression_metrics(y_true, y_pred):
-    """
-    Evaluate regression metrics.
-
-    Args:
-        y_true: True target values (NumPy array or PyTorch tensor).
-        y_pred: Predicted target values (NumPy array or PyTorch tensor).
-
-    Returns:
-        Tuple of mean squared error, mean absolute error, R^2, and Pearson correlation coefficient.
-    """
-    if isinstance(y_true, torch.Tensor):
-        y_true = y_true.cpu().numpy()
-    if isinstance(y_pred, torch.Tensor):
-        y_pred = y_pred.cpu().numpy()
-
-    mse = mean_squared_error(y_true, y_pred)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    pearson_coef, _ = pearsonr(y_true.flatten(), y_pred.flatten())
-
-    return mse, mae, r2, pearson_coef
+from training import _forward_pass
 
 
 def weighted_score_func(y_true, y_pred):
@@ -77,13 +55,20 @@ def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     return test_loss
 
 
-def evaluate_model(
-    model,
-    test_loader,
-    criterion,
-    device="cpu",
-    calculate_metrics=True,
-):
+def evaluate_model(model, test_loader, criterion, device="cpu", calculate_metrics=True):
+    """
+    Evaluate a trained model on a test set.
+
+    Args:
+        model (nn.Module): Trained PyTorch model.
+        test_loader (DataLoader): DataLoader for test set.
+        criterion (callable): Loss function.
+        device (str): "cpu" or "cuda".
+        calculate_metrics (bool): If True, calculate additional regression metrics.
+
+    Returns:
+        metrics (dict): Dictionary with keys like "MSE", "MAE", "R²", "Pearson Correlation".
+    """
     model.to(device)
     model.eval()
 
@@ -92,24 +77,56 @@ def evaluate_model(
     y_pred = []
 
     with torch.no_grad():
-        for X_batch, y_batch in test_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            outputs = model(
-                X_batch
-            ).squeeze()  # Ensure the output has the correct shape
-            loss = criterion(outputs, y_batch)
-            test_loss += loss.item() * X_batch.size(0)
-            y_true.append(y_batch)
-            y_pred.append(outputs)
+        for batch in test_loader:
+            *X_batch, y_batch = batch
+            y_batch = y_batch.to(device)
+            outputs = _forward_pass(model, X_batch, device)
+            outputs = (
+                outputs.squeeze(dim=-1)
+                if outputs.dim() > 1 and outputs.size(-1) == 1
+                else outputs
+            )
 
-    # Finalize loss computation
+            loss = criterion(outputs, y_batch)
+            test_loss += loss.item() * y_batch.size(0)
+
+            y_true.append(y_batch.cpu())
+            y_pred.append(outputs.cpu())
+
     test_loss /= len(test_loader.dataset)
     y_true = torch.cat(y_true, dim=0)
     y_pred = torch.cat(y_pred, dim=0)
 
     metrics = {"MSE": test_loss}
     if calculate_metrics:
-        _, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        # Adjust to your use-case (e.g., if classification, you'd compute accuracy, etc.)
+        mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        # You might change or extend evaluate_regression_metrics to handle other tasks
         metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
 
     return metrics
+
+
+def evaluate_regression_metrics(y_true, y_pred):
+    """
+    Evaluate regression metrics: MSE, MAE, R², Pearson correlation.
+
+    Args:
+        y_true (tensor): True values.
+        y_pred (tensor): Predicted values.
+
+    Returns:
+        (mse, mae, r2, pearson_coef)
+    """
+
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.numpy()
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.numpy()
+
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    pearson_coef, _ = pearsonr(y_true.flatten(), y_pred.flatten())
+
+    return mse, mae, r2, pearson_coef
