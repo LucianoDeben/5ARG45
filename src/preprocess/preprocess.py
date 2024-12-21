@@ -50,10 +50,11 @@ def perform_pca(X, explained_variance_threshold=0.99):
 
 def preprocess_tf_data(config: dict, standardize: bool = True):
     """
-    Preprocess data according to the configuration.
+    Preprocess TF data according to the configuration.
 
     Args:
         config (dict): Configuration dictionary.
+        standardize (bool): Whether to standardize the features.
 
     Raises:
         Exception: If any step in the preprocessing fails.
@@ -64,7 +65,7 @@ def preprocess_tf_data(config: dict, standardize: bool = True):
         x_df = pd.read_csv(config["data_paths"]["x_file"], delimiter="\t")
         y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
 
-        # Remove the first column from x_df
+        # Remove the first column from x_df (perturbation ID)
         logging.debug("Removing the first column from x_df.")
         x_df = x_df.iloc[:, 1:]
 
@@ -74,17 +75,20 @@ def preprocess_tf_data(config: dict, standardize: bool = True):
             scaler = StandardScaler()
             x_df = pd.DataFrame(scaler.fit_transform(x_df), columns=x_df.columns)
 
-        # Only select the 'viability' column from y_df
-        logging.debug("Selecting the 'viability' column from y_df.")
-        y_df = y_df[["viability"]]
+        # Select relevant columns from y_df
+        logging.debug(
+            "Selecting 'viability', 'cell_mfc_name', and 'pert_dose' columns from y_df."
+        )
+        y_df = y_df[["viability", "cell_mfc_name", "pert_dose"]]
 
-        # Check if x_df and y_df have the same length, then concatenate/merge them
+        # Check if x_df and y_df have the same length
         if x_df.shape[0] != y_df.shape[0]:
             logging.error(
                 "The number of rows in x_df and y_df do not match. Cannot merge."
             )
             raise ValueError("The number of rows in x_df and y_df do not match.")
 
+        # Concatenate the processed x_df with y_df
         logging.debug("Concatenating x_df and y_df.")
         final_df = pd.concat([x_df, y_df], axis=1)
 
@@ -97,33 +101,25 @@ def preprocess_tf_data(config: dict, standardize: bool = True):
         logging.debug("Saving the final dataset.")
         final_df.to_csv(config["data_paths"]["preprocessed_tf_file"], index=False)
         logging.info("Preprocessing completed successfully.")
+
         return final_df
 
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {e}")
-        raise
-    except pd.errors.EmptyDataError as e:
-        logging.error(f"Empty data error: {e}")
-        raise
-    except pd.errors.ParserError as e:
-        logging.error(f"Parsing error: {e}")
-        raise
-    except ValueError as e:
-        logging.error(f"Value error: {e}")
-        raise
     except Exception as e:
         logging.error(f"Preprocessing failed: {e}")
         raise
 
 
 def preprocess_gene_data(
-    config: dict, standardize: bool = True, use_landmarks: bool = True
+    config: dict, standardize: bool = True, use_landmarks: bool = True, chunk_size=2500
 ):
     """
-    Preprocess data according to the configuration.
+    Preprocess gene expression data with memory-efficient writing.
 
     Args:
         config (dict): Configuration dictionary.
+        standardize (bool): Whether to standardize the features.
+        use_landmarks (bool): Whether to use landmark genes only.
+        chunk_size (int): Chunk size for writing large CSV files.
 
     Raises:
         Exception: If any step in the preprocessing fails.
@@ -131,18 +127,13 @@ def preprocess_gene_data(
     try:
         # Load datasets
         logging.debug("Loading datasets.")
-
-        # Get gene expressions data from binary file and reshape it
-        X_rna = np.fromfile(config["data_paths"]["rna_file"], dtype=np.float32)
-        X_rna = X_rna.reshape(31567, -1)
-
-        # Get the gene information
+        X_rna = np.fromfile(config["data_paths"]["rna_file"], dtype=np.float32).reshape(
+            31567, -1
+        )
         geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
-
-        # Get the cell line information and viability data
         y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
 
-        # Select genes based on the user's choice
+        # Select genes based on user's choice
         if use_landmarks:
             logging.debug("Using landmark genes.")
             selected_genes = geneinfo[geneinfo.feature_space == "landmark"]
@@ -150,21 +141,14 @@ def preprocess_gene_data(
             logging.debug("Using all genes.")
             selected_genes = geneinfo
 
-        # Select the corresponding gene expression data
+        # Select corresponding gene expression data
         selected_gene_indices = selected_genes.index
         X_selected = X_rna[:, selected_gene_indices]
         X_selected_df = pd.DataFrame(
             X_selected, index=y_df.index, columns=selected_genes.gene_symbol
         )
 
-        # Remove the first column from X_selected_df
-        logging.debug("Removing the first column from X_selected_df.")
-        X_selected_df = X_selected_df.iloc[:, 1:]
-        logging.debug(
-            f"Shape of x_df after removing the first column: {X_selected_df.shape}"
-        )
-
-        # Standardize the gene expression data if required
+        # Standardize data if required
         if standardize:
             logging.debug("Standardizing gene expression data.")
             scaler = StandardScaler()
@@ -172,39 +156,35 @@ def preprocess_gene_data(
                 scaler.fit_transform(X_selected_df), columns=X_selected_df.columns
             )
 
-        # Merge the gene expression data with the viability scores
-        logging.debug("Merging gene expression data with viability scores.")
-        final_df = pd.concat([X_selected_df, y_df[["viability"]]], axis=1)
+        # Merge with additional columns
+        logging.debug(
+            "Merging gene expression data with 'viability', 'cell_mfc_name', and 'pert_dose'."
+        )
+        final_df = pd.concat(
+            [X_selected_df, y_df[["viability", "cell_mfc_name", "pert_dose"]]], axis=1
+        )
 
-        # Remove rows with any NaN values
-        logging.debug(f"Handling missing data, initial shape: {final_df.shape}")
+        # Handle missing data
         final_df.dropna(inplace=True)
-        logging.debug(f"Shape after dropping missing data: {final_df.shape}")
+        logging.debug(f"Final DataFrame shape: {final_df.shape}")
 
-        # Save the final dataset
-        if use_landmarks:
-            logging.debug("Saving the final dataset with landmark genes.")
-            final_df.to_csv(
-                config["data_paths"]["preprocessed_landmark_file"], index=False
-            )
-        else:
-            logging.debug("Saving the final dataset with all genes.")
-            final_df.to_csv(config["data_paths"]["preprocessed_gene_file"], index=False)
-        logging.info("Preprocessing completed successfully.")
+        # Write to CSV in chunks to avoid memory issues
+        logging.debug("Saving the preprocessed DataFrame in chunks.")
+        output_file = (
+            config["data_paths"]["preprocessed_landmark_file"]
+            if use_landmarks
+            else config["data_paths"]["preprocessed_gene_file"]
+        )
+
+        with open(output_file, mode="w", newline="") as f:
+            for start in range(0, final_df.shape[0], chunk_size):
+                chunk = final_df.iloc[start : start + chunk_size]
+                write_header = start == 0  # Write the header only once
+                chunk.to_csv(f, mode="a", header=write_header, index=False)
+
+        logging.info("Preprocessing and chunked saving completed successfully.")
         return final_df
 
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {e}")
-        raise
-    except pd.errors.EmptyDataError as e:
-        logging.error(f"Empty data error: {e}")
-        raise
-    except pd.errors.ParserError as e:
-        logging.error(f"Parsing error: {e}")
-        raise
-    except ValueError as e:
-        logging.error(f"Value error: {e}")
-        raise
     except Exception as e:
         logging.error(f"Preprocessing failed: {e}")
         raise
@@ -376,6 +356,7 @@ def split_data(
     config,
     target_name="target_name",
     stratify_by=None,
+    keep_columns=None,  # List of additional columns to retain for downstream tasks
     random_state=42,
 ):
     """
@@ -386,11 +367,15 @@ def split_data(
         config (dict): Configuration dictionary for train/val/test ratios.
         target_name (str): The name of the target column.
         stratify_by (str): Column name to stratify by (e.g., 'cell_mfc_name').
+        keep_columns (list): List of additional columns to retain (e.g., 'pert_dose').
         random_state (int): The random seed for reproducibility.
 
     Returns:
         tuple: Splits of the dataset into features and labels for train, validation, and test sets.
     """
+    # Ensure keep_columns is a list
+    keep_columns = keep_columns or []
+
     if stratify_by:
         groups = df[stratify_by]
 
@@ -400,7 +385,7 @@ def split_data(
             test_size=1 - config["preprocess"]["train_ratio"],
             random_state=random_state,
         )
-        train_idx, temp_idx = next(gss.split(df, groups=groups, groups=groups))
+        train_idx, temp_idx = next(gss.split(df, groups=groups))
 
         train_df = df.iloc[train_idx]
         temp_df = df.iloc[temp_idx]
@@ -412,11 +397,7 @@ def split_data(
             / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
             random_state=random_state,
         )
-        val_idx, test_idx = next(
-            gss_temp.split(
-                temp_df, groups=temp_df[stratify_by], groups=temp_df[stratify_by]
-            )
-        )
+        val_idx, test_idx = next(gss_temp.split(temp_df, groups=temp_df[stratify_by]))
 
         val_df = temp_df.iloc[val_idx]
         test_df = temp_df.iloc[test_idx]
@@ -434,14 +415,29 @@ def split_data(
             random_state=random_state,
         )
 
-    # Split datasets into features (X) and target labels (y)
-    X_train, y_train = train_df.drop(target_name, axis=1), train_df[target_name]
-    X_val, y_val = val_df.drop(target_name, axis=1), val_df[target_name]
-    X_test, y_test = test_df.drop(target_name, axis=1), test_df[target_name]
+    # Drop target and additional columns from X
+    exclude_columns = [target_name, stratify_by] + keep_columns
+    exclude_columns = [col for col in exclude_columns if col in df.columns]
+
+    X_train = train_df.drop(columns=exclude_columns, errors="ignore")
+    y_train = train_df[target_name]
+
+    X_val = val_df.drop(columns=exclude_columns, errors="ignore")
+    y_val = val_df[target_name]
+
+    X_test = test_df.drop(columns=exclude_columns, errors="ignore")
+    y_test = test_df[target_name]
+
+    # Optionally retain the extra columns (e.g., pert_dose) for downstream analysis
+    if keep_columns:
+        train_df = train_df[keep_columns + [target_name]]
+        val_df = val_df[keep_columns + [target_name]]
+        test_df = test_df[keep_columns + [target_name]]
 
     print(
         f"Train Shape: {X_train.shape}, Validation Shape: {X_val.shape}, Test Shape: {X_test.shape}"
     )
+
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
