@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
+from tqdm import tqdm
 
 # Set logging
 logging.basicConfig(
@@ -74,7 +75,7 @@ def train_model(
     patience_counter = 0
     best_model_state = None
 
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs)):
         model.train()
         running_train_loss = 0.0
 
@@ -166,11 +167,11 @@ def train_multimodal_model(
     criterion,
     optimizer,
     scheduler=None,
-    epochs=50,
+    epochs=10,
     device="cpu",
     gradient_clipping=1.0,
     early_stopping_patience=5,
-    model_name="MultimodalModel",
+    model_name="Perturbinator",
     use_mixed_precision=True,
 ):
     """
@@ -219,10 +220,7 @@ def train_multimodal_model(
     train_losses = []
     val_losses = []
 
-    for epoch in range(epochs):
-        ##################################################
-        # 1) Training Phase
-        ##################################################
+    for epoch in tqdm(range(epochs)):
         model.train()
         running_train_loss = 0.0
         num_train_samples = 0
@@ -262,9 +260,6 @@ def train_multimodal_model(
         epoch_train_loss = running_train_loss / num_train_samples
         train_losses.append(epoch_train_loss)
 
-        ##################################################
-        # 2) Validation Phase
-        ##################################################
         model.eval()
         running_val_loss = 0.0
         num_val_samples = 0
