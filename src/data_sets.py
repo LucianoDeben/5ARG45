@@ -21,6 +21,7 @@ class PertubationDataset(Dataset):
         self,
         controls_file: str,
         perturbations_file: str,
+        smiles_dict: dict,
         plate_column: str = "det_plate",
         normalize: bool = False,
         n_rows: int = None,
@@ -36,6 +37,7 @@ class PertubationDataset(Dataset):
         super().__init__()
         self.controls_file = controls_file
         self.perturbations_file = perturbations_file
+        self.smiles_dict = smiles_dict
         self.plate_column = plate_column
         self.normalize = normalize
         self.n_rows = n_rows
@@ -131,7 +133,7 @@ class PertubationDataset(Dataset):
     def __getitem__(self, idx):
         """
         Return a single (control, perturbation) pair as a dictionary
-        with 'features', 'labels', 'metadata'.
+        with 'features', 'labels', 'metadata', and 'smiles'.
         """
         ctrl_id, pert_id = self.pairs[idx]
 
@@ -151,17 +153,27 @@ class PertubationDataset(Dataset):
             ctrl_expr = (ctrl_expr - self.global_min) / rng
             pert_expr = (pert_expr - self.global_min) / rng
 
-        # Retrieve metadata
+        # Retrieve metadata for control and perturbation
         ctrl_meta = self.ctrl_metadata.loc[ctrl_id].to_dict()
         pert_meta = self.pert_metadata.loc[pert_id].to_dict()
 
-        # Convert to PyTorch tensors
+        # Look up SMILES string for this perturbation (if 'pert_id' key exists in the metadata)
+        smiles_str = None
+        if self.smiles_dict is not None:
+            # e.g., pert_meta["pert_id"] might be the unique compound ID
+            # Make sure your metadata actually has "pert_id" in it
+            compound_id = pert_meta.get("pert_id", None)
+            if compound_id is not None:
+                smiles_str = self.smiles_dict.get(compound_id, None)
+
+        # Convert expressions to PyTorch tensors
         features = torch.from_numpy(ctrl_expr)
         labels = torch.from_numpy(pert_expr)
 
-        # For convenience, return a dictionary
+        # Return a dictionary containing all relevant info
         return {
             "features": features,  # control expression
             "labels": labels,  # perturbation expression
+            "smiles": smiles_str,  # retrieved SMILES string (if found)
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
