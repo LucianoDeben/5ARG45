@@ -4,6 +4,13 @@ import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 
+# Set logging
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+
 
 def _forward_pass(model, X_batch, device):
     """
@@ -147,6 +154,165 @@ def train_model(
 
     # Restore best model weights
     if best_model_state:
+        model.load_state_dict(best_model_state)
+
+    return train_losses, val_losses
+
+
+def train_multimodal_model(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    scheduler=None,
+    epochs=50,
+    device="cpu",
+    gradient_clipping=1.0,
+    early_stopping_patience=5,
+    model_name="MultimodalModel",
+    use_mixed_precision=True,
+):
+    """
+    A comprehensive training loop for a multimodal model that takes
+    (gene_expression, SMILES) as input and predicts perturbed gene expression.
+
+    Includes:
+      - Mixed precision (AMP),
+      - Gradient clipping,
+      - LR scheduling,
+      - Early stopping,
+      - Logging of train/val losses.
+
+    Args:
+        model (nn.Module): A multimodal PyTorch model whose forward expects:
+            model(features, smiles_list).
+        train_loader (DataLoader): Training DataLoader. Each batch must be a dict:
+            {
+              "features": Tensor[B, gene_dim],
+              "labels":   Tensor[B, gene_dim],
+              "smiles":   list of length B with SMILES strings,
+              ...
+            }
+        val_loader (DataLoader): Validation DataLoader with the same structure.
+        criterion (callable): Loss function (e.g., MSE).
+        optimizer (torch.optim.Optimizer): e.g. Adam or AdamW.
+        scheduler (callable, optional): LR scheduler with step(val_loss).
+        epochs (int): Max number of epochs.
+        device (str): "cpu" or "cuda".
+        gradient_clipping (float): Clip gradient norm to this value. If None, skip.
+        early_stopping_patience (int): Patience for early stopping on val loss.
+        model_name (str): For logging.
+        use_mixed_precision (bool): Whether to use AMP.
+
+    Returns:
+        (train_losses, val_losses): Lists containing average train/val loss per epoch.
+        The model's weights are restored to the best (lowest val loss) state.
+    """
+    model.to(device)
+    scaler = GradScaler(enabled=use_mixed_precision)
+
+    best_val_loss = float("inf")
+    patience_counter = 0
+    best_model_state = None
+
+    train_losses = []
+    val_losses = []
+
+    for epoch in range(epochs):
+        ##################################################
+        # 1) Training Phase
+        ##################################################
+        model.train()
+        running_train_loss = 0.0
+        num_train_samples = 0
+
+        for batch in train_loader:
+            # Extract relevant fields from batch
+            features = batch["features"].to(device)  # (B, gene_dim)
+            labels = batch["labels"].to(device)  # (B, gene_dim)
+            smiles_list = batch["smiles"]  # list of strings of length B
+
+            optimizer.zero_grad(set_to_none=True)
+
+            with autocast(
+                device_type=device,
+                enabled=use_mixed_precision,
+            ):
+                # Forward pass: multimodal
+                outputs = model(features, smiles_list)
+                # outputs shape: (B, gene_dim)
+                loss = criterion(outputs, labels)
+
+            # Backward + gradient step with AMP
+            scaler.scale(loss).backward()
+
+            if gradient_clipping is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            # Accumulate training loss
+            batch_size = features.size(0)
+            running_train_loss += loss.item() * batch_size
+            num_train_samples += batch_size
+
+        epoch_train_loss = running_train_loss / num_train_samples
+        train_losses.append(epoch_train_loss)
+
+        ##################################################
+        # 2) Validation Phase
+        ##################################################
+        model.eval()
+        running_val_loss = 0.0
+        num_val_samples = 0
+
+        with torch.no_grad(), autocast(
+            device_type=device,
+            enabled=use_mixed_precision,
+        ):
+            for batch in val_loader:
+                features = batch["features"].to(device)
+                labels = batch["labels"].to(device)
+                smiles_list = batch["smiles"]
+
+                outputs = model(features, smiles_list)
+                val_loss = criterion(outputs, labels)
+
+                batch_size = features.size(0)
+                running_val_loss += val_loss.item() * batch_size
+                num_val_samples += batch_size
+
+        epoch_val_loss = running_val_loss / num_val_samples
+        val_losses.append(epoch_val_loss)
+
+        # Step the scheduler if present
+        if scheduler is not None:
+            scheduler.step(epoch_val_loss)
+
+        # Logging
+        logging.info(
+            f"Epoch {epoch+1}/{epochs} - {model_name}, "
+            f"Train Loss: {epoch_train_loss:.4f}, "
+            f"Val Loss: {epoch_val_loss:.4f}"
+        )
+
+        # Early Stopping Check
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            patience_counter = 0
+            # Save best model state on CPU
+            best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= early_stopping_patience:
+                logging.info(f"Early stopping triggered at epoch {epoch+1}.")
+                break
+
+    # 3) Restore Best Model
+    if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
     return train_losses, val_losses
