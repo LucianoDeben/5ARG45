@@ -55,7 +55,59 @@ def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     return test_loss
 
 
-def evaluate_model(
+def evaluate_model(model, test_loader, criterion, device="cpu", calculate_metrics=True):
+    """
+    Evaluate a trained model on a test set.
+
+    Args:
+        model (nn.Module): Trained PyTorch model.
+        test_loader (DataLoader): DataLoader for test set.
+        criterion (callable): Loss function.
+        device (str): "cpu" or "cuda".
+        calculate_metrics (bool): If True, calculate additional regression metrics.
+
+    Returns:
+        metrics (dict): Dictionary with keys like "MSE", "MAE", "R²", "Pearson Correlation".
+    """
+    model.to(device)
+    model.eval()
+
+    test_loss = 0.0
+    y_true = []
+    y_pred = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            *X_batch, y_batch = batch
+            y_batch = y_batch.to(device)
+            outputs = _forward_pass(model, X_batch, device)
+            outputs = (
+                outputs.squeeze(dim=-1)
+                if outputs.dim() > 1 and outputs.size(-1) == 1
+                else outputs
+            )
+
+            loss = criterion(outputs, y_batch)
+            test_loss += loss.item() * y_batch.size(0)
+
+            y_true.append(y_batch.cpu())
+            y_pred.append(outputs.cpu())
+
+    test_loss /= len(test_loader.dataset)
+    y_true = torch.cat(y_true, dim=0)
+    y_pred = torch.cat(y_pred, dim=0)
+
+    metrics = {"MSE": test_loss}
+    if calculate_metrics:
+        # Adjust to your use-case (e.g., if classification, you'd compute accuracy, etc.)
+        mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        # You might change or extend evaluate_regression_metrics to handle other tasks
+        metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
+
+    return metrics
+
+
+def evaluate_multimodal_model(
     model, test_loader, criterion=None, device="cpu", calculate_metrics=True
 ):
     """
@@ -81,24 +133,12 @@ def evaluate_model(
     with torch.no_grad():
         for batch in test_loader:
             # Extract inputs
-            if isinstance(batch, dict):  # Multimodal case
-                features = batch["features"].to(device)  # Unperturbed expression
-                labels = batch["labels"].to(device)  # Perturbed expression
-                additional_inputs = batch.get(
-                    "smiles", None
-                )  # Additional inputs like SMILES
-                # Forward pass
-                outputs = model(features, additional_inputs)
-            else:  # Unimodal case
-                *inputs, labels = batch
-                labels = labels.to(device)
-                outputs = _forward_pass(model, inputs, device)
+            features = batch["features"].to(device).float()  # Gene expression
+            labels = batch["labels"].to(device).float()  # Perturbed expression
+            smiles_tokens = batch["smiles_tokens"].to(device).long()  # Tokenized SMILES
 
-            outputs = (
-                outputs.squeeze(dim=-1)
-                if outputs.dim() > 1 and outputs.size(-1) == 1
-                else outputs
-            )
+            # Forward pass
+            outputs = model(features, smiles_tokens)
 
             # Compute loss if criterion is provided
             if criterion is not None:
@@ -129,15 +169,26 @@ def evaluate_regression_metrics(y_true, y_pred):
     Evaluate regression metrics: MSE, MAE, R², Pearson correlation.
 
     Args:
-        y_true (array-like): True values.
-        y_pred (array-like): Predicted values.
+        y_true (array-like or tensor): True values.
+        y_pred (array-like or tensor): Predicted values.
 
     Returns:
         tuple: (mse, mae, r2, pearson_coef)
     """
-    mse = mean_squared_error(y_true.flatten(), y_pred.flatten())
-    mae = mean_absolute_error(y_true.flatten(), y_pred.flatten())
-    r2 = r2_score(y_true.flatten(), y_pred.flatten())
-    pearson_coef, _ = pearsonr(y_true.flatten(), y_pred.flatten())
+    # Convert PyTorch tensors to NumPy arrays if necessary
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.detach().cpu().numpy()
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.detach().cpu().numpy()
+
+    # Ensure the inputs are flattened
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+
+    # Calculate metrics
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    pearson_coef, _ = pearsonr(y_true, y_pred)
 
     return mse, mae, r2, pearson_coef

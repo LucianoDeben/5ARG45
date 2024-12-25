@@ -11,14 +11,7 @@ from torch.utils.data import Dataset
 class PerturbationDataset(Dataset):
     """
     A dataset that pairs a single control sample with a single perturbation sample
-    from the same plate. Data is fully loaded into memory for performance.
-
-    If a plate has multiple controls and multiple perturbations, we enumerate all
-    possible pairs (control_i, pert_j) in that plate. This ensures each __getitem__
-    only does in-memory lookups.
-
-    Now includes the option to load only "landmark" genes (based on col_metadata,
-    where feature_space=='landmark').
+    from the same plate. Includes tokenized SMILES as part of the output.
     """
 
     def __init__(
@@ -26,35 +19,41 @@ class PerturbationDataset(Dataset):
         controls_file: str,
         perturbations_file: str,
         smiles_dict: dict,
+        tokenizer,
         plate_column: str = "det_plate",
-        normalize: bool = False,
+        normalize: bool = True,
         n_rows: int | None = None,
         pairing: str = "random",
         max_pairs_per_plate: int | None = None,
-        landmark_only: bool = False,
+        landmark_only: bool = True,
+        max_smiles_length: int = 512,
     ):
         """
         Args:
             controls_file: Path to HDF5 file containing control data and row_metadata.
             perturbations_file: Path to HDF5 file containing perturbation data and row_metadata.
             smiles_dict (dict): Dictionary mapping pert_id -> SMILES string.
+            tokenizer: Tokenizer instance for encoding SMILES strings.
             plate_column (str): Name of the column in row_metadata that indicates the plate ID.
             normalize (bool): Whether to apply global min-max normalization based on controls only.
             n_rows (int): (Optional) For debugging. Limit the dataset to the first n_rows in each file.
             pairing (str): Pairing strategy: 'random', 'combinatoric', or 'limited'.
             max_pairs_per_plate (int): If pairing='limited', the maximum number of pairs to create per plate.
             landmark_only (bool): If True, only keep columns (genes) where col_metadata['feature_space']=='landmark'.
+            max_smiles_length (int): Maximum length for SMILES token sequences.
         """
         super().__init__()
         self.controls_file = controls_file
         self.perturbations_file = perturbations_file
         self.smiles_dict = smiles_dict
+        self.tokenizer = tokenizer
         self.plate_column = plate_column
         self.normalize = normalize
         self.n_rows = n_rows
         self.pairing = pairing
         self.max_pairs_per_plate = max_pairs_per_plate
         self.landmark_only = landmark_only
+        self.max_smiles_length = max_smiles_length
 
         # 1) Load all control data + row metadata into memory
         (
@@ -71,7 +70,7 @@ class PerturbationDataset(Dataset):
             self.pert_data,
             self.pert_metadata,
             self.pert_ids,
-            _,  # the col indices are the same, ignoring second return
+            _,
         ) = self._load_h5(
             perturbations_file,
             max_rows=n_rows,
@@ -228,7 +227,7 @@ class PerturbationDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Return a single item with "features", "labels", "smiles", "metadata".
+        Return a single item with "features", "labels", "smiles_tokens", "metadata".
         """
         ctrl_id, pert_id = self.pairs[idx]
 
@@ -251,20 +250,29 @@ class PerturbationDataset(Dataset):
         ctrl_meta = self.ctrl_metadata.loc[ctrl_id].to_dict()
         pert_meta = self.pert_metadata.loc[pert_id].to_dict()
 
-        # Retrieve SMILES string
-        smiles_str = None
-        if self.smiles_dict is not None:
-            compound_id = pert_meta.get("pert_id", None)
-            if compound_id is not None:
-                smiles_str = self.smiles_dict.get(compound_id, "UNKNOWN")
+        # Retrieve and tokenize SMILES string
+        smiles_str = self.smiles_dict.get(pert_meta.get("pert_id", None), "UNKNOWN")
+        if smiles_str != "UNKNOWN":
+            smiles_tokens = self.tokenizer.encode(
+                smiles_str,
+                add_special_tokens=True,
+                max_length=self.max_smiles_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            ).squeeze(0)
+        else:
+            smiles_tokens = torch.tensor(
+                [self.tokenizer.pad_token_id] * self.max_smiles_length, dtype=torch.long
+            )
 
         # Convert to PyTorch tensors
-        features = torch.from_numpy(ctrl_expr.astype(np.float32))
-        labels = torch.from_numpy(pert_expr.astype(np.float32))
+        features = torch.tensor(ctrl_expr.astype(np.float32))
+        labels = torch.tensor(pert_expr.astype(np.float32))
 
         return {
             "features": features,
             "labels": labels,
-            "smiles": smiles_str,
+            "smiles_tokens": smiles_tokens,
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
