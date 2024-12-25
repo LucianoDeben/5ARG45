@@ -1,11 +1,77 @@
 import torch
 import torch.nn as nn
+import torch.nn.init as init
+
+
+class Perturbinator(nn.Module):
+    """
+    A model that encodes (unperturbed gene expression) + (drug SMILES tokens)
+    and predicts (perturbed gene expression).
+    """
+
+    def __init__(
+        self,
+        gene_input_dim=978,
+        gene_embed_dim=256,
+        drug_embed_dim=256,
+        pert_output_dim=978,
+        fusion_type="concat",
+    ):
+        super(Perturbinator, self).__init__()
+
+        self.gene_embed_dim = gene_embed_dim
+        self.drug_embed_dim = drug_embed_dim
+        self.gene_input_dim = gene_input_dim
+        self.pert_output_dim = pert_output_dim
+        self.fusion_type = fusion_type
+
+        # Gene expression encoder
+        self.gene_encoder = GeneFeatureEncoder(
+            self.gene_input_dim,
+            hidden_dims=[
+                512,
+                512,
+                self.gene_embed_dim,
+            ],
+        )
+
+        # Drug feature encoder (accepts tokenized SMILES)
+        self.smiles_encoder = DrugFeatureEncoder(
+            drug_embed_dim=self.drug_embed_dim,
+            hidden_dim=256,
+            num_layers=4,
+            num_heads=4,
+            dropout=0.1,
+        )
+
+        # Fusion layer
+        self.fusion = GeneDrugFuser(
+            self.gene_embed_dim,
+            self.drug_embed_dim,
+            self.pert_output_dim,
+            self.fusion_type,
+        )
+
+    def forward(self, gene_expression, smiles_tokens):
+        """
+        Forward pass to predict perturbed gene expression.
+
+        Args:
+            gene_expression (torch.Tensor): Baseline gene expression (B, gene_dim).
+            smiles_tokens (torch.Tensor): Tokenized SMILES tensors (B, L).
+        Returns:
+            torch.Tensor: Predicted perturbed gene expression (B, gene_dim).
+        """
+        gene_emb = self.gene_encoder(gene_expression)
+        smiles_emb = self.smiles_encoder(smiles_tokens)
+
+        return self.fusion(gene_emb, smiles_emb)
 
 
 class DrugFeatureEncoder(nn.Module):
     def __init__(
         self,
-        embed_dim=128,
+        drug_embed_dim=512,
         hidden_dim=256,
         num_layers=4,
         num_heads=4,
@@ -13,7 +79,7 @@ class DrugFeatureEncoder(nn.Module):
     ):
         super().__init__()
         self.smiles_encoder = TransformerSMILESEncoder(
-            embed_dim=embed_dim,
+            drug_embed_dim=drug_embed_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             num_heads=num_heads,
@@ -30,56 +96,6 @@ class DrugFeatureEncoder(nn.Module):
         return self.smiles_encoder(smiles_tokens)
 
 
-class Perturbinator(nn.Module):
-    """
-    A model that encodes (unperturbed gene expression) + (drug SMILES tokens)
-    and predicts (perturbed gene expression).
-    """
-
-    def __init__(self, gene_dim, gene_hidden_dim=512, drug_hidden_dim=128):
-        super(Perturbinator, self).__init__()
-
-        # Gene expression encoder
-        self.gene_encoder = nn.Sequential(
-            nn.Linear(gene_dim, gene_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(gene_hidden_dim, gene_hidden_dim),
-            nn.ReLU(),
-        )
-
-        # Drug feature encoder (accepts tokenized SMILES)
-        self.smiles_encoder = DrugFeatureEncoder(
-            embed_dim=128,
-            hidden_dim=256,
-            num_layers=4,
-            num_heads=4,
-            dropout=0.1,
-        )
-
-        # Fusion layer
-        self.fusion = nn.Sequential(
-            nn.Linear(gene_hidden_dim + drug_hidden_dim, gene_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(gene_hidden_dim, gene_dim),
-        )
-
-    def forward(self, gene_expression, smiles_tokens):
-        """
-        Forward pass to predict perturbed gene expression.
-
-        Args:
-            gene_expression (torch.Tensor): Baseline gene expression (B, gene_dim).
-            smiles_tokens (torch.Tensor): Tokenized SMILES tensors (B, L).
-        Returns:
-            torch.Tensor: Predicted perturbed gene expression (B, gene_dim).
-        """
-        gene_emb = self.gene_encoder(gene_expression)
-        smiles_emb = self.smiles_encoder(smiles_tokens)
-
-        combined_emb = torch.cat([gene_emb, smiles_emb], dim=-1)
-        return self.fusion(combined_emb)
-
-
 class TransformerSMILESEncoder(nn.Module):
     """
     Transformer-based SMILES encoder that takes pre-tokenized SMILES tensors.
@@ -87,7 +103,7 @@ class TransformerSMILESEncoder(nn.Module):
 
     def __init__(
         self,
-        embed_dim=128,
+        drug_embed_dim=512,
         hidden_dim=256,
         num_layers=4,
         num_heads=4,
@@ -108,22 +124,29 @@ class TransformerSMILESEncoder(nn.Module):
         super(TransformerSMILESEncoder, self).__init__()
 
         # Embedding layers
-        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.token_embedding = nn.Embedding(vocab_size, drug_embed_dim)
         self.positional_encoding = nn.Parameter(
-            torch.zeros(1, max_length, embed_dim)
+            torch.zeros(1, max_length, drug_embed_dim)
         )  # Max positional encoding
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
+            d_model=drug_embed_dim,
             nhead=num_heads,
             dim_feedforward=hidden_dim,
             dropout=dropout,
+            activation=nn.GELU(),
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        # Layer normalization
+        self.layer_norm = nn.LayerNorm(drug_embed_dim)
+
         # Pooling layer
         self.pooling = nn.AdaptiveAvgPool1d(1)
+
+        # Apply Xavier initialization
+        self.apply(initialize_weights)
 
     def forward(self, smiles_tokens):
         """
@@ -138,10 +161,16 @@ class TransformerSMILESEncoder(nn.Module):
         # Add positional encoding
         embeddings = embeddings + self.positional_encoding[:, : embeddings.size(1), :]
 
+        # # Apply layer normalization
+        embeddings = self.layer_norm(embeddings)
+
         # Pass through Transformer encoder
         transformer_output = self.transformer(
             embeddings.transpose(0, 1)
         )  # (L, B, embed_dim)
+
+        # # Apply layer normalization after transformer
+        transformer_output = self.layer_norm(transformer_output)
 
         # Pool to get a single vector per SMILES
         pooled_output = self.pooling(
@@ -149,6 +178,100 @@ class TransformerSMILESEncoder(nn.Module):
         ).squeeze(-1)
 
         return pooled_output
+
+
+class GeneFeatureEncoder(nn.Module):
+    def __init__(self, gene_dim, hidden_dims, dropout_rate=0.2):
+        """
+        Args:
+            gene_dim (int): Input dimension of gene features.
+            hidden_dims (list of int): List of hidden dimensions for each layer.
+            dropout_rate (float): Dropout rate.
+        """
+        super(GeneFeatureEncoder, self).__init__()
+
+        layers = []
+        input_dim = gene_dim
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(input_dim, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))
+            input_dim = hidden_dim
+
+        self.gene_encoder = nn.Sequential(*layers)
+
+        # Apply Xavier initialization
+        self.apply(initialize_weights)
+
+    def forward(self, x):
+        return self.gene_encoder(x)
+
+
+class GeneDrugFuser(nn.Module):
+    def __init__(
+        self, gene_embed_dim, drug_embed_dim, pert_embed_dim, fusion_type="concat"
+    ):
+        super(GeneDrugFuser, self).__init__()
+        self.fusion_type = fusion_type
+
+        if self.fusion_type == "concat":
+            self.fusion = nn.Sequential(
+                nn.Linear(gene_embed_dim + drug_embed_dim, gene_embed_dim),
+                nn.ReLU(),
+                nn.Linear(gene_embed_dim, pert_embed_dim),
+            )
+        elif self.fusion_type == "attention":
+            self.attention = nn.MultiheadAttention(
+                embed_dim=gene_embed_dim, num_heads=4
+            )
+            self.fusion = nn.Sequential(
+                nn.Linear(gene_embed_dim, pert_embed_dim),
+                nn.ReLU(),
+            )
+        elif self.fusion_type == "gating":
+            self.gate = nn.Sequential(
+                nn.Linear(gene_embed_dim + drug_embed_dim, gene_embed_dim),
+                nn.Sigmoid(),
+            )
+            self.fusion = nn.Sequential(
+                nn.Linear(gene_embed_dim, pert_embed_dim),
+                nn.ReLU(),
+            )
+        else:
+            raise ValueError(
+                "Unsupported fusion type. Choose from 'concat', 'attention', or 'gating'."
+            )
+
+    def forward(self, gene_features, drug_features):
+        if self.fusion_type == "concat":
+            combined_features = torch.cat((gene_features, drug_features), dim=1)
+            return self.fusion(combined_features)
+        elif self.fusion_type == "attention":
+            combined_features, _ = self.attention(
+                gene_features.unsqueeze(0),
+                drug_features.unsqueeze(0),
+                drug_features.unsqueeze(0),
+            )
+            return self.fusion(combined_features.squeeze(0))
+        elif self.fusion_type == "gating":
+            combined_features = torch.cat((gene_features, drug_features), dim=1)
+            gated_features = self.gate(combined_features) * gene_features
+            return self.fusion(gated_features)
+
+
+def initialize_weights(module):
+    if isinstance(module, nn.Linear):
+        init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            init.zeros_(module.bias)
+    elif isinstance(module, nn.Embedding):
+        init.xavier_uniform_(module.weight)
+    elif isinstance(module, nn.TransformerEncoderLayer):
+        for param in module.parameters():
+            if param.dim() > 1:
+                init.xavier_uniform_(param)
 
 
 if __name__ == "__main__":
@@ -197,7 +320,7 @@ if __name__ == "__main__":
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize=True,
-        n_rows=1000,
+        n_rows=5000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
@@ -223,7 +346,7 @@ if __name__ == "__main__":
         f"Train Dataset: {len(train_dataset)}, Val Dataset: {len(val_dataset)}, Test Dataset: {len(test_dataset)}"
     )
 
-    batch_size = 256
+    batch_size = 512
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
     )
@@ -237,14 +360,16 @@ if __name__ == "__main__":
 
     # Initialize the Perturbinator
     model = Perturbinator(
-        gene_dim=978,
-        gene_hidden_dim=512,
-        drug_hidden_dim=128,
+        gene_input_dim=978,
+        gene_embed_dim=256,
+        drug_embed_dim=256,
+        pert_output_dim=978,
+        fusion_type="concat",
     )
 
     # Criterion and Optimizer
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=3
     )
@@ -266,8 +391,8 @@ if __name__ == "__main__":
 
     # Log the final train and validation losses
     logging.debug("Final train and validation losses:")
-    logging.debug(f"Train Losses: {train_losses}")
-    logging.debug(f"Validation Losses: {val_losses}")
+    logging.debug(f"Train Losses: {train_losses[-1]}")
+    logging.debug(f"Validation Losses: {val_losses[-1]}")
 
     # Evaluate on test set
     test_metrics = evaluate_multimodal_model(
