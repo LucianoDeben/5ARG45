@@ -2,7 +2,26 @@ data_paths:
   compoundinfo_file: "data/raw/compoundinfo.csv"
   x_file: "data/raw/X.tsv"
   y_file: "data/raw/Y.tsv"
-  output_file: "data/processed/final_dataset.csv"
+  rna_file: "data/raw/X_RNA.bin"
+  geneinfo_file: "data/raw/geneinfo_beta.txt"
+  preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
+  preprocessed_landmark_file: "data/processed/preprocessed_landmark.csv"
+  preprocessed_gene_file: "data/processed/preprocessed_gene.csv"
+  preprocessed_merged_file: "data/processed/final_dataset.csv"
 
-preprocess_params:
+preprocess:
   scale_features: true
+  train_ratio: 0.7
+  val_ratio: 0.2
+  test_ratio: 0.1
+  use_vt: false
+  vt_threshold_tf: 0.2
+  vt_threshold_landmark: 0.01
+  vt_threshold_gene: 0.01
+  use_pca: true
+  pca_var_tf: 0.99
+  pca_var_landmark: 0.99
+  pca_var_gene: 0.99
+
+training:
+  cv_folds: 5
