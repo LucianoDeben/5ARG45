@@ -136,9 +136,10 @@ def evaluate_multimodal_model(
             features = batch["features"].to(device).float()  # Gene expression
             labels = batch["labels"].to(device).float()  # Perturbed expression
             smiles_tokens = batch["smiles_tokens"].to(device).long()  # Tokenized SMILES
+            dosages = batch["dosage"].to(device).float()  # Move dosage to device
 
             # Forward pass
-            outputs = model(features, smiles_tokens)
+            outputs = model(features, smiles_tokens, dosages)
 
             # Compute loss if criterion is provided
             if criterion is not None:

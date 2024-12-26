@@ -16,6 +16,7 @@ class Perturbinator(nn.Module):
         drug_embed_dim=256,
         pert_output_dim=978,
         fusion_type="concat",
+        vocab_size=128,
     ):
         super(Perturbinator, self).__init__()
 
@@ -24,6 +25,7 @@ class Perturbinator(nn.Module):
         self.gene_input_dim = gene_input_dim
         self.pert_output_dim = pert_output_dim
         self.fusion_type = fusion_type
+        self.vocab_size = vocab_size
 
         # Gene expression encoder
         self.gene_encoder = GeneFeatureEncoder(
@@ -36,12 +38,13 @@ class Perturbinator(nn.Module):
         )
 
         # Drug feature encoder (accepts tokenized SMILES)
-        self.smiles_encoder = DrugFeatureEncoder(
+        self.drug_encoder = DrugFeatureEncoder(
             drug_embed_dim=self.drug_embed_dim,
             hidden_dim=256,
             num_layers=4,
             num_heads=4,
             dropout=0.1,
+            vocab_size=self.vocab_size,
         )
 
         # Fusion layer
@@ -52,7 +55,7 @@ class Perturbinator(nn.Module):
             self.fusion_type,
         )
 
-    def forward(self, gene_expression, smiles_tokens):
+    def forward(self, gene_expression, smiles_tensor, dosage):
         """
         Forward pass to predict perturbed gene expression.
 
@@ -63,9 +66,9 @@ class Perturbinator(nn.Module):
             torch.Tensor: Predicted perturbed gene expression (B, gene_dim).
         """
         gene_emb = self.gene_encoder(gene_expression)
-        smiles_emb = self.smiles_encoder(smiles_tokens)
+        drug_emb = self.drug_encoder(smiles_tensor, dosage)
 
-        return self.fusion(gene_emb, smiles_emb)
+        return self.fusion(gene_emb, drug_emb)
 
 
 class DrugFeatureEncoder(nn.Module):
@@ -76,24 +79,38 @@ class DrugFeatureEncoder(nn.Module):
         num_layers=4,
         num_heads=4,
         dropout=0.1,
+        vocab_size=128,
     ):
         super().__init__()
         self.smiles_encoder = TransformerSMILESEncoder(
+            vocab_size=vocab_size,
             drug_embed_dim=drug_embed_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             num_heads=num_heads,
             dropout=dropout,
         )
+        self.dosage_mlp_gamma = nn.Sequential(
+            nn.Linear(1, hidden_dim),  # Input is scalar dosage
+            nn.ReLU(),
+            nn.Linear(hidden_dim, drug_embed_dim),  # Scale matches embedding dim
+        )
+        self.dosage_mlp_beta = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, drug_embed_dim),
+        )
 
-    def forward(self, smiles_tokens):
-        """
-        Args:
-            smiles_tokens (torch.Tensor): Tokenized SMILES tensors (B, L).
-        Returns:
-            torch.Tensor: Encoded SMILES representation.
-        """
-        return self.smiles_encoder(smiles_tokens)
+    def forward(self, smiles_tensor, dosage):
+        smiles_emb = self.smiles_encoder(smiles_tensor)  # Shape: (B, L, embed_dim)
+
+        # Dosage modulation
+        gamma = self.dosage_mlp_gamma(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
+        beta = self.dosage_mlp_beta(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
+
+        # Apply modulation
+        modulated_smiles_emb = gamma * smiles_emb + beta
+        return modulated_smiles_emb
 
 
 class TransformerSMILESEncoder(nn.Module):
@@ -136,6 +153,7 @@ class TransformerSMILESEncoder(nn.Module):
             dim_feedforward=hidden_dim,
             dropout=dropout,
             activation=nn.GELU(),
+            batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
@@ -302,7 +320,7 @@ if __name__ == "__main__":
 
     # Load the datasets
     controls = "../data/raw/compound_control_dataset.h5"
-    perturbations = "../data/raw/compound_pertubation_dataset.h5"
+    perturbations = "../data/raw/compound_perturbation_dataset.h5"
 
     # Load the SMILES data and create a dictionary mapping
     smiles_df = pd.read_csv("../data/raw/compoundinfo_beta.txt", sep="\t")
@@ -320,7 +338,7 @@ if __name__ == "__main__":
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize=True,
-        n_rows=5000,
+        n_rows=10000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
@@ -346,7 +364,7 @@ if __name__ == "__main__":
         f"Train Dataset: {len(train_dataset)}, Val Dataset: {len(val_dataset)}, Test Dataset: {len(test_dataset)}"
     )
 
-    batch_size = 512
+    batch_size = 1024
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
     )
@@ -364,7 +382,7 @@ if __name__ == "__main__":
         gene_embed_dim=256,
         drug_embed_dim=256,
         pert_output_dim=978,
-        fusion_type="concat",
+        fusion_type="gating",
     )
 
     # Criterion and Optimizer

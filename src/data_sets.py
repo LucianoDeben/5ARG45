@@ -266,6 +266,9 @@ class PerturbationDataset(Dataset):
                 [self.tokenizer.pad_token_id] * self.max_smiles_length, dtype=torch.long
             )
 
+        # Retrieve drug dosage
+        dosage = float(pert_meta.get("pert_dose", 0.0))
+
         # Convert to PyTorch tensors
         features = torch.tensor(ctrl_expr.astype(np.float32))
         labels = torch.tensor(pert_expr.astype(np.float32))
@@ -274,5 +277,6 @@ class PerturbationDataset(Dataset):
             "features": features,
             "labels": labels,
             "smiles_tokens": smiles_tokens,
+            "dosage": torch.tensor(dosage, dtype=torch.float32),
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }

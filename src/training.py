@@ -197,12 +197,13 @@ def train_multimodal_model(
             features = batch["features"].to(device).float()  # Gene expression
             labels = batch["labels"].to(device).float()  # Perturbed gene expression
             smiles_tokens = batch["smiles_tokens"].to(device).long()  # SMILES tokens
+            dosages = batch["dosage"].to(device).float()  # Move dosage to device
 
             optimizer.zero_grad(set_to_none=True)
 
             with autocast(device_type=device, enabled=use_mixed_precision):
                 # Forward pass
-                outputs = model(features, smiles_tokens)
+                outputs = model(features, smiles_tokens, dosages)
                 loss = criterion(outputs, labels)
 
             # Backward pass and optimizer step
@@ -233,9 +234,10 @@ def train_multimodal_model(
                 features = batch["features"].to(device).float()
                 labels = batch["labels"].to(device).float()
                 smiles_tokens = batch["smiles_tokens"].to(device).long()
+                dosages = batch["dosage"].to(device).float()  # Move dosage to device
 
                 # Forward pass
-                outputs = model(features, smiles_tokens)
+                outputs = model(features, smiles_tokens, dosages)
                 val_loss = criterion(outputs, labels)
 
                 # Accumulate validation loss
