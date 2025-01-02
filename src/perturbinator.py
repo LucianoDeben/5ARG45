@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 
-
 class Perturbinator(nn.Module):
     """
     A model that encodes (unperturbed gene expression) + (drug SMILES tokens)
@@ -90,25 +89,37 @@ class DrugFeatureEncoder(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
         )
+        # Dosage scaling (gamma) and shifting (beta) MLPs
         self.dosage_mlp_gamma = nn.Sequential(
             nn.Linear(1, hidden_dim),  # Input is scalar dosage
             nn.ReLU(),
             nn.Linear(hidden_dim, drug_embed_dim),  # Scale matches embedding dim
+            nn.Sigmoid(),  # Sigmoid gating for gamma
         )
         self.dosage_mlp_beta = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, drug_embed_dim),
+            nn.Linear(hidden_dim, drug_embed_dim),  # No gating for beta
         )
 
     def forward(self, smiles_tensor, dosage):
-        smiles_emb = self.smiles_encoder(smiles_tensor)  # Shape: (B, L, embed_dim)
+        """
+        Forward pass for drug feature encoding with dosage modulation.
+
+        Args:
+            smiles_tensor (torch.Tensor): Tokenized SMILES tensors (B, L).
+            dosage (torch.Tensor): Dosage values (B, 1).
+
+        Returns:
+            torch.Tensor: Modulated drug embeddings (B, embed_dim).
+        """
+        smiles_emb = self.smiles_encoder(smiles_tensor)  # Shape: (B, embed_dim)
 
         # Dosage modulation
         gamma = self.dosage_mlp_gamma(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
         beta = self.dosage_mlp_beta(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
 
-        # Apply modulation
+        # Apply sigmoid gating modulation
         modulated_smiles_emb = gamma * smiles_emb + beta
         return modulated_smiles_emb
 
@@ -228,9 +239,7 @@ class GeneFeatureEncoder(nn.Module):
 
 
 class GeneDrugFuser(nn.Module):
-    def __init__(
-        self, gene_embed_dim, drug_embed_dim, pert_embed_dim, fusion_type="concat"
-    ):
+    def __init__(self, gene_embed_dim, drug_embed_dim, pert_embed_dim, fusion_type="concat"):
         super(GeneDrugFuser, self).__init__()
         self.fusion_type = fusion_type
 
@@ -241,11 +250,14 @@ class GeneDrugFuser(nn.Module):
                 nn.Linear(gene_embed_dim, pert_embed_dim),
             )
         elif self.fusion_type == "attention":
+            # Cross-attention: Gene as Query, Drug as Key/Value
             self.attention = nn.MultiheadAttention(
-                embed_dim=gene_embed_dim, num_heads=4
+                embed_dim=drug_embed_dim,  # Match drug embedding dimension
+                num_heads=4,  # Number of attention heads
+                batch_first=True  # Ensures input/output shape matches (B, L, D)
             )
             self.fusion = nn.Sequential(
-                nn.Linear(gene_embed_dim, pert_embed_dim),
+                nn.Linear(gene_embed_dim, pert_embed_dim),  # Final fused representation
                 nn.ReLU(),
             )
         elif self.fusion_type == "gating":
@@ -267,16 +279,27 @@ class GeneDrugFuser(nn.Module):
             combined_features = torch.cat((gene_features, drug_features), dim=1)
             return self.fusion(combined_features)
         elif self.fusion_type == "attention":
-            combined_features, _ = self.attention(
-                gene_features.unsqueeze(0),
-                drug_features.unsqueeze(0),
-                drug_features.unsqueeze(0),
+            # Expand dimensions for attention (add sequence dimension)
+            gene_features = gene_features.unsqueeze(1)  # Shape: (B, 1, gene_embed_dim)
+            drug_features = drug_features.unsqueeze(1)  # Shape: (B, 1, drug_embed_dim)
+
+            # Cross-attention: Gene as Query, Drug as Key/Value
+            attended_features, _ = self.attention(
+                query=gene_features,  # Shape: (B, 1, drug_embed_dim)
+                key=drug_features,    # Shape: (B, 1, drug_embed_dim)
+                value=drug_features   # Shape: (B, 1, drug_embed_dim)
             )
-            return self.fusion(combined_features.squeeze(0))
+
+            # Remove the sequence dimension
+            attended_features = attended_features.squeeze(1)  # Shape: (B, drug_embed_dim)
+
+            # Fuse attended features with gene features
+            return self.fusion(attended_features)
         elif self.fusion_type == "gating":
             combined_features = torch.cat((gene_features, drug_features), dim=1)
             gated_features = self.gate(combined_features) * gene_features
             return self.fusion(gated_features)
+
 
 
 def initialize_weights(module):
@@ -293,16 +316,17 @@ def initialize_weights(module):
 
 
 if __name__ == "__main__":
+    
     # Add src to path
     import logging
+    import wandb
 
     # Set up logging
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     import os
     import sys
-
-    import torch
+    from config import init_wandb
 
     # Add the src directory to the Python path
     sys.path.append(os.path.abspath(os.path.join("..", "src")))
@@ -315,6 +339,24 @@ if __name__ == "__main__":
     from perturbinator import Perturbinator
     from training import train_multimodal_model
     from utils import create_smiles_dict
+    
+    wandb.init(
+    project="5ARG45",
+    name="perturbinator",
+    mode="offline",
+    )
+
+    wandb.config = {
+        "lr": 0.001,
+        "architecture": "Perturbinator",
+        "dataset": "LINCS/CTRPv2",
+        "epochs": 20,
+        "batch_size": 1024,
+    }
+    
+    config = wandb.config   
+    
+    # config = init_wandb()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -338,7 +380,7 @@ if __name__ == "__main__":
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize=True,
-        n_rows=10000,
+        n_rows=20000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
@@ -364,7 +406,7 @@ if __name__ == "__main__":
         f"Train Dataset: {len(train_dataset)}, Val Dataset: {len(val_dataset)}, Test Dataset: {len(test_dataset)}"
     )
 
-    batch_size = 1024
+    batch_size = config.get("batch_size", 1024)
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
     )
@@ -387,7 +429,7 @@ if __name__ == "__main__":
 
     # Criterion and Optimizer
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.get("lr", 1e-3), weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=3
     )
@@ -421,3 +463,7 @@ if __name__ == "__main__":
     logging.debug(
         f"R²: {test_metrics['R2']}, Pearson Correlation: {test_metrics['PCC']}"
     )
+    
+    wandb.log({"MSE": test_metrics["MSE"], "MAE": test_metrics["MAE"],"R2": test_metrics["R2"], "PCC": test_metrics["PCC"]})
+
+    wandb.finish()
