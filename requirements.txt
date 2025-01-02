@@ -1,8 +1,7 @@
 deepchem==2.8.0
-h5py==3.9.0
 h5py==3.12.1
-matplotlib==3.10.0
-numpy==2.2.1
+matplotlib==3.9.4
+numpy==2.0.2
 pandas==2.2.3
 plotly==5.24.1
 pytest==6.2.5
@@ -11,7 +10,7 @@ PyYAML==6.0.2
 rdkit==2024.3.6
 rdkit_pypi==2022.9.5
 scikit_learn==1.6.0
-scipy==1.14.1
+scipy==1.13.1
 seaborn==0.13.2
 setuptools==75.1.0
 torch==2.5.1

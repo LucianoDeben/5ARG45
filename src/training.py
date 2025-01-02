@@ -1,8 +1,7 @@
 import logging
 
 import torch
-import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
 # Set logging
@@ -88,7 +87,7 @@ def train_model(
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(device_type=device, enabled=use_mixed_precision):
+            with autocast(enabled=use_mixed_precision):
                 outputs = _forward_pass(model, X_batch, device)
                 outputs = (
                     outputs.squeeze(dim=-1)
@@ -114,7 +113,7 @@ def train_model(
         # Validation Phase
         model.eval()
         running_val_loss = 0.0
-        with torch.no_grad(), autocast(device_type=device, enabled=use_mixed_precision):
+        with torch.no_grad(), autocast(enabled=use_mixed_precision):
             for batch in val_loader:
                 *X_batch, y_batch = batch
                 y_batch = y_batch.to(device)
@@ -201,7 +200,7 @@ def train_multimodal_model(
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(device_type=device, enabled=use_mixed_precision):
+            with autocast(enabled=use_mixed_precision):
                 # Forward pass
                 outputs = model(features, smiles_tokens, dosages)
                 loss = criterion(outputs, labels)
@@ -229,7 +228,7 @@ def train_multimodal_model(
         running_val_loss = 0.0
         num_val_samples = 0
 
-        with torch.no_grad(), autocast(device_type=device, enabled=use_mixed_precision):
+        with torch.no_grad(), autocast(enabled=use_mixed_precision):
             for batch in val_loader:
                 features = batch["features"].to(device).float()
                 labels = batch["labels"].to(device).float()
