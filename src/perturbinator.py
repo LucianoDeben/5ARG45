@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 
+
 class Perturbinator(nn.Module):
     """
     A model that encodes (unperturbed gene expression) + (drug SMILES tokens)
-    and predicts (perturbed gene expression).
+    and predicts (perturbed gene expression, viability, or both).
     """
 
     def __init__(
@@ -13,7 +14,9 @@ class Perturbinator(nn.Module):
         gene_input_dim=978,
         gene_embed_dim=256,
         drug_embed_dim=256,
+        fusion_dim=512,
         pert_output_dim=978,
+        task_type="multi-task",
         fusion_type="concat",
         vocab_size=128,
     ):
@@ -22,21 +25,19 @@ class Perturbinator(nn.Module):
         self.gene_embed_dim = gene_embed_dim
         self.drug_embed_dim = drug_embed_dim
         self.gene_input_dim = gene_input_dim
+        self.fusion_dim = fusion_dim
         self.pert_output_dim = pert_output_dim
+        self.task_type = task_type
         self.fusion_type = fusion_type
         self.vocab_size = vocab_size
 
         # Gene expression encoder
         self.gene_encoder = GeneFeatureEncoder(
             self.gene_input_dim,
-            hidden_dims=[
-                512,
-                512,
-                self.gene_embed_dim,
-            ],
+            hidden_dims=[512, 512, self.gene_embed_dim],
         )
 
-        # Drug feature encoder (accepts tokenized SMILES)
+        # Drug feature encoder
         self.drug_encoder = DrugFeatureEncoder(
             drug_embed_dim=self.drug_embed_dim,
             hidden_dim=256,
@@ -48,26 +49,44 @@ class Perturbinator(nn.Module):
 
         # Fusion layer
         self.fusion = GeneDrugFuser(
-            self.gene_embed_dim,
-            self.drug_embed_dim,
-            self.pert_output_dim,
-            self.fusion_type,
+            gene_embed_dim=self.gene_embed_dim,
+            drug_embed_dim=self.drug_embed_dim,
+            fusion_dim=self.fusion_dim,
+            fusion_type=self.fusion_type,
         )
+
+        # Decoder
+        self.decoder = Decoder(
+            fusion_dim=self.fusion_dim,
+            gene_output_dim=self.pert_output_dim,
+            task_type=self.task_type,
+        )
+
+        # Apply weight initialization explicitly
+        self.apply(initialize_weights)
 
     def forward(self, gene_expression, smiles_tensor, dosage):
         """
-        Forward pass to predict perturbed gene expression.
+        Forward pass to predict task-specific outputs.
 
         Args:
             gene_expression (torch.Tensor): Baseline gene expression (B, gene_dim).
-            smiles_tokens (torch.Tensor): Tokenized SMILES tensors (B, L).
+            smiles_tensor (torch.Tensor): Tokenized SMILES tensors (B, L).
+            dosage (torch.Tensor): Dosage values (B, 1).
+
         Returns:
-            torch.Tensor: Predicted perturbed gene expression (B, gene_dim).
+            dict: Predictions based on the selected task type.
         """
+        # Encode gene expression and drug features
         gene_emb = self.gene_encoder(gene_expression)
         drug_emb = self.drug_encoder(smiles_tensor, dosage)
 
-        return self.fusion(gene_emb, drug_emb)
+        # Fuse embeddings
+        fused_emb = self.fusion(gene_emb, drug_emb)
+
+        # Decode into task-specific predictions
+        output = self.decoder(fused_emb)
+        return output
 
 
 class DrugFeatureEncoder(nn.Module):
@@ -118,6 +137,14 @@ class DrugFeatureEncoder(nn.Module):
         # Dosage modulation
         gamma = self.dosage_mlp_gamma(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
         beta = self.dosage_mlp_beta(dosage.unsqueeze(-1))  # Shape: (B, embed_dim)
+
+        # Check dimensions for broadcasting compatibility
+        assert (
+            gamma.size() == smiles_emb.size()
+        ), "Mismatch in gamma and smiles_emb dimensions"
+        assert (
+            beta.size() == smiles_emb.size()
+        ), "Mismatch in beta and smiles_emb dimensions"
 
         # Apply sigmoid gating modulation
         modulated_smiles_emb = gamma * smiles_emb + beta
@@ -174,7 +201,7 @@ class TransformerSMILESEncoder(nn.Module):
         # Pooling layer
         self.pooling = nn.AdaptiveAvgPool1d(1)
 
-        # Apply Xavier initialization
+        # Apply weight initialization explicitly
         self.apply(initialize_weights)
 
     def forward(self, smiles_tokens):
@@ -186,6 +213,10 @@ class TransformerSMILESEncoder(nn.Module):
         """
         # Token embeddings
         embeddings = self.token_embedding(smiles_tokens)
+
+        assert embeddings.size(1) <= self.positional_encoding.size(
+            1
+        ), "Token sequence length exceeds maximum positional encoding length"
 
         # Add positional encoding
         embeddings = embeddings + self.positional_encoding[:, : embeddings.size(1), :]
@@ -222,6 +253,9 @@ class GeneFeatureEncoder(nn.Module):
         layers = []
         input_dim = gene_dim
 
+        if not hidden_dims:
+            raise ValueError("hidden_dims must contain at least one layer")
+
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(input_dim, hidden_dim))
             layers.append(nn.BatchNorm1d(hidden_dim))
@@ -239,132 +273,280 @@ class GeneFeatureEncoder(nn.Module):
 
 
 class GeneDrugFuser(nn.Module):
-    def __init__(self, gene_embed_dim, drug_embed_dim, pert_embed_dim, fusion_type="concat"):
+    """
+    Combines gene and drug embeddings using various fusion strategies.
+    """
+
+    def __init__(
+        self, gene_embed_dim, drug_embed_dim, fusion_dim, fusion_type="concat"
+    ):
+        """
+        Args:
+            gene_embed_dim (int): Dimension of gene embeddings.
+            drug_embed_dim (int): Dimension of drug embeddings.
+            fusion_dim (int): Dimension of the fused embedding.
+            fusion_type (str): Type of fusion strategy ("concat", "attention", "gating").
+        """
         super(GeneDrugFuser, self).__init__()
+        self.gene_embed_dim = gene_embed_dim
+        self.drug_embed_dim = drug_embed_dim
+        self.fusion_dim = fusion_dim
         self.fusion_type = fusion_type
 
-        if self.fusion_type == "concat":
-            self.fusion = nn.Sequential(
-                nn.Linear(gene_embed_dim + drug_embed_dim, gene_embed_dim),
-                nn.ReLU(),
-                nn.Linear(gene_embed_dim, pert_embed_dim),
-            )
-        elif self.fusion_type == "attention":
-            # Cross-attention: Gene as Query, Drug as Key/Value
-            self.attention = nn.MultiheadAttention(
-                embed_dim=drug_embed_dim,  # Match drug embedding dimension
-                num_heads=4,  # Number of attention heads
-                batch_first=True  # Ensures input/output shape matches (B, L, D)
-            )
-            self.fusion = nn.Sequential(
-                nn.Linear(gene_embed_dim, pert_embed_dim),  # Final fused representation
-                nn.ReLU(),
-            )
-        elif self.fusion_type == "gating":
-            self.gate = nn.Sequential(
-                nn.Linear(gene_embed_dim + drug_embed_dim, gene_embed_dim),
-                nn.Sigmoid(),
-            )
-            self.fusion = nn.Sequential(
-                nn.Linear(gene_embed_dim, pert_embed_dim),
-                nn.ReLU(),
-            )
-        else:
+        # Initialize fusion layers
+        self.concat_layer = nn.Sequential(
+            nn.Linear(gene_embed_dim + drug_embed_dim, fusion_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim),
+        )
+        # TODO: Add attention assertion for gene and drug embedding dimensions
+        self.attention_layer = nn.MultiheadAttention(
+            embed_dim=fusion_dim, num_heads=4, batch_first=True
+        )
+        self.attention_fc = nn.Sequential(
+            nn.Linear(gene_embed_dim, fusion_dim),
+            nn.ReLU(),
+        )
+
+        self.gating_layer = nn.Sequential(
+            nn.Linear(gene_embed_dim + drug_embed_dim, gene_embed_dim),
+            nn.Sigmoid(),
+        )
+        self.gating_fc = nn.Sequential(
+            nn.Linear(gene_embed_dim, fusion_dim),
+            nn.ReLU(),
+        )
+
+        # Validate fusion type
+        if fusion_type not in ["concat", "attention", "gating"]:
             raise ValueError(
-                "Unsupported fusion type. Choose from 'concat', 'attention', or 'gating'."
+                "Unsupported fusion type. Choose 'concat', 'attention', or 'gating'."
             )
 
     def forward(self, gene_features, drug_features):
-        if self.fusion_type == "concat":
-            combined_features = torch.cat((gene_features, drug_features), dim=1)
-            return self.fusion(combined_features)
-        elif self.fusion_type == "attention":
-            # Expand dimensions for attention (add sequence dimension)
-            gene_features = gene_features.unsqueeze(1)  # Shape: (B, 1, gene_embed_dim)
-            drug_features = drug_features.unsqueeze(1)  # Shape: (B, 1, drug_embed_dim)
+        """
+        Forward pass to fuse gene and drug embeddings.
 
-            # Cross-attention: Gene as Query, Drug as Key/Value
-            attended_features, _ = self.attention(
-                query=gene_features,  # Shape: (B, 1, drug_embed_dim)
-                key=drug_features,    # Shape: (B, 1, drug_embed_dim)
-                value=drug_features   # Shape: (B, 1, drug_embed_dim)
+        Args:
+            gene_features (torch.Tensor): Gene embeddings (B, gene_embed_dim).
+            drug_features (torch.Tensor): Drug embeddings (B, drug_embed_dim).
+
+        Returns:
+            torch.Tensor: Fused embedding (B, fusion_dim).
+        """
+        if self.fusion_type == "concat":
+            return self._fuse_concat(gene_features, drug_features)
+        elif self.fusion_type == "attention":
+            return self._fuse_attention(gene_features, drug_features)
+        elif self.fusion_type == "gating":
+            return self._fuse_gating(gene_features, drug_features)
+
+    def _fuse_concat(self, gene_features, drug_features):
+        """
+        Concatenates gene and drug embeddings, followed by a fully connected layer.
+        """
+        combined_features = torch.cat((gene_features, drug_features), dim=1)
+        return self.concat_layer(combined_features)
+
+    def _fuse_attention(self, gene_features, drug_features):
+        """
+        Uses attention to fuse gene and drug embeddings.
+        """
+        # Add sequence dimension for attention
+        gene_features = gene_features.unsqueeze(1)  # Shape: (B, 1, gene_embed_dim)
+        drug_features = drug_features.unsqueeze(1)  # Shape: (B, 1, drug_embed_dim)
+
+        # Apply attention (query: gene, key/value: drug)
+        attended_features, _ = self.attention_layer(
+            query=gene_features,
+            key=drug_features,
+            value=drug_features,
+        )
+
+        # Remove sequence dimension and apply final linear transformation
+        attended_features = attended_features.squeeze(1)  # Shape: (B, drug_embed_dim)
+        return self.attention_fc(attended_features)
+
+    def _fuse_gating(self, gene_features, drug_features):
+        """
+        Uses gating to modulate gene embeddings based on drug embeddings.
+        """
+        combined_features = torch.cat((gene_features, drug_features), dim=1)
+        gated_features = self.gating_layer(combined_features) * gene_features
+        return self.gating_fc(gated_features)
+
+
+class Decoder(nn.Module):
+    """
+    Decodes fused embeddings into task-specific outputs.
+    Supports gene expression prediction, viability prediction, or both.
+    """
+
+    def __init__(self, fusion_dim, gene_output_dim=978, task_type="multi-task"):
+        """
+        Args:
+            fusion_dim (int): Dimension of the fused embedding.
+            gene_output_dim (int): Number of output genes for gene expression prediction.
+            task_type (str): Task type ("multi-task", "gene-expression", "viability").
+        """
+        super(Decoder, self).__init__()
+        self.task_type = task_type
+
+        # Shared layers (optional, can also be task-specific)
+        self.shared_fc = nn.Sequential(
+            nn.Linear(fusion_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+        )
+
+        if self.task_type == "multi-task":
+            # Viability branch
+            self.viability_fc = nn.Sequential(
+                nn.Linear(512, 1),  # Single scalar for viability
+                nn.Sigmoid(),  # Range [0, 1]
+            )
+            # Gene expression branch
+            self.gene_expression_fc = nn.Sequential(
+                nn.Linear(512, gene_output_dim),  # Vector for gene expression
+                nn.ReLU(),  # Ensure non-negative values
+            )
+        elif self.task_type == "gene-expression":
+            # Gene expression prediction only
+            self.gene_expression_fc = nn.Sequential(
+                nn.Linear(512, gene_output_dim),
+                nn.ReLU(),
+            )
+        elif self.task_type == "viability":
+            # Viability prediction only
+            self.viability_fc = nn.Sequential(
+                nn.Linear(512, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            raise ValueError(
+                "Invalid task_type. Choose from 'multi-task', 'gene-expression', or 'viability'."
             )
 
-            # Remove the sequence dimension
-            attended_features = attended_features.squeeze(1)  # Shape: (B, drug_embed_dim)
+        # Apply weight initialization
+        self.apply(initialize_weights)
 
-            # Fuse attended features with gene features
-            return self.fusion(attended_features)
-        elif self.fusion_type == "gating":
-            combined_features = torch.cat((gene_features, drug_features), dim=1)
-            gated_features = self.gate(combined_features) * gene_features
-            return self.fusion(gated_features)
+    def forward(self, fused_emb):
+        """
+        Forward pass to decode fused embeddings.
 
+        Args:
+            fused_emb (torch.Tensor): Fused embeddings (B, fusion_dim).
+
+        Returns:
+            dict: Predictions based on task type.
+        """
+        shared_out = self.shared_fc(fused_emb)
+
+        if self.task_type == "multi-task":
+            viability = torch.clamp(self.viability_fc(shared_out), 1e-7, 1 - 1e-7)
+            gene_expression = self.gene_expression_fc(shared_out)
+            return {"viability": viability, "gene_expression": gene_expression}
+        elif self.task_type == "gene-expression":
+            return {"gene_expression": self.gene_expression_fc(shared_out)}
+        elif self.task_type == "viability":
+            return {
+                "viability": torch.clamp(self.viability_fc(shared_out), 1e-7, 1 - 1e-7)
+            }
 
 
 def initialize_weights(module):
+    """
+    Applies weight initialization to supported layers.
+    """
     if isinstance(module, nn.Linear):
         init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            init.zeros_(module.bias)
+    elif isinstance(module, nn.Conv2d):  # For convolutional layers
+        init.kaiming_uniform_(module.weight, nonlinearity="relu")
         if module.bias is not None:
             init.zeros_(module.bias)
     elif isinstance(module, nn.Embedding):
         init.xavier_uniform_(module.weight)
     elif isinstance(module, nn.TransformerEncoderLayer):
         for param in module.parameters():
-            if param.dim() > 1:
+            if param.dim() > 1:  # Weight matrices
                 init.xavier_uniform_(param)
+    elif isinstance(module, nn.BatchNorm1d):  # BatchNorm
+        module.weight.data.fill_(1.0)
+        module.bias.data.zero_()
+
+
+class MultiTaskLoss(nn.Module):
+    def __init__(self, gene_loss_weight=1.0, viability_loss_weight=1.0):
+        super(MultiTaskLoss, self).__init__()
+        self.gene_loss_weight = gene_loss_weight
+        self.viability_loss_weight = viability_loss_weight
+
+    def forward(self, outputs, gene_labels, viability_labels):
+        # Gene expression loss
+        gene_loss = torch.nn.functional.mse_loss(
+            outputs["gene_expression"], gene_labels
+        )
+
+        # Viability prediction loss (MSE since it's continuous)
+        viability_loss = torch.nn.functional.mse_loss(
+            outputs["viability"].squeeze(), viability_labels
+        )
+
+        # Combine weighted losses
+        total_loss = (
+            self.gene_loss_weight * gene_loss
+            + self.viability_loss_weight * viability_loss
+        )
+        return total_loss
 
 
 if __name__ == "__main__":
-    
+
     # Add src to path
     import logging
+    import os
+    import sys
+
     import wandb
 
     # Set up logging
     logging.basicConfig(level=logging.INFO)
 
-    import os
-    import sys
-    from config import init_wandb
-
-    # Add the src directory to the Python path
-    sys.path.append(os.path.abspath(os.path.join("..", "src")))
     import pandas as pd
+    import torch
     from deepchem.feat.smiles_tokenizer import SmilesTokenizer
+    from torch import nn
     from torch.utils.data import DataLoader, random_split
 
+    from config import init_wandb
     from data_sets import PerturbationDataset
     from evaluation import evaluate_multimodal_model
     from perturbinator import Perturbinator
     from training import train_multimodal_model
     from utils import create_smiles_dict
-    
-    wandb.init(
-    project="5ARG45",
-    name="perturbinator",
-    mode="offline",
-    )
 
-    wandb.config = {
-        "lr": 0.001,
-        "architecture": "Perturbinator",
-        "dataset": "LINCS/CTRPv2",
-        "epochs": 20,
-        "batch_size": 1024,
-    }
-    
-    config = wandb.config   
-    
-    # config = init_wandb()
+    # # Initialize Weights & Biases
+    # wandb.init(
+    #     project="5ARG45",
+    #     name="perturbinator_multitask",
+    #     mode="offline",
+    # )
+    # wandb.config = {
+    #     "lr": 0.001,
+    #     "architecture": "Perturbinator",
+    #     "dataset": "LINCS/CTRPv2",
+    #     "epochs": 10,
+    #     "batch_size": 512,
+    # }
 
+    config = init_wandb()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load the datasets
+    # Load datasets and metadata
     controls = "../data/raw/compound_control_dataset.h5"
     perturbations = "../data/raw/compound_perturbation_dataset.h5"
-
-    # Load the SMILES data and create a dictionary mapping
     smiles_df = pd.read_csv("../data/raw/compoundinfo_beta.txt", sep="\t")
     smiles_dict = create_smiles_dict(smiles_df)
 
@@ -372,26 +554,24 @@ if __name__ == "__main__":
     vocab_file = "../data/raw/vocab.txt"
     smiles_tokenizer = SmilesTokenizer(vocab_file=vocab_file)
 
-    max_length = 128
-
+    # Create dataset
     dataset = PerturbationDataset(
         controls_file=controls,
         perturbations_file=perturbations,
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize=True,
-        n_rows=20000,
+        n_rows=1000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
-        max_smiles_length=max_length,
+        max_smiles_length=128,
     )
 
-    # Split the dataset into train, validation, and test sets
+    # Split dataset
     train_ratio = 0.7
     val_ratio = 0.15
     test_ratio = 0.15
-
     total_len = len(dataset)
     train_size = int(train_ratio * total_len)
     val_size = int(val_ratio * total_len)
@@ -401,69 +581,75 @@ if __name__ == "__main__":
         dataset, [train_size, val_size, test_size]
     )
 
-    # Log the sizes of the datasets
-    logging.debug(
-        f"Train Dataset: {len(train_dataset)}, Val Dataset: {len(val_dataset)}, Test Dataset: {len(test_dataset)}"
-    )
-
     batch_size = config.get("batch_size", 1024)
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=0
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=0
-    )
-
-    # Initialize the Perturbinator
+    # Initialize model
     model = Perturbinator(
         gene_input_dim=978,
         gene_embed_dim=256,
         drug_embed_dim=256,
+        fusion_dim=512,
         pert_output_dim=978,
+        task_type="multi-task",  # Multitask learning
         fusion_type="gating",
     )
 
-    # Criterion and Optimizer
-    criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.get("lr", 1e-3), weight_decay=1e-5)
+    # Define multitask loss
+    criterion = MultiTaskLoss(gene_loss_weight=1.0, viability_loss_weight=1.0)
+
+    # Optimizer and scheduler
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=config.get("lr", 1e-3), weight_decay=1e-5
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=3
     )
 
+    # Train the model
     train_losses, val_losses = train_multimodal_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        criterion=criterion,
         optimizer=optimizer,
+        criterion=criterion,
         scheduler=scheduler,
-        epochs=20,
+        epochs=config.get("epochs", 20),
         device=device,
         gradient_clipping=1.0,
         early_stopping_patience=5,
-        model_name="Perturbinator",
+        model_name="Perturbinator_MultiTask",
         use_mixed_precision=True,
     )
 
-    # Log the final train and validation losses
-    logging.debug("Final train and validation losses:")
-    logging.debug(f"Train Losses: {train_losses[-1]}")
-    logging.debug(f"Validation Losses: {val_losses[-1]}")
+    # Log training results
+    logging.info("Final train and validation losses:")
+    logging.info(f"Train Loss: {train_losses[-1]:.4f}")
+    logging.info(f"Validation Loss: {val_losses[-1]:.4f}")
 
     # Evaluate on test set
     test_metrics = evaluate_multimodal_model(
         model, test_loader, criterion=criterion, device=device
     )
-    logging.debug(f"Test Metrics:")
-    logging.debug(f"MSE: {test_metrics['MSE']}, MAE: {test_metrics['MAE']}")
-    logging.debug(
-        f"R²: {test_metrics['R2']}, Pearson Correlation: {test_metrics['PCC']}"
+
+    logging.info(f"Test Metrics:")
+    logging.info(f"Gene Expression Metrics: {test_metrics['gene_expression_metrics']}")
+    logging.info(f"Viability Metrics: {test_metrics['viability_metrics']}")
+
+    # Log individual metrics to wandb
+    wandb.log(
+        {
+            "Gene Expression MSE": test_metrics["gene_expression_metrics"]["MSE"],
+            "Gene Expression MAE": test_metrics["gene_expression_metrics"]["MAE"],
+            "Gene Expression R2": test_metrics["gene_expression_metrics"]["R2"],
+            "Gene Expression PCC": test_metrics["gene_expression_metrics"]["PCC"],
+            "Viability MSE": test_metrics["viability_metrics"]["MSE"],
+            "Viability MAE": test_metrics["viability_metrics"]["MAE"],
+            "Viability R2": test_metrics["viability_metrics"]["R2"],
+            "Viability PCC": test_metrics["viability_metrics"]["PCC"],
+        }
     )
-    
-    wandb.log({"MSE": test_metrics["MSE"], "MAE": test_metrics["MAE"],"R2": test_metrics["R2"], "PCC": test_metrics["PCC"]})
 
     wandb.finish()

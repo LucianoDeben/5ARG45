@@ -116,51 +116,82 @@ def evaluate_multimodal_model(
     Args:
         model (nn.Module): Trained PyTorch model.
         test_loader (DataLoader): DataLoader for the test set.
-        criterion (callable, optional): Loss function.
+        criterion (callable, optional): Loss function for multi-task learning.
         device (str): "cpu" or "cuda".
         calculate_metrics (bool): If True, calculate additional regression metrics.
 
     Returns:
-        dict: Dictionary with keys like "MSE", "MAE", "R²", "Pearson Correlation".
+        dict: Dictionary with keys like "gene_expression_metrics" and "viability_metrics".
     """
     model.to(device)
     model.eval()
 
     test_loss = 0.0
-    all_preds = []
-    all_labels = []
+    gene_preds, gene_labels = [], []
+    viability_preds, viability_labels = [], []
 
     with torch.no_grad():
         for batch in test_loader:
             # Extract inputs
-            features = batch["features"].to(device).float()  # Gene expression
-            labels = batch["labels"].to(device).float()  # Perturbed expression
-            smiles_tokens = batch["smiles_tokens"].to(device).long()  # Tokenized SMILES
-            dosages = batch["dosage"].to(device).float()  # Move dosage to device
+            features = batch["features"].to(device).float()
+            gene_labels_batch = batch["labels"].to(device).float()
+            viability_labels_batch = batch["viability"].to(device).float()
+            smiles_tokens = batch["smiles_tokens"].to(device).long()
+            dosages = batch["dosage"].to(device).float()
 
             # Forward pass
             outputs = model(features, smiles_tokens, dosages)
 
+            # Split outputs for multi-task learning
+            gene_outputs = outputs["gene_expression"]
+            viability_outputs = outputs["viability"]
+
             # Compute loss if criterion is provided
             if criterion is not None:
-                loss = criterion(outputs, labels)
-                test_loss += loss.item() * labels.size(0)
+                loss = criterion(outputs, gene_labels_batch, viability_labels_batch)
+                test_loss += loss.item() * gene_labels_batch.size(0)
 
-            # Store predictions and labels
-            all_preds.append(outputs.cpu())
-            all_labels.append(labels.cpu())
+            # Store predictions and labels for metrics
+            gene_preds.append(gene_outputs.cpu())
+            gene_labels.append(gene_labels_batch.cpu())
+            viability_preds.append(viability_outputs.cpu())
+            viability_labels.append(viability_labels_batch.cpu())
 
     # Concatenate all predictions and labels
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
+    gene_preds = torch.cat(gene_preds, dim=0).numpy()
+    gene_labels = torch.cat(gene_labels, dim=0).numpy()
+    viability_preds = torch.cat(viability_preds, dim=0).squeeze().numpy()
+    viability_labels = torch.cat(viability_labels, dim=0).squeeze().numpy()
 
-    # Compute metrics
-    metrics = {}
-    if criterion is not None:
-        metrics["MSE"] = test_loss / len(test_loader.dataset)
+    # Compute metrics for gene expression
+    gene_metrics = {}
     if calculate_metrics:
-        mse, mae, r2, pearson_coef = evaluate_regression_metrics(all_labels, all_preds)
-        metrics.update({"MAE": mae, "R2": r2, "PCC": pearson_coef})
+        mse, mae, r2, pearson_coef = evaluate_regression_metrics(
+            gene_labels, gene_preds
+        )
+        gene_metrics.update({"MSE": mse, "MAE": mae, "R2": r2, "PCC": pearson_coef})
+
+    # Compute metrics for viability prediction
+    viability_metrics = {}
+    if calculate_metrics:
+        mse, mae, r2, pearson_coef = evaluate_regression_metrics(
+            viability_labels, viability_preds
+        )
+        # Handle constant input for Pearson correlation
+        if viability_labels.std() == 0 or viability_preds.std() == 0:
+            pearson_coef = float("nan")
+        viability_metrics.update(
+            {"MSE": mse, "MAE": mae, "R2": r2, "PCC": pearson_coef}
+        )
+
+    # Combine metrics
+    metrics = {
+        "gene_expression_metrics": gene_metrics,
+        "viability_metrics": viability_metrics,
+    }
+
+    if criterion is not None:
+        metrics["Total Loss"] = test_loss / len(test_loader.dataset)
 
     return metrics
 

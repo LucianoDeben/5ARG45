@@ -173,9 +173,6 @@ def train_multimodal_model(
     model_name="Perturbinator",
     use_mixed_precision=True,
 ):
-    """
-    Updated training loop for a multimodal model with tokenized SMILES input.
-    """
     model.to(device)
     scaler = GradScaler(enabled=use_mixed_precision)
 
@@ -193,17 +190,18 @@ def train_multimodal_model(
 
         for batch in train_loader:
             # Extract data from batch
-            features = batch["features"].to(device).float()  # Gene expression
-            labels = batch["labels"].to(device).float()  # Perturbed gene expression
-            smiles_tokens = batch["smiles_tokens"].to(device).long()  # SMILES tokens
-            dosages = batch["dosage"].to(device).float()  # Move dosage to device
+            features = batch["features"].to(device).float()
+            gene_labels = batch["labels"].to(device).float()
+            smiles_tokens = batch["smiles_tokens"].to(device).long()
+            dosages = batch["dosage"].to(device).float()
+            viability_labels = batch["viability"].to(device).float()
 
             optimizer.zero_grad(set_to_none=True)
 
             with autocast(enabled=use_mixed_precision):
                 # Forward pass
                 outputs = model(features, smiles_tokens, dosages)
-                loss = criterion(outputs, labels)
+                loss = criterion(outputs, gene_labels, viability_labels)
 
             # Backward pass and optimizer step
             scaler.scale(loss).backward()
@@ -231,13 +229,14 @@ def train_multimodal_model(
         with torch.no_grad(), autocast(enabled=use_mixed_precision):
             for batch in val_loader:
                 features = batch["features"].to(device).float()
-                labels = batch["labels"].to(device).float()
+                gene_labels = batch["labels"].to(device).float()
                 smiles_tokens = batch["smiles_tokens"].to(device).long()
-                dosages = batch["dosage"].to(device).float()  # Move dosage to device
+                dosages = batch["dosage"].to(device).float()
+                viability_labels = batch["viability"].to(device).float()
 
                 # Forward pass
                 outputs = model(features, smiles_tokens, dosages)
-                val_loss = criterion(outputs, labels)
+                val_loss = criterion(outputs, gene_labels, viability_labels)
 
                 # Accumulate validation loss
                 batch_size = features.size(0)
@@ -262,7 +261,6 @@ def train_multimodal_model(
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             patience_counter = 0
-            # Save best model state on CPU
             best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
         else:
             patience_counter += 1
