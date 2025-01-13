@@ -10,8 +10,8 @@ def init_wandb():
             "lr": 0.001,
             "architecture": "Perturbinator",
             "dataset": "LINCS/CTRPv2",
-            "epochs": 20,
-            "batch_size": 512,
+            "epochs": 30,
+            "batch_size": 1024,
         },
     )
 

@@ -21,7 +21,7 @@ class PerturbationDataset(Dataset):
         smiles_dict: dict,
         tokenizer,
         plate_column: str = "det_plate",
-        normalize: bool = True,
+        normalize: str = "min-max",  # Options: "min-max", "z-score", or None
         n_rows: int | None = None,
         pairing: str = "random",
         max_pairs_per_plate: int | None = None,
@@ -89,9 +89,11 @@ class PerturbationDataset(Dataset):
             pairing=self.pairing, max_pairs_per_plate=self.max_pairs_per_plate
         )
 
-        # Compute min-max normalization if requested
-        if self.normalize:
+        # Compute normalization statistics if requested
+        if self.normalize == "min-max":
             self._compute_minmax()
+        elif self.normalize == "z-score":
+            self._compute_zscore()
 
     def _load_h5(
         self,
@@ -169,8 +171,15 @@ class PerturbationDataset(Dataset):
         return plate_to_samples
 
     def _compute_minmax(self):
+        """Compute global min-max values for normalization."""
         self.global_min = self.ctrl_data.min(axis=0)
         self.global_max = self.ctrl_data.max(axis=0)
+
+    def _compute_zscore(self):
+        """Compute global mean and standard deviation for z-score normalization."""
+        self.global_mean = self.ctrl_data.mean(axis=0)
+        self.global_std = self.ctrl_data.std(axis=0)
+        self.global_std[self.global_std == 0] = 1e-8  # Avoid division by zero
 
     def __len__(self):
         return len(self.pairs)
@@ -183,11 +192,15 @@ class PerturbationDataset(Dataset):
         ctrl_expr = self.ctrl_data[ctrl_idx, :]
         pert_expr = self.pert_data[pert_idx, :]
 
-        if self.normalize:
+        # Apply normalization
+        if self.normalize == "min-max":
             rng = self.global_max - self.global_min
             rng[rng == 0] = 1e-8
             ctrl_expr = (ctrl_expr - self.global_min) / rng
             pert_expr = (pert_expr - self.global_min) / rng
+        elif self.normalize == "z-score":
+            ctrl_expr = (ctrl_expr - self.global_mean) / self.global_std
+            pert_expr = (pert_expr - self.global_mean) / self.global_std
 
         ctrl_meta = self.ctrl_metadata.loc[ctrl_id].to_dict()
         pert_meta = self.pert_metadata.loc[pert_id].to_dict()

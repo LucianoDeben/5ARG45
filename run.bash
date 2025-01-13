@@ -18,7 +18,7 @@ module load Python/3.9.18
 . /etc/bashrc
 . ~/.bashrc
 
-source ./5ARG45/bin/activate
+source ./venv/bin/activate
 
 # Debugging: print environment details
 echo "Running on node:"

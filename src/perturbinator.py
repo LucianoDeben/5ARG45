@@ -483,23 +483,29 @@ class MultiTaskLoss(nn.Module):
         self.gene_loss_weight = gene_loss_weight
         self.viability_loss_weight = viability_loss_weight
 
-    def forward(self, outputs, gene_labels, viability_labels):
+    def forward(self, outputs, gene_labels=None, viability_labels=None):
+        total_loss = 0.0
+
         # Gene expression loss
-        gene_loss = torch.nn.functional.mse_loss(
-            outputs["gene_expression"], gene_labels
-        )
+        if "gene_expression" in outputs and gene_labels is not None:
+            gene_loss = torch.nn.functional.mse_loss(
+                outputs["gene_expression"], gene_labels
+            )
+            total_loss += self.gene_loss_weight * gene_loss
 
-        # Viability prediction loss (MSE since it's continuous)
-        viability_loss = torch.nn.functional.mse_loss(
-            outputs["viability"].squeeze(), viability_labels
-        )
+        # Viability prediction loss
+        if "viability" in outputs and viability_labels is not None:
+            viability_loss = torch.nn.functional.mse_loss(
+                outputs["viability"].squeeze(), viability_labels
+            )
+            total_loss += self.viability_loss_weight * viability_loss
 
-        # Combine weighted losses
-        total_loss = (
-            self.gene_loss_weight * gene_loss
-            + self.viability_loss_weight * viability_loss
-        )
+        # Ensure at least one loss is computed
+        if total_loss == 0.0:
+            raise ValueError("No valid labels or outputs provided for loss calculation.")
+
         return total_loss
+
 
 
 if __name__ == "__main__":
@@ -517,7 +523,6 @@ if __name__ == "__main__":
     import pandas as pd
     import torch
     from deepchem.feat.smiles_tokenizer import SmilesTokenizer
-    from torch import nn
     from torch.utils.data import DataLoader, random_split
 
     from config import init_wandb
@@ -560,8 +565,8 @@ if __name__ == "__main__":
         perturbations_file=perturbations,
         smiles_dict=smiles_dict,
         plate_column="det_plate",
-        normalize=True,
-        n_rows=1000,
+        normalize="min-max",
+        n_rows=75000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
@@ -593,7 +598,7 @@ if __name__ == "__main__":
         drug_embed_dim=256,
         fusion_dim=512,
         pert_output_dim=978,
-        task_type="multi-task",  # Multitask learning
+        task_type="gene-expression",  # Multitask learning
         fusion_type="gating",
     )
 
@@ -616,11 +621,11 @@ if __name__ == "__main__":
         optimizer=optimizer,
         criterion=criterion,
         scheduler=scheduler,
-        epochs=config.get("epochs", 20),
+        epochs=config.get("epochs", 25),
         device=device,
         gradient_clipping=1.0,
         early_stopping_patience=5,
-        model_name="Perturbinator_MultiTask",
+        model_name="Perturbinator",
         use_mixed_precision=True,
     )
 
@@ -634,22 +639,31 @@ if __name__ == "__main__":
         model, test_loader, criterion=criterion, device=device
     )
 
-    logging.info(f"Test Metrics:")
-    logging.info(f"Gene Expression Metrics: {test_metrics['gene_expression_metrics']}")
-    logging.info(f"Viability Metrics: {test_metrics['viability_metrics']}")
+    logging.info("Test Metrics:")
 
-    # Log individual metrics to wandb
-    wandb.log(
-        {
-            "Gene Expression MSE": test_metrics["gene_expression_metrics"]["MSE"],
-            "Gene Expression MAE": test_metrics["gene_expression_metrics"]["MAE"],
-            "Gene Expression R2": test_metrics["gene_expression_metrics"]["R2"],
-            "Gene Expression PCC": test_metrics["gene_expression_metrics"]["PCC"],
-            "Viability MSE": test_metrics["viability_metrics"]["MSE"],
-            "Viability MAE": test_metrics["viability_metrics"]["MAE"],
-            "Viability R2": test_metrics["viability_metrics"]["R2"],
-            "Viability PCC": test_metrics["viability_metrics"]["PCC"],
-        }
-    )
+    # Log gene expression metrics if available
+    if "gene_expression_metrics" in test_metrics:
+        logging.info(f"Gene Expression Metrics: {test_metrics['gene_expression_metrics']}")
+        wandb.log(
+            {
+                "Gene Expression MSE": test_metrics["gene_expression_metrics"].get("MSE", None),
+                "Gene Expression MAE": test_metrics["gene_expression_metrics"].get("MAE", None),
+                "Gene Expression R2": test_metrics["gene_expression_metrics"].get("R2", None),
+                "Gene Expression PCC": test_metrics["gene_expression_metrics"].get("PCC", None),
+            }
+        )
+
+    # Log viability metrics if available
+    if "viability_metrics" in test_metrics:
+        logging.info(f"Viability Metrics: {test_metrics['viability_metrics']}")
+        wandb.log(
+            {
+                "Viability MSE": test_metrics["viability_metrics"].get("MSE", None),
+                "Viability MAE": test_metrics["viability_metrics"].get("MAE", None),
+                "Viability R2": test_metrics["viability_metrics"].get("R2", None),
+                "Viability PCC": test_metrics["viability_metrics"].get("PCC", None),
+            }
+        )
 
     wandb.finish()
+

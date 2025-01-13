@@ -189,21 +189,29 @@ def train_multimodal_model(
         num_train_samples = 0
 
         for batch in train_loader:
-            # Extract data from batch
             features = batch["features"].to(device).float()
             gene_labels = batch["labels"].to(device).float()
             smiles_tokens = batch["smiles_tokens"].to(device).long()
             dosages = batch["dosage"].to(device).float()
-            viability_labels = batch["viability"].to(device).float()
+            viability_labels = batch.get("viability", None)
+            if viability_labels is not None:
+                viability_labels = viability_labels.to(device).float()
 
             optimizer.zero_grad(set_to_none=True)
 
             with autocast(enabled=use_mixed_precision):
-                # Forward pass
                 outputs = model(features, smiles_tokens, dosages)
-                loss = criterion(outputs, gene_labels, viability_labels)
 
-            # Backward pass and optimizer step
+                # Calculate loss based on task type
+                if model.task_type == "multi-task":
+                    loss = criterion(outputs, gene_labels, viability_labels)
+                elif model.task_type == "gene-expression":
+                    loss = criterion(outputs, gene_labels, None)
+                elif model.task_type == "viability":
+                    loss = criterion(outputs, None, viability_labels)
+                else:
+                    raise ValueError(f"Unsupported task type: {model.task_type}")
+
             scaler.scale(loss).backward()
 
             if gradient_clipping is not None:
@@ -213,7 +221,6 @@ def train_multimodal_model(
             scaler.step(optimizer)
             scaler.update()
 
-            # Accumulate loss
             batch_size = features.size(0)
             running_train_loss += loss.item() * batch_size
             num_train_samples += batch_size
@@ -221,7 +228,6 @@ def train_multimodal_model(
         epoch_train_loss = running_train_loss / num_train_samples
         train_losses.append(epoch_train_loss)
 
-        # Validation phase
         model.eval()
         running_val_loss = 0.0
         num_val_samples = 0
@@ -232,13 +238,22 @@ def train_multimodal_model(
                 gene_labels = batch["labels"].to(device).float()
                 smiles_tokens = batch["smiles_tokens"].to(device).long()
                 dosages = batch["dosage"].to(device).float()
-                viability_labels = batch["viability"].to(device).float()
+                viability_labels = batch.get("viability", None)
+                if viability_labels is not None:
+                    viability_labels = viability_labels.to(device).float()
 
-                # Forward pass
                 outputs = model(features, smiles_tokens, dosages)
-                val_loss = criterion(outputs, gene_labels, viability_labels)
 
-                # Accumulate validation loss
+                # Calculate validation loss
+                if model.task_type == "multi-task":
+                    val_loss = criterion(outputs, gene_labels, viability_labels)
+                elif model.task_type == "gene-expression":
+                    val_loss = criterion(outputs, gene_labels, None)
+                elif model.task_type == "viability":
+                    val_loss = criterion(outputs, None, viability_labels)
+                else:
+                    raise ValueError(f"Unsupported task type: {model.task_type}")
+
                 batch_size = features.size(0)
                 running_val_loss += val_loss.item() * batch_size
                 num_val_samples += batch_size
@@ -246,18 +261,15 @@ def train_multimodal_model(
         epoch_val_loss = running_val_loss / num_val_samples
         val_losses.append(epoch_val_loss)
 
-        # Learning rate scheduling
         if scheduler is not None:
             scheduler.step(epoch_val_loss)
 
-        # Logging
         logging.info(
             f"Epoch {epoch + 1}/{epochs} - {model_name}, "
             f"Train Loss: {epoch_train_loss:.4f}, "
             f"Val Loss: {epoch_val_loss:.4f}"
         )
 
-        # Early stopping check
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             patience_counter = 0
@@ -268,8 +280,12 @@ def train_multimodal_model(
                 logging.info(f"Early stopping triggered at epoch {epoch + 1}.")
                 break
 
-    # Restore the best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+        
+    # Save the model
+    torch.save(model.state_dict(), f"./{model_name}.pt")
 
     return train_losses, val_losses
+
+
