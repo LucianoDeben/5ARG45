@@ -9,7 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import pytest
 
-from src.preprocess.preprocess import (
+from preprocess import (
     load_config,
     load_dataset,
     merge_chemical_and_y,

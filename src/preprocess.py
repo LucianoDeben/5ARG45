@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 
+import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 sys.path.append("src")
@@ -432,7 +433,7 @@ def split_data(
         )
 
     # Drop target and additional columns from X
-    exclude_columns = [target_name, stratify_by] + keep_columns
+    exclude_columns = [target_name, stratify_by, "pert_dose"] + keep_columns
     exclude_columns = [col for col in exclude_columns if col in df.columns]
 
     X_train = train_df.drop(columns=exclude_columns, errors="ignore")
@@ -457,6 +458,91 @@ def split_data(
     )
 
     return X_train, y_train, X_val, y_val, X_test, y_test
+
+
+def filter_dataset_and_network(dataset: pd.DataFrame, network: pd.DataFrame) -> tuple:
+    """
+    Filters both the dataset and the regulatory network to include only genes
+    (targets) that are present in both.
+
+    Args:
+        dataset (pd.DataFrame): Gene expression dataset (columns = genes, rows = samples).
+        network (pd.DataFrame): Regulatory network with 'source', 'target', and 'weight' columns.
+
+    Returns:
+        tuple: Filtered dataset and filtered network as (filtered_dataset, filtered_network).
+    """
+    # Validate network columns
+    required_columns = {"source", "target", "weight"}
+    if not required_columns.issubset(network.columns):
+        raise ValueError(
+            f"The network DataFrame must contain the columns: {required_columns}"
+        )
+
+    # Identify intersecting genes
+    dataset_genes = set(dataset.columns)
+    network_genes = set(network["target"].unique())
+    intersecting_genes = dataset_genes.intersection(network_genes)
+
+    if not intersecting_genes:
+        raise ValueError(
+            "No overlapping genes between the dataset and the regulatory network."
+        )
+
+    # Filter dataset to include only intersecting genes
+    filtered_dataset = dataset[list(intersecting_genes)]
+
+    # Filter network to include only interactions involving intersecting genes
+    filtered_network = network[network["target"].isin(intersecting_genes)]
+
+    logging.info(
+        f"Filtered dataset shape: {filtered_dataset.shape}, "
+        f"Filtered network size: {len(filtered_network)} interactions for {len(intersecting_genes)} genes."
+    )
+
+    return filtered_dataset, filtered_network
+
+
+def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
+    """
+    Creates a PyTorch tensor representing the gene-TF regulatory matrix.
+
+    Args:
+        net (pd.DataFrame): Filtered regulatory network with 'source', 'target', and 'weight' columns.
+        genes (list): List of genes to include as rows in the matrix.
+
+    Returns:
+        torch.Tensor: Gene-TF matrix of shape (num_genes, num_tfs), where:
+            - `1` indicates an activating interaction.
+            - `-1` indicates an inhibiting interaction.
+            - `0` indicates no interaction.
+    """
+    # Validate input
+    required_columns = {"source", "target", "weight"}
+    if not required_columns.issubset(net.columns):
+        raise ValueError(
+            f"The network DataFrame must contain the columns: {required_columns}"
+        )
+
+    # Extract unique TFs and initialize the matrix
+    unique_tfs = sorted(net["source"].unique())
+    gene_to_tf_df = pd.DataFrame(0, index=genes, columns=unique_tfs, dtype=float)
+
+    # Populate the matrix with interaction weights
+    for _, row in net.iterrows():
+        gene = row["target"]
+        tf = row["source"]
+        weight = row["weight"]
+        if gene in genes and tf in unique_tfs:
+            gene_to_tf_df.at[gene, tf] = weight
+
+    # Convert the DataFrame to a PyTorch tensor
+    gene_tf_matrix = torch.tensor(gene_to_tf_df.values, dtype=torch.float32)
+    logging.info(
+        f"Created gene-TF matrix with shape {gene_tf_matrix.shape} "
+        f"(num_genes={len(genes)}, num_tfs={len(unique_tfs)})."
+    )
+    return gene_tf_matrix
 
 
 if __name__ == "__main__":

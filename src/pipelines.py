@@ -9,6 +9,7 @@ from sklearn.model_selection import RandomizedSearchCV, cross_val_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from evaluation import evaluate_model, evaluate_shallow_model
+from preprocess import create_gene_tf_matrix, filter_network_by_genes
 from training import train_model
 from visualizations import (
     create_coefficients_visualization,
@@ -215,11 +216,10 @@ class DLModelsPipeline:
         self.feature_sets = feature_sets
         self.model_configs = model_configs
         self.gene_tf_matrix_generator = gene_tf_matrix_generator
-        self.trained_models = {}  # {(feature_set, model_name): trained_model}
-        self.results = {}  # {(feature_set, model_name): metrics_df}
+        self.trained_models = {}
+        self.results = {}
 
-    def train_and_evaluate(self):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    def train_and_evaluate(self, device):
 
         for feature_name, (
             train_loader,

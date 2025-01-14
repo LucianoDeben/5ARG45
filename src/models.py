@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pandas as pd
 
 ACTIVATIONS = {
     "relu": nn.ReLU,
@@ -107,65 +108,83 @@ class FlexibleFCNN(nn.Module):
         return out
 
 
-class SparseKnowledgeNetwork(FlexibleFCNN):
+class SparseKnowledgeNetwork(nn.Module):
     def __init__(
         self,
         gene_tf_matrix: torch.Tensor,
-        input_dim: int,
         hidden_dims: list,
         output_dim: int = 1,
         first_activation: str = "tanh",
         downstream_activation: str = "relu",
         dropout_prob: float = 0.2,
-        residual: bool = True,
-        norm_type: str = "batchnorm",
         weight_init: str = "xavier",
+        use_batchnorm: bool = True,
     ):
         """
-        Knowledge-Informed Sparse Network with Flexible FCNN capabilities.
+        Knowledge-Informed Sparse Network with trainable gene-TF interactions.
 
         Args:
-            gene_tf_matrix (torch.Tensor): Binary (-1, 0, 1) gene-TF connection matrix.
-            input_dim (int): Number of input genes (columns in gene_tf_matrix).
+            gene_tf_matrix (torch.Tensor): Precomputed gene-TF matrix of shape (num_genes, num_tfs).
             hidden_dims (list of int): Sizes of additional hidden layers after TF activations.
             output_dim (int): Number of output features (1 for regression).
-            first_activation (str): Activation function after the gene-to-TF layer.
-            downstream_activation (str): Activation function for downstream layers.
+            first_activation (str): Activation function after the gene-to-TF layer (Tanh or Sigmoid).
+            downstream_activation (str): Activation function for downstream layers (e.g., ReLU).
             dropout_prob (float): Dropout probability.
-            residual (bool): Whether to use residual connections in downstream layers.
-            norm_type (str): Normalization type ("batchnorm" or "layernorm").
             weight_init (str): Weight initialization method ("xavier" or "kaiming").
+            use_batchnorm (bool): Whether to use batch normalization in downstream layers.
         """
-        # Validate gene_tf_matrix dimensions
-        if gene_tf_matrix.shape[0] != input_dim:
-            raise ValueError(
-                f"Input dimension ({input_dim}) does not match gene-to-TF matrix rows ({gene_tf_matrix.shape[0]})."
-            )
+        super(SparseKnowledgeNetwork, self).__init__()
+        self.hidden_dims = hidden_dims
+        self.output_dim = output_dim
+        self.dropout_prob = dropout_prob
+        self.use_batchnorm = use_batchnorm
 
-        # Initialize the base FlexibleFCNN
-        tf_dim = gene_tf_matrix.shape[1]
-        super(SparseKnowledgeNetwork, self).__init__(
-            input_dim=tf_dim,
-            hidden_dims=hidden_dims,
-            output_dim=output_dim,
-            activation_fn=downstream_activation,
-            dropout_prob=dropout_prob,
-            residual=residual,
-            norm_type=norm_type,
-            weight_init=weight_init,
-        )
+        # Store the precomputed gene-TF matrix
+        self.gene_tf_matrix = gene_tf_matrix
 
-        # Knowledge-informed gene-to-TF layer
-        self.gene_to_tf_weights = nn.Parameter(gene_tf_matrix.clone().float())
-
-        # First activation function for the gene-to-TF layer
+        # Validate first activation function
         if first_activation.lower() not in {"tanh", "sigmoid"}:
             raise ValueError("First activation must be 'tanh' or 'sigmoid'.")
         self.first_activation = getattr(F, first_activation.lower())
 
+        # Downstream activation function
+        self.downstream_activation = getattr(F, downstream_activation.lower())
+
+        # Define the hidden layers after the TF layer
+        tf_dim = self.gene_tf_matrix.shape[1]  # Number of TFs
+        hidden_dims = [tf_dim] + hidden_dims
+        self.hidden_layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList() if use_batchnorm else None
+
+        for i in range(len(hidden_dims) - 1):
+            self.hidden_layers.append(nn.Linear(hidden_dims[i], hidden_dims[i + 1]))
+            if use_batchnorm:
+                self.batch_norms.append(nn.BatchNorm1d(hidden_dims[i + 1]))
+
+        # Output layer
+        self.output_layer = nn.Linear(hidden_dims[-1], output_dim)
+        self.dropout = nn.Dropout(p=dropout_prob)
+
+        # Initialize weights
+        self._initialize_weights(weight_init)
+
+    def _initialize_weights(self, method="xavier"):
+        """
+        Initialize model weights.
+        """
+        for layer in list(self.hidden_layers) + [self.output_layer]:
+            if method == "xavier":
+                nn.init.xavier_uniform_(layer.weight)
+            elif method == "kaiming":
+                nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
+            else:
+                raise ValueError(f"Unknown weight initialization method: {method}")
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+
     def forward(self, x):
         """
-        Forward pass for SparseKnowledgeNetwork.
+        Forward pass for the sparse knowledge-informed network.
 
         Args:
             x (torch.Tensor): Input tensor (gene expression data).
@@ -173,11 +192,23 @@ class SparseKnowledgeNetwork(FlexibleFCNN):
         Returns:
             torch.Tensor: Model output.
         """
-        # Trainable gene-to-TF interaction layer
-        tf_activations = torch.matmul(x, self.gene_to_tf_weights)
+        # Gene-to-TF interaction layer
+        tf_activations = torch.matmul(x, self.gene_tf_matrix)
 
-        # Apply first activation (e.g., Tanh or Sigmoid)
+        # Apply the first activation function (Tanh or Sigmoid)
         tf_activations = self.first_activation(tf_activations)
 
-        # Pass through FlexibleFCNN (hidden layers + output layer)
-        return super(SparseKnowledgeNetwork, self).forward(tf_activations)
+        # Apply additional hidden layers
+        hidden_activations = tf_activations
+        for i, layer in enumerate(self.hidden_layers):
+            hidden_activations = layer(hidden_activations)
+            if self.use_batchnorm:
+                hidden_activations = self.batch_norms[i](hidden_activations)
+            hidden_activations = self.downstream_activation(hidden_activations)
+            hidden_activations = self.dropout(hidden_activations)
+
+        # Output layer
+        output = self.output_layer(hidden_activations)
+        return output
+
+
