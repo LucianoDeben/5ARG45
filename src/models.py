@@ -1,7 +1,6 @@
-import math
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 ACTIVATIONS = {
     "relu": nn.ReLU,
@@ -18,7 +17,7 @@ class FlexibleFCNN(nn.Module):
     def __init__(
         self,
         input_dim,
-        hidden_dims=[512, 256, 128],
+        hidden_dims=[512, 256, 128, 64],
         output_dim=1,
         activation_fn="relu",
         dropout_prob=0.2,
@@ -108,126 +107,77 @@ class FlexibleFCNN(nn.Module):
         return out
 
 
-class TransformerRegressor(nn.Module):
+class SparseKnowledgeNetwork(FlexibleFCNN):
     def __init__(
         self,
-        input_dim,
-        d_model=128,
-        nhead=4,
-        num_layers=2,
-        dim_feedforward=256,
-        dropout=0.1,
-        output_dim=1,
+        gene_tf_matrix: torch.Tensor,
+        input_dim: int,
+        hidden_dims: list,
+        output_dim: int = 1,
+        first_activation: str = "tanh",
+        downstream_activation: str = "relu",
+        dropout_prob: float = 0.2,
+        residual: bool = True,
+        norm_type: str = "batchnorm",
+        weight_init: str = "xavier",
     ):
-        super(TransformerRegressor, self).__init__()
+        """
+        Knowledge-Informed Sparse Network with Flexible FCNN capabilities.
 
-        # Positional encoding for tokens if needed
-        self.pos_embedding = PositionalEncoding(d_model, dropout, max_len=input_dim)
-
-        # Project input genes into d_model dimension
-        self.input_proj = nn.Linear(1, d_model)
-
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
-        )
-
-        self.norm = nn.LayerNorm(d_model)
-        self.output_layer = nn.Linear(d_model, output_dim)
-
-    def forward(self, x):
-        # x: (B, input_dim)
-        # Treat each gene as a token: shape (B, Tokens)
-        # Add channel dimension: (B, Tokens, 1)
-        x = x.unsqueeze(-1)
-        # Project to d_model
-        x = self.input_proj(x)  # (B, Tokens, d_model)
-
-        # Transformer expects (Tokens, B, d_model)
-        x = x.transpose(0, 1)  # (Tokens, B, d_model)
-
-        x = self.pos_embedding(x)  # add positional encoding
-        x = self.transformer_encoder(x)  # (Tokens, B, d_model)
-
-        x = x.mean(dim=0)  # pool over tokens (genes)
-        x = self.norm(x)
-        x = self.output_layer(x)
-        return x
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=10000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(1)  # (max_len, 1, d_model)
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):
-        # x: (Tokens, B, d_model)
-        length = x.size(0)
-        x = x + self.pe[:length, :]
-        return self.dropout(x)
-
-
-class CNNRegressor(nn.Module):
-    def __init__(
-        self,
-        input_dim,
-        num_filters=64,
-        kernel_size=7,
-        num_layers=3,
-        dropout_prob=0.2,
-        output_dim=1,
-    ):
-        super(CNNRegressor, self).__init__()
-
-        layers = []
-        in_channels = 1  # One "channel" of gene expression
-        # We'll treat input as (B, 1, input_dim)
-        for i in range(num_layers):
-            layers.append(
-                nn.Conv1d(
-                    in_channels,
-                    num_filters,
-                    kernel_size=kernel_size,
-                    padding=kernel_size // 2,
-                )
+        Args:
+            gene_tf_matrix (torch.Tensor): Binary (-1, 0, 1) gene-TF connection matrix.
+            input_dim (int): Number of input genes (columns in gene_tf_matrix).
+            hidden_dims (list of int): Sizes of additional hidden layers after TF activations.
+            output_dim (int): Number of output features (1 for regression).
+            first_activation (str): Activation function after the gene-to-TF layer.
+            downstream_activation (str): Activation function for downstream layers.
+            dropout_prob (float): Dropout probability.
+            residual (bool): Whether to use residual connections in downstream layers.
+            norm_type (str): Normalization type ("batchnorm" or "layernorm").
+            weight_init (str): Weight initialization method ("xavier" or "kaiming").
+        """
+        # Validate gene_tf_matrix dimensions
+        if gene_tf_matrix.shape[0] != input_dim:
+            raise ValueError(
+                f"Input dimension ({input_dim}) does not match gene-to-TF matrix rows ({gene_tf_matrix.shape[0]})."
             )
-            layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.BatchNorm1d(num_filters))
-            layers.append(nn.Dropout(dropout_prob))
-            in_channels = num_filters
 
-        self.conv_layers = nn.Sequential(*layers)
-        self.fc = nn.Sequential(
-            nn.Linear(num_filters, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout_prob),
-            nn.Linear(128, output_dim),
+        # Initialize the base FlexibleFCNN
+        tf_dim = gene_tf_matrix.shape[1]
+        super(SparseKnowledgeNetwork, self).__init__(
+            input_dim=tf_dim,
+            hidden_dims=hidden_dims,
+            output_dim=output_dim,
+            activation_fn=downstream_activation,
+            dropout_prob=dropout_prob,
+            residual=residual,
+            norm_type=norm_type,
+            weight_init=weight_init,
         )
-        self.input_dim = input_dim
+
+        # Knowledge-informed gene-to-TF layer
+        self.gene_to_tf_weights = nn.Parameter(gene_tf_matrix.clone().float())
+
+        # First activation function for the gene-to-TF layer
+        if first_activation.lower() not in {"tanh", "sigmoid"}:
+            raise ValueError("First activation must be 'tanh' or 'sigmoid'.")
+        self.first_activation = getattr(F, first_activation.lower())
 
     def forward(self, x):
-        # x: (B, input_dim)
-        x = x.unsqueeze(1)  # (B, 1, input_dim)
-        x = self.conv_layers(x)  # (B, num_filters, input_dim)
-        # Pool over input_dim
-        x = x.mean(dim=2)  # (B, num_filters)
-        x = self.fc(x)  # (B, output_dim)
-        return x
+        """
+        Forward pass for SparseKnowledgeNetwork.
+
+        Args:
+            x (torch.Tensor): Input tensor (gene expression data).
+
+        Returns:
+            torch.Tensor: Model output.
+        """
+        # Trainable gene-to-TF interaction layer
+        tf_activations = torch.matmul(x, self.gene_to_tf_weights)
+
+        # Apply first activation (e.g., Tanh or Sigmoid)
+        tf_activations = self.first_activation(tf_activations)
+
+        # Pass through FlexibleFCNN (hidden layers + output layer)
+        return super(SparseKnowledgeNetwork, self).forward(tf_activations)

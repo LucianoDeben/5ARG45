@@ -184,7 +184,7 @@ class DLModelsPipeline:
     architectures and training setups.
     """
 
-    def __init__(self, feature_sets, model_configs):
+    def __init__(self, feature_sets, model_configs, gene_tf_matrix_generator=None):
         """
         Args:
             feature_sets (dict): A dictionary of the form:
@@ -210,9 +210,11 @@ class DLModelsPipeline:
                   },
                   ...
                 }
+            gene_tf_matrix_generator (callable): A function to generate gene-TF matrices dynamically.
         """
         self.feature_sets = feature_sets
         self.model_configs = model_configs
+        self.gene_tf_matrix_generator = gene_tf_matrix_generator
         self.trained_models = {}  # {(feature_set, model_name): trained_model}
         self.results = {}  # {(feature_set, model_name): metrics_df}
 
@@ -237,8 +239,22 @@ class DLModelsPipeline:
 
                 # Instantiate the model
                 model_class = cfg["model_class"]
-                model_params = cfg.get("model_params", {})
-                model = model_class(input_dim=input_dim, **model_params).to(device)
+                model_params = cfg.get("model_params", {}).copy()
+
+                # Handle SparseKnowledgeNetwork specifically
+                if model_class.__name__ == "SparseKnowledgeNetwork":
+                    if not self.gene_tf_matrix_generator:
+                        raise ValueError(
+                            "A gene_tf_matrix_generator function must be provided for SparseKnowledgeNetwork."
+                        )
+                    gene_tf_matrix = self.gene_tf_matrix_generator(feature_name)
+                    model_params["gene_tf_matrix"] = gene_tf_matrix
+
+                # Set input_dim dynamically if required
+                if "input_dim" in model_params:
+                    model_params["input_dim"] = input_dim
+
+                model = model_class(**model_params).to(device)
 
                 # Setup criterion, optimizer, scheduler
                 criterion = cfg["criterion"]

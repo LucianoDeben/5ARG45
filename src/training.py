@@ -134,11 +134,6 @@ def train_model(
         if scheduler is not None:
             scheduler.step(epoch_val_loss)
 
-        logging.info(
-            f"Epoch {epoch+1}/{epochs} - {model_name}, "
-            f"Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}"
-        )
-
         # Early Stopping Check
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
@@ -282,10 +277,8 @@ def train_multimodal_model(
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        
+
     # Save the model
     torch.save(model.state_dict(), f"./{model_name}.pt")
 
     return train_losses, val_losses
-
-

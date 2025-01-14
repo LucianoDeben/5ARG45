@@ -100,7 +100,7 @@ def evaluate_model(model, test_loader, criterion, device="cpu", calculate_metric
     metrics = {"MSE": test_loss}
     if calculate_metrics:
         # Adjust to your use-case (e.g., if classification, you'd compute accuracy, etc.)
-        mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        _, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
         # You might change or extend evaluate_regression_metrics to handle other tasks
         metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
 
@@ -162,7 +162,9 @@ def evaluate_multimodal_model(
     if viability_preds and viability_labels:
         viability_preds = torch.cat(viability_preds, dim=0).squeeze().numpy()
         viability_labels = torch.cat(viability_labels, dim=0).squeeze().numpy()
-        viability_metrics = evaluate_regression_metrics(viability_labels, viability_preds)
+        viability_metrics = evaluate_regression_metrics(
+            viability_labels, viability_preds
+        )
         metrics["viability_metrics"] = {
             "MSE": viability_metrics[0],
             "MAE": viability_metrics[1],
@@ -174,9 +176,6 @@ def evaluate_multimodal_model(
         metrics["Total Loss"] = test_loss / len(test_loader.dataset)
 
     return metrics
-
-
-
 
 
 def evaluate_regression_metrics(y_true, y_pred):

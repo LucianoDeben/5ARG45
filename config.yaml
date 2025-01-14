@@ -7,6 +7,7 @@ data_paths:
   preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
   preprocessed_landmark_file: "data/processed/preprocessed_landmark.csv"
   preprocessed_gene_file: "data/processed/preprocessed_gene.csv"
+  preprocessed_best_inferred_file: "data/processed/preprocessed_best_inferred.csv"
   preprocessed_merged_file: "data/processed/final_dataset.csv"
 
 preprocess:
@@ -16,10 +17,12 @@ preprocess:
   test_ratio: 0.1
   use_vt: false
   vt_threshold_tf: 0.2
+  vt_threshold_best_inferred: 0.2
   vt_threshold_landmark: 0.01
   vt_threshold_gene: 0.01
   use_pca: true
   pca_var_tf: 0.99
+  pca_var_best_inferred: 0.99
   pca_var_landmark: 0.99
   pca_var_gene: 0.99
 

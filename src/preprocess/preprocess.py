@@ -110,7 +110,7 @@ def preprocess_tf_data(config: dict, standardize: bool = True):
 
 
 def preprocess_gene_data(
-    config: dict, standardize: bool = True, use_landmarks: bool = True, chunk_size=2500
+    config: dict, standardize: bool = True, feature_space: str = "all", chunk_size=2500
 ):
     """
     Preprocess gene expression data with memory-efficient writing.
@@ -118,7 +118,7 @@ def preprocess_gene_data(
     Args:
         config (dict): Configuration dictionary.
         standardize (bool): Whether to standardize the features.
-        use_landmarks (bool): Whether to use landmark genes only.
+        feature_space (str): Feature space to use ("all", "landmark", "best inferred").
         chunk_size (int): Chunk size for writing large CSV files.
 
     Raises:
@@ -134,12 +134,19 @@ def preprocess_gene_data(
         y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
 
         # Select genes based on user's choice
-        if use_landmarks:
+        if feature_space == "landmark":
             logging.debug("Using landmark genes.")
             selected_genes = geneinfo[geneinfo.feature_space == "landmark"]
-        else:
+        elif feature_space == "best inferred":
+            logging.debug("Using best inferred genes (including landmark genes).")
+            selected_genes = geneinfo[
+                geneinfo.feature_space.isin(["landmark", "best inferred"])
+            ]
+        elif feature_space == "all":
             logging.debug("Using all genes.")
             selected_genes = geneinfo
+        else:
+            raise ValueError("Invalid feature space selected.")
 
         # Select corresponding gene expression data
         selected_gene_indices = selected_genes.index
@@ -172,8 +179,12 @@ def preprocess_gene_data(
         logging.debug("Saving the preprocessed DataFrame in chunks.")
         output_file = (
             config["data_paths"]["preprocessed_landmark_file"]
-            if use_landmarks
-            else config["data_paths"]["preprocessed_gene_file"]
+            if feature_space == "landmark"
+            else (
+                config["data_paths"]["preprocessed_best_inferred_file"]
+                if feature_space == "best inferred"
+                else config["data_paths"]["preprocessed_gene_file"]
+            )
         )
 
         with open(output_file, mode="w", newline="") as f:
@@ -356,7 +367,7 @@ def split_data(
     config,
     target_name="target_name",
     stratify_by=None,
-    keep_columns=None,  # List of additional columns to retain for downstream tasks
+    keep_columns=None,
     random_state=42,
 ):
     """
@@ -378,6 +389,11 @@ def split_data(
 
     if stratify_by:
         groups = df[stratify_by]
+
+        if groups.nunique() < 3:
+            raise ValueError(
+                f"Not enough unique groups in '{stratify_by}' for stratified splitting."
+            )
 
         # Grouped split: train and temp (val + test)
         gss = GroupShuffleSplit(
@@ -428,13 +444,15 @@ def split_data(
     X_test = test_df.drop(columns=exclude_columns, errors="ignore")
     y_test = test_df[target_name]
 
-    # Optionally retain the extra columns (e.g., pert_dose) for downstream analysis
-    if keep_columns:
-        train_df = train_df[keep_columns + [target_name]]
-        val_df = val_df[keep_columns + [target_name]]
-        test_df = test_df[keep_columns + [target_name]]
+    # Validate group distribution in splits
+    if stratify_by:
+        logging.info(f"Train Groups: {train_df[stratify_by].nunique()} unique values.")
+        logging.info(
+            f"Validation Groups: {val_df[stratify_by].nunique()} unique values."
+        )
+        logging.info(f"Test Groups: {test_df[stratify_by].nunique()} unique values.")
 
-    print(
+    logging.debug(
         f"Train Shape: {X_train.shape}, Validation Shape: {X_val.shape}, Test Shape: {X_test.shape}"
     )
 
@@ -451,6 +469,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = load_config(args.config_file)
-    preprocess_tf_data(config, standardize=True)
-    preprocess_gene_data(config, standardize=True, use_landmarks=True)
-    preprocess_gene_data(config, standardize=True, use_landmarks=False)
+    # preprocess_tf_data(config, standardize=True)
+    # preprocess_gene_data(config, standardize=True, feature_space="all")
+    preprocess_gene_data(config, standardize=True, feature_space="best inferred")
+    # preprocess_gene_data(config, standardize=True, feature_space="landmark")
