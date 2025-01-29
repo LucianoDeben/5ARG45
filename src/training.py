@@ -14,17 +14,19 @@ logging.basicConfig(
 
 def _forward_pass(model, X_batch, device):
     """
-    Handle arbitrary input formats:
-    If X_batch is a tuple or list, unpack and pass as separate args.
-    Otherwise, pass as a single argument.
+    Perform a forward pass through the model, ensuring all inputs are on the correct device.
     """
-    if isinstance(X_batch, (tuple, list)):
-        X_batch = [x.to(device) for x in X_batch]
-        outputs = model(*X_batch)
-    else:
-        X_batch = X_batch.to(device)
-        outputs = model(X_batch)
-    return outputs
+    # Move input tensors to the correct device if necessary
+    X_batch = [x.to(device) if x.device != device else x for x in X_batch]
+
+    # Ensure all tensors are on the correct device type
+    for i, x in enumerate(X_batch):
+        assert (
+            x.device.type == device.type
+        ), f"Input tensor {i} is on {x.device.type}, expected {device.type}."
+
+    # Perform forward pass
+    return model(*X_batch)
 
 
 def train_model(

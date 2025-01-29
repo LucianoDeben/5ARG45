@@ -2,6 +2,10 @@
 import logging
 import os
 import sys
+import warnings
+
+# Suppress all FutureWarning messages
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 import decoupler as dc
 import pandas as pd
@@ -46,20 +50,20 @@ datasets = {
     # ),
     "Landmark Data": (
         load_sampled_data(
-            config["data_paths"]["preprocessed_landmark_file"], sample_size=1000
+            config["data_paths"]["preprocessed_landmark_file"], sample_size=30000
         ),
         "viability",
     ),
     "Best Inferred Data": (
         load_sampled_data(
-            config["data_paths"]["preprocessed_best_inferred_file"], sample_size=1000
+            config["data_paths"]["preprocessed_best_inferred_file"], sample_size=30000
         ),
         "viability",
     ),
     "Gene Data": (
         load_sampled_data(
             config["data_paths"]["preprocessed_gene_file"],
-            sample_size=1000,
+            sample_size=30000,
             use_chunks=True,
             chunk_size=1000,
         ),

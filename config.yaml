@@ -1,14 +1,14 @@
 data_paths:
-  compoundinfo_file: "data/raw/compoundinfo.csv"
-  x_file: "data/raw/X.tsv"
-  y_file: "data/raw/Y.tsv"
-  rna_file: "data/raw/X_RNA.bin"
-  geneinfo_file: "data/raw/geneinfo_beta.txt"
-  preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
+  # compoundinfo_file: "data/raw/compoundinfo.csv"
+  # x_file: "data/raw/X.tsv"
+  # y_file: "data/raw/Y.tsv"
+  # rna_file: "data/raw/X_RNA.bin"
+  # geneinfo_file: "data/raw/geneinfo_beta.txt"
+  # preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
   preprocessed_landmark_file: "data/processed/preprocessed_landmark.csv"
   preprocessed_gene_file: "data/processed/preprocessed_gene.csv"
   preprocessed_best_inferred_file: "data/processed/preprocessed_best_inferred.csv"
-  preprocessed_merged_file: "data/processed/final_dataset.csv"
+  # preprocessed_merged_file: "data/processed/final_dataset.csv"
 
 preprocess:
   scale_features: true

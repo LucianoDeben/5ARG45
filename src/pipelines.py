@@ -9,7 +9,6 @@ from sklearn.model_selection import RandomizedSearchCV, cross_val_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from evaluation import evaluate_model, evaluate_shallow_model
-from preprocess import create_gene_tf_matrix, filter_network_by_genes
 from training import train_model
 from visualizations import (
     create_coefficients_visualization,
