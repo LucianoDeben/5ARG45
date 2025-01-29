@@ -38,8 +38,8 @@ def train_model(
     scheduler=None,
     epochs=50,
     device="cpu",
-    gradient_clipping=1.0,
-    early_stopping_patience=5,
+    gradient_clipping=5.0,
+    early_stopping_patience=10,
     model_name="Model",
     use_mixed_precision=True,
 ):

@@ -22,91 +22,66 @@ class FlexibleFCNN(nn.Module):
         output_dim=1,
         activation_fn="relu",
         dropout_prob=0.2,
-        residual=True,
+        residual=False,
         norm_type="batchnorm",
-        weight_init="xavier",
+        weight_init="kaiming",
     ):
-        """
-        Flexible Fully-Connected Neural Network.
-
-        Args:
-            input_dim (int): Number of input features.
-            hidden_dims (list of int): Sizes of hidden layers.
-            output_dim (int): Output dimension (1 for regression).
-            activation_fn (str): Activation function name (e.g. "relu", "gelu", "silu").
-            dropout_prob (float): Dropout probability.
-            residual (bool): Whether to use residual connections between layers.
-            norm_type (str): Normalization type: "batchnorm", "layernorm", "none".
-            weight_init (str): Weight initialization method: "xavier" or "kaiming".
-
-        """
         super(FlexibleFCNN, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dims = hidden_dims
-        self.output_dim = output_dim
         self.residual = residual
-        self.activation_fn = (
-            activation_fn
-            if callable(activation_fn)
-            else ACTIVATIONS.get(activation_fn.lower(), nn.ReLU)
-        )
 
+        # Ensure hidden_dims are consistent for residual
+        if residual:
+            hidden_dims = [hidden_dims[0]] * len(hidden_dims)
+
+        self.activation = ACTIVATIONS.get(activation_fn.lower(), nn.ReLU)()
         self.norm_type = norm_type.lower()
-        self.dropout_prob = dropout_prob
 
-        # Layers
+        # Build layers
         dims = [input_dim] + hidden_dims
         self.layers = nn.ModuleList()
         self.norms = nn.ModuleList()
-        self.dropout = nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity()
 
         for i in range(len(dims) - 1):
             self.layers.append(nn.Linear(dims[i], dims[i + 1]))
-            # Normalization layer
-            if NORM_LAYERS[self.norm_type] is not None:
-                if self.norm_type == "layernorm":
-                    # LayerNorm is applied per sample per feature, so dimension = hidden_dim
-                    self.norms.append(NORM_LAYERS[self.norm_type](dims[i + 1]))
-                else:
-                    # BatchNorm expects features as dimension for 1D data
-                    self.norms.append(NORM_LAYERS[self.norm_type](dims[i + 1]))
-            else:
-                self.norms.append(nn.Identity())
+            norm = (
+                NORM_LAYERS.get(self.norm_type, nn.Identity)(dims[i + 1])
+                if norm_type != "none"
+                else nn.Identity()
+            )
+            self.norms.append(norm)
 
-        # Output layer
-        self.output_layer = nn.Linear(hidden_dims[-1], output_dim)
-        self.act = self.activation_fn()
+        self.dropout = nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity()
+        self.output = nn.Linear(hidden_dims[-1], output_dim)
 
-        # Initialize weights
         self._initialize_weights(weight_init)
 
-    def _initialize_weights(self, method="xavier"):
+    def _initialize_weights(self, method):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                if method == "xavier":
-                    nn.init.xavier_uniform_(m.weight)
-                elif method == "kaiming":
-                    nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
-                else:
-                    # Default to xavier if unknown
-                    nn.init.xavier_uniform_(m.weight)
+                if method == "kaiming":
+                    nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                elif method == "xavier":
+                    nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        # Forward pass with optional residual connections
         out = x
-        for _, (layer, norm) in enumerate(zip(self.layers, self.norms)):
-            prev_out = out
+        for layer, norm in zip(self.layers, self.norms):
+            identity = out  # Save for residual
+
+            # Main path
             out = layer(out)
             out = norm(out)
-            out = self.act(out)
-            out = self.dropout(out)
-            if self.residual and out.shape == prev_out.shape:
-                out = out + prev_out
 
-        out = self.output_layer(out)
-        return out
+            # Optional residual
+            if self.residual and (out.shape == identity.shape):
+                out = out + identity
+
+            out = self.activation(out)
+            out = self.dropout(out)
+
+        return self.output(out)
 
 
 class SparseKnowledgeNetwork(nn.Module):

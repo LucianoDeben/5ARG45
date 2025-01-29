@@ -42,12 +42,6 @@ logging.info("Loading datasets...")
 
 # Load datasets
 datasets = {
-    # "TF Data": (
-    #     load_sampled_data(
-    #         config["data_paths"]["preprocessed_tf_file"], sample_size=1000
-    #     ),
-    #     "viability",
-    # ),
     "Landmark Data": (
         load_sampled_data(
             config["data_paths"]["preprocessed_landmark_file"], sample_size=30000

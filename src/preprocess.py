@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 
+import decoupler as dc
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
@@ -11,6 +12,7 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
+import scanpy as sc
 from sklearn.preprocessing import StandardScaler
 
 from utils import load_config
@@ -457,6 +459,12 @@ def split_data(
         f"Train Shape: {X_train.shape}, Validation Shape: {X_val.shape}, Test Shape: {X_test.shape}"
     )
 
+    # If not stratify_by then remove the cell_mfc_name column from the splits
+    if not stratify_by:
+        X_train = X_train.drop(columns=["cell_mfc_name"], errors="ignore")
+        X_val = X_val.drop(columns=["cell_mfc_name"], errors="ignore")
+        X_test = X_test.drop(columns=["cell_mfc_name"], errors="ignore")
+
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
@@ -543,6 +551,76 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
         f"(num_genes={len(genes)}, num_tfs={len(unique_tfs)})."
     )
     return gene_tf_matrix
+
+
+def run_tf_activity_inference(
+    X: pd.DataFrame, net: pd.DataFrame, min_n: int = 1
+) -> pd.DataFrame:
+    """
+    Run TF activity inference on the input data.
+
+    Args:
+        X (pd.DataFrame): Gene expression matrix, including metadata columns.
+        net (pd.DataFrame): Regulatory network for TF activity inference.
+        min_n (int): Minimum number of targets for each TF.
+
+    Returns:
+        pd.DataFrame: TF activity matrix with metadata reattached.
+
+    Raises:
+        ValueError: If no shared genes are found between network and gene expression matrix.
+    """
+    # Define metadata columns
+    metadata_cols = {"cell_mfc_name", "viability", "pert_dose"}
+    missing_cols = metadata_cols - set(X.columns)
+
+    if missing_cols:
+        raise ValueError(f"Missing expected metadata columns: {missing_cols}")
+
+    metadata = X[list(metadata_cols)]
+    gene_expression = X.drop(columns=metadata_cols)
+
+    # Filter the network for shared genes
+    shared_genes = set(net["target"]).intersection(gene_expression.columns)
+    if not shared_genes:
+        raise ValueError(
+            "No shared genes found between network and gene expression matrix!"
+        )
+
+    logging.debug(f"Number of shared genes: {len(shared_genes)}")
+
+    # Filter network and gene expression data
+    net_filtered = net[net["target"].isin(shared_genes)]
+    logging.debug(f"Filtered network has {len(net_filtered)} interactions.")
+    gene_expression = gene_expression[list(shared_genes)]
+
+    # Create AnnData object
+    adata = sc.AnnData(
+        X=gene_expression.values,
+        obs=pd.DataFrame(index=gene_expression.index),
+        var=pd.DataFrame(index=gene_expression.columns),
+    )
+    logging.info(f"AnnData object created with shape: {adata.shape}")
+
+    # Run ULM for TF activity inference
+    dc.run_ulm(
+        mat=adata,
+        net=net_filtered,
+        source="source",
+        target="target",
+        weight="weight",
+        min_n=min_n,
+        use_raw=False,
+    )
+
+    # Extract TF activity estimates
+    tf_activity = pd.DataFrame(adata.obsm["ulm_estimate"], index=adata.obs.index)
+    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers
+
+    # Reattach metadata columns
+    tf_activity = tf_activity.join(metadata)
+
+    return tf_activity
 
 
 if __name__ == "__main__":

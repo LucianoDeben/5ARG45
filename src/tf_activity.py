@@ -16,9 +16,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from evaluation import evaluate_model
 from models import FlexibleFCNN
-from preprocess import split_data
+from preprocess import run_tf_activity_inference, split_data
 from training import train_model
-from utils import create_dataloader, load_config, load_sampled_data
+from utils import create_dataloader, load_config, load_sampled_data, sanity_check
 
 # Add the src directory to the Python path
 sys.path.append(os.path.abspath(os.path.join("..", "src")))
@@ -40,88 +40,54 @@ logging.info(f"Using device: {device}")
 logging.info("Loading datasets and running TF activity inference...")
 
 
-def run_tf_activity_inference(X, net, min_n=1):
-    """
-    Run TF activity inference on the input data.
-
-    Args:
-        X (pd.DataFrame): Gene expression matrix, including metadata columns.
-        net (pd.DataFrame): Regulatory network for TF activity inference.
-        min_n (int): Minimum number of targets for each TF.
-
-    Returns:
-        pd.DataFrame: TF activity matrix with metadata reattached.
-    """
-    import logging
-
-    import pandas as pd
-    import scanpy as sc
-
-    # Separate metadata columns from gene expression
-    metadata_cols = [
-        "cell_mfc_name",
-        "viability",
-        "pert_dose",
-    ]
-    metadata = X[metadata_cols]
-    gene_expression = X.drop(columns=metadata_cols)
-
-    # Filter the network for shared genes
-    shared_genes = net["target"].unique()
-    shared_genes = [gene for gene in shared_genes if gene in gene_expression.columns]
-    logging.debug(f"Number of shared genes: {len(shared_genes)}")
-    assert shared_genes, "No shared genes between network and gene expression matrix!"
-
-    # Filter network and gene expression
-    net_filtered = net[net["target"].isin(shared_genes)]
-    logging.debug(f"Filtered network has {len(net_filtered)} interactions.")
-    gene_expression = gene_expression[shared_genes]
-
-    # Create AnnData object
-    adata = sc.AnnData(
-        X=gene_expression.values,
-        obs=pd.DataFrame(index=gene_expression.index),
-        var=pd.DataFrame(index=gene_expression.columns),
-    )
-    logging.info(f"AnnData object created with shape: {adata.shape}")
-
-    # Run ULM for TF activity inference
-    dc.run_ulm(
-        mat=adata,
-        net=net_filtered,
-        source="source",
-        target="target",
-        weight="weight",
-        min_n=min_n,
-        use_raw=False,
-    )
-
-    tf_activity = pd.DataFrame(adata.obsm["ulm_estimate"], index=adata.obs.index)
-
-    # Convert the index of tf_activity to integers to match metadata
-    tf_activity.index = tf_activity.index.astype(int)
-
-    # Reattach metadata columns
-    tf_activity = tf_activity.join(metadata)
-
-    return tf_activity
-
+# Global variables
+SAMPLE_SIZE = 30000
 
 # Load Collectri network
 collectri_net = dc.get_collectri(organism="human", split_complexes=False)
 
-# Iterate through datasets, apply TF activity inference
+# Load datasets
 datasets = {
-    name: (
-        run_tf_activity_inference(
-            load_sampled_data(file_path, sample_size=30000),
-            collectri_net,
-            min_n=config.get("min_n", 1),
+    "Landmark Data": (
+        load_sampled_data(
+            config["data_paths"]["preprocessed_landmark_file"], sample_size=SAMPLE_SIZE
         ),
         "viability",
-    )
-    for name, file_path in config["data_paths"].items()
+    ),
+    "Best Inferred Data": (
+        load_sampled_data(
+            config["data_paths"]["preprocessed_best_inferred_file"],
+            sample_size=SAMPLE_SIZE,
+        ),
+        "viability",
+    ),
+    "Gene Data": (
+        load_sampled_data(
+            config["data_paths"]["preprocessed_gene_file"],
+            sample_size=SAMPLE_SIZE,
+            use_chunks=True,
+            chunk_size=2000,
+        ),
+        "viability",
+    ),
 }
+
+# # Apply TF activity inference
+# datasets = {
+#     name: (
+#         run_tf_activity_inference(
+#             data,
+#             collectri_net,
+#             min_n=config.get("min_n", 1),
+#         ),
+#         target,
+#     )
+#     for name, (data, target) in datasets.items()
+# }
+
+# Log the shapes of the data after TF activity inference
+for name, (X, y_col) in datasets.items():
+    logging.info(f"{name} shape: {X.shape}")
 
 # %% Split datasets into train/val/test sets
 split_datasets = {}
@@ -130,7 +96,7 @@ for name, (X, y_col) in datasets.items():
         X,
         target_name=y_col,
         config=config,
-        stratify_by="cell_mfc_name",  # Ensure `cell_mfc_name` is present
+        stratify_by=None,
     )
     split_datasets[name] = {
         "train": (X_train, y_train),
@@ -138,11 +104,32 @@ for name, (X, y_col) in datasets.items():
         "test": (X_test, y_test),
     }
 
+# # Standardize all the data splits using standard scaler
+# from sklearn.preprocessing import StandardScaler
+
+# for name, splits in split_datasets.items():
+#     # Fit the scaler on the training set
+#     X_train, y_train = splits["train"]
+#     scaler = StandardScaler()
+#     X_train_scaled = scaler.fit_transform(
+#         X_train.values
+#     )  # Fit and transform the training set
+#     X_train_scaled_df = pd.DataFrame(
+#         X_train_scaled, index=X_train.index, columns=X_train.columns
+#     )
+#     split_datasets[name]["train"] = (X_train_scaled_df, y_train)
+
+#     # Transform the validation and test sets using the same scaler
+#     for split in ["val", "test"]:
+#         X, y = splits[split]
+#         X_scaled = scaler.transform(X.values)  # Transform using the fitted scaler
+#         X_scaled_df = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
+#         split_datasets[name][split] = (X_scaled_df, y)
 
 # %% Create dataloaders
 dataloaders = {
     name: {
-        split: create_dataloader(X, y, batch_size=32)
+        split: create_dataloader(X, y, batch_size=256)
         for split, (X, y) in splits.items()
     }
     for name, splits in split_datasets.items()
@@ -166,13 +153,15 @@ for name, loaders in dataloaders.items():
         output_dim=1,
         activation_fn="relu",
         dropout_prob=0.2,
-        residual=True,
+        residual=False,
         norm_type="batchnorm",
-        weight_init="xavier",
+        weight_init="kaiming",
     ).to(device)
 
     fcnn_criterion = nn.MSELoss()
-    fcnn_optimizer = optim.AdamW(fcnn_model.parameters(), lr=0.001, weight_decay=1e-4)
+    fcnn_optimizer = optim.AdamW(fcnn_model.parameters(), lr=0.001, weight_decay=1e-5)
+
+    sanity_check(fcnn_model, train_loader, device)
 
     fcnn_train_losses, fcnn_val_losses = train_model(
         model=fcnn_model,
@@ -185,8 +174,8 @@ for name, loaders in dataloaders.items():
         ),
         epochs=20,
         device=device,
-        gradient_clipping=1.0,
-        early_stopping_patience=5,
+        gradient_clipping=5.0,
+        early_stopping_patience=10,
         model_name=f"FlexibleFCNN_{name}",
     )
 
