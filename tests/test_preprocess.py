@@ -1,13 +1,22 @@
+import csv
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 import pytest
 
 # Add the src directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from preprocess import run_tf_activity_inference, split_data
+from preprocess import (
+    _merge_data,
+    _select_genes,
+    _write_df_in_chunks,
+    preprocess_gene_data,
+    run_tf_activity_inference,
+    split_data,
+)
 
 
 @pytest.fixture
@@ -61,6 +70,199 @@ def sample_config():
             "test_ratio": 0.1,
         }
     }
+
+
+@pytest.fixture
+def geneinfo_df():
+    """Return a dummy geneinfo DataFrame."""
+    data = {
+        "gene_symbol": ["GeneA", "GeneB", "GeneC", "GeneD"],
+        "feature_space": ["landmark", "best inferred", "other", "landmark"],
+    }
+    # Use a RangeIndex that corresponds to column indices.
+    df = pd.DataFrame(data)
+    df.index = [0, 1, 2, 3]
+    return df
+
+
+@pytest.fixture
+def X_df():
+    """Dummy gene expression DataFrame."""
+    data = {"GeneA": [1, 2], "GeneB": [3, 4]}
+    return pd.DataFrame(data)
+
+
+@pytest.fixture
+def y_df():
+    """Dummy metadata DataFrame with expected merge columns."""
+    data = {
+        "viability": [0.9, 0.8],
+        "cell_mfc_name": ["Cell1", "Cell2"],
+        "pert_dose": [10, 20],
+        "other": [100, 200],
+    }
+    return pd.DataFrame(data)
+
+
+def test_select_genes_landmark(geneinfo_df):
+
+    selected = _select_genes(geneinfo_df, "landmark")
+    # Expect only rows with feature_space "landmark"
+    expected = geneinfo_df[geneinfo_df.feature_space == "landmark"]
+    pd.testing.assert_frame_equal(selected, expected)
+
+
+def test_select_genes_best_inferred(geneinfo_df):
+    selected = _select_genes(geneinfo_df, "best inferred")
+    expected = geneinfo_df[
+        geneinfo_df.feature_space.isin(["landmark", "best inferred"])
+    ]
+    pd.testing.assert_frame_equal(selected, expected)
+
+
+def test_select_genes_all(geneinfo_df):
+    selected = _select_genes(geneinfo_df, "all")
+    pd.testing.assert_frame_equal(selected, geneinfo_df)
+
+
+def test_select_genes_invalid(geneinfo_df):
+    with pytest.raises(ValueError):
+        _select_genes(geneinfo_df, "invalid_space")
+
+
+def test_merge_data_success(X_df, y_df):
+
+    merged = _merge_data(X_df, y_df)
+    # Check that merged contains all columns from X_df and the three merge columns
+    expected = pd.concat(
+        [X_df, y_df[["viability", "cell_mfc_name", "pert_dose"]]], axis=1
+    )
+    pd.testing.assert_frame_equal(merged, expected)
+
+
+def test_merge_data_missing_column(X_df, y_df):
+    # Remove one of the required merge columns
+    y_df_missing = y_df.drop(columns=["pert_dose"])
+    with pytest.raises(KeyError):
+        _merge_data(X_df, y_df_missing)
+
+
+def test_write_df_in_chunks(tmp_path):
+
+    # Create a dummy DataFrame with 10 rows.
+    df = pd.DataFrame({"col1": range(10), "col2": range(10, 20)})
+    output_file = tmp_path / "output.csv"
+    chunk_size = 3
+    _write_df_in_chunks(df, str(output_file), chunk_size)
+
+    # Read back the CSV and compare to original DataFrame.
+    # Since to_csv writes without an index, read_csv will have a default RangeIndex.
+    read_df = pd.read_csv(output_file)
+    pd.testing.assert_frame_equal(read_df, df.reset_index(drop=True))
+
+
+@pytest.fixture
+def dummy_rna_data(tmp_path):
+    """
+    Create a dummy binary file to be used as RNA data.
+    Create a small 2D array with shape (num_rows, num_genes).
+    """
+    num_rows = 5
+    num_genes = 4  # Must match geneinfo rows that we will create.
+    data = np.arange(num_rows * num_genes, dtype=np.float32).reshape(
+        num_rows, num_genes
+    )
+    # Write binary file
+    rna_file = tmp_path / "rna.bin"
+    data.tofile(rna_file)
+    return str(rna_file), data.shape
+
+
+@pytest.fixture
+def dummy_geneinfo(tmp_path):
+    """
+    Create a dummy geneinfo CSV file.
+    The index of the DataFrame will be used to select columns from RNA data.
+    """
+    df = pd.DataFrame(
+        {
+            "gene_symbol": ["GeneA", "GeneB", "GeneC", "GeneD"],
+            "feature_space": ["landmark", "best inferred", "other", "landmark"],
+        }
+    )
+    file_path = tmp_path / "geneinfo.tsv"
+    df.to_csv(file_path, sep="\t", index=False)
+    return str(file_path), df
+
+
+@pytest.fixture
+def dummy_y(tmp_path):
+    """
+    Create a dummy y CSV file with metadata.
+    The number of rows should match the RNA data (num_rows = 5).
+    """
+    df = pd.DataFrame(
+        {
+            "viability": [0.9, 0.8, 0.85, 0.95, 0.75],
+            "cell_mfc_name": ["Cell1", "Cell2", "Cell3", "Cell4", "Cell5"],
+            "pert_dose": [10, 20, 15, 10, 25],
+        }
+    )
+    file_path = tmp_path / "y.tsv"
+    df.to_csv(file_path, sep="\t", index=False)
+    return str(file_path), df
+
+
+def test_preprocess_gene_data_invalid_shape(
+    tmp_path, dummy_rna_data, dummy_geneinfo, dummy_y
+):
+    """
+    Test the error case when RNA data has fewer columns than expected.
+    We simulate this by making the dummy geneinfo have extra rows.
+    """
+    # Create RNA data with shape (5, 4)
+    rna_file, shape = dummy_rna_data
+    # Now create geneinfo with more rows than available columns
+    df = pd.DataFrame(
+        {
+            "gene_symbol": ["GeneA", "GeneB", "GeneC", "GeneD", "GeneE"],
+            "feature_space": [
+                "landmark",
+                "best inferred",
+                "other",
+                "landmark",
+                "landmark",
+            ],
+        }
+    )
+    geneinfo_file = tmp_path / "geneinfo_extra.tsv"
+    df.to_csv(geneinfo_file, sep="\t", index=False)
+
+    # Use the same y file
+    _, y_df = dummy_y
+    y_file = tmp_path / "y.tsv"
+    y_df.to_csv(y_file, sep="\t", index=False)
+
+    preprocessed_gene_file = str(tmp_path / "preprocessed_gene.csv")
+    preprocessed_landmark_file = str(tmp_path / "preprocessed_landmark.csv")
+    preprocessed_best_inferred_file = str(tmp_path / "preprocessed_best_inferred.csv")
+
+    config = {
+        "data_paths": {
+            "rna_file": rna_file,
+            "geneinfo_file": str(geneinfo_file),
+            "y_file": str(y_file),
+            "preprocessed_gene_file": preprocessed_gene_file,
+            "preprocessed_landmark_file": preprocessed_landmark_file,
+            "preprocessed_best_inferred_file": preprocessed_best_inferred_file,
+        }
+    }
+
+    # Expect a ValueError because geneinfo now has 5 rows but RNA data only has 4 columns.
+    with pytest.raises(ValueError):
+        preprocess_gene_data(
+            config, standardize=True, feature_space="all", chunk_size=2
+        )
 
 
 @pytest.mark.run_tf_activity_inference

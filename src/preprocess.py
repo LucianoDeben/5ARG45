@@ -23,7 +23,7 @@ from utils import load_config
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 import pandas as pd
@@ -55,316 +55,153 @@ def perform_pca(X, explained_variance_threshold=0.99):
     return (X_transformed, pca)
 
 
-def preprocess_tf_data(config: dict, standardize: bool = True):
+def _select_genes(geneinfo: pd.DataFrame, feature_space: str) -> pd.DataFrame:
     """
-    Preprocess TF data according to the configuration.
+    Filter the geneinfo DataFrame based on the requested feature space.
+    """
+    if feature_space == "landmark":
+        logging.debug("Using landmark genes.")
+        selected_genes = geneinfo[geneinfo.feature_space == "landmark"]
+    elif feature_space == "best inferred":
+        logging.debug("Using best inferred genes (including landmark genes).")
+        selected_genes = geneinfo[
+            geneinfo.feature_space.isin(["landmark", "best inferred"])
+        ]
+    elif feature_space == "all":
+        logging.debug("Using all genes.")
+        selected_genes = geneinfo
+    else:
+        raise ValueError("Invalid feature space selected.")
 
-    Args:
-        config (dict): Configuration dictionary.
-        standardize (bool): Whether to standardize the features.
+    logging.debug(
+        f"Selected {selected_genes.shape[0]} genes for feature space '{feature_space}'."
+    )
+    return selected_genes
 
-    Raises:
-        Exception: If any step in the preprocessing fails.
+
+def _merge_data(
+    X_df: pd.DataFrame, y_df: pd.DataFrame, merge_columns: list = None
+) -> pd.DataFrame:
+    """
+    Merge the gene expression data with selected columns from the metadata.
+    """
+    if merge_columns is None:
+        merge_columns = ["viability", "cell_mfc_name", "pert_dose"]
+    try:
+        merged_df = pd.concat([X_df, y_df[merge_columns]], axis=1)
+        logging.debug("Merging of data complete.")
+        return merged_df
+    except KeyError as e:
+        logging.error(f"Missing expected merge columns in y data: {e}")
+        raise
+
+
+def _write_df_in_chunks(df: pd.DataFrame, output_file: str, chunk_size: int):
+    """
+    Write a DataFrame to CSV in chunks to reduce memory pressure.
     """
     try:
-        # Load datasets
-        logging.debug("Loading datasets.")
-        x_df = pd.read_csv(config["data_paths"]["x_file"], delimiter="\t")
-        y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
-
-        # Remove the first column from x_df (perturbation ID)
-        logging.debug("Removing the first column from x_df.")
-        x_df = x_df.iloc[:, 1:]
-
-        # Standardize x_df
-        if standardize:
-            logging.debug("Standardizing x_df.")
-            scaler = StandardScaler()
-            x_df = pd.DataFrame(scaler.fit_transform(x_df), columns=x_df.columns)
-
-        # Select relevant columns from y_df
-        logging.debug(
-            "Selecting 'viability', 'cell_mfc_name', and 'pert_dose' columns from y_df."
-        )
-        y_df = y_df[["viability", "cell_mfc_name", "pert_dose"]]
-
-        # Check if x_df and y_df have the same length
-        if x_df.shape[0] != y_df.shape[0]:
-            logging.error(
-                "The number of rows in x_df and y_df do not match. Cannot merge."
-            )
-            raise ValueError("The number of rows in x_df and y_df do not match.")
-
-        # Concatenate the processed x_df with y_df
-        logging.debug("Concatenating x_df and y_df.")
-        final_df = pd.concat([x_df, y_df], axis=1)
-
-        # Handle missing data
-        logging.debug(f"Handling missing data, initial shape: {final_df.shape}")
-        final_df.dropna(inplace=True)
-        logging.debug(f"Shape after dropping missing data: {final_df.shape}")
-
-        # Save the final dataset
-        logging.debug("Saving the final dataset.")
-        final_df.to_csv(config["data_paths"]["preprocessed_tf_file"], index=False)
-        logging.info("Preprocessing completed successfully.")
-
-        return final_df
-
+        with open(output_file, mode="w", newline="") as f:
+            for start in range(0, df.shape[0], chunk_size):
+                chunk = df.iloc[start : start + chunk_size]
+                write_header = start == 0  # Only write header for the first chunk
+                chunk.to_csv(f, mode="a", header=write_header, index=False)
+        logging.debug(f"Data written to {output_file} in chunks of {chunk_size} rows.")
     except Exception as e:
-        logging.error(f"Preprocessing failed: {e}")
+        logging.error(f"Error writing CSV in chunks: {e}")
         raise
 
 
 def preprocess_gene_data(
-    config: dict, standardize: bool = True, feature_space: str = "all", chunk_size=2500
+    config: dict,
+    standardize: bool = True,
+    feature_space: str = "all",
+    chunk_size: int = 2500,
 ):
     """
-    Preprocess gene expression data with memory-efficient writing.
+    Preprocess gene expression data in a memory-efficient manner.
+
+    Steps:
+    1. Load RNA data (using np.memmap), gene information, and metadata.
+    2. Filter genes based on the selected feature space.
+    3. Select corresponding columns from the RNA data.
+    4. Optionally standardize the gene expression data.
+    5. Merge the gene expression data with metadata.
+    6. Write the final DataFrame to CSV in chunks.
 
     Args:
-        config (dict): Configuration dictionary.
+        config (dict): Configuration dictionary with keys:
+            - data_paths: Contains paths for "rna_file", "geneinfo_file", "y_file",
+              and output file paths for various feature spaces.
         standardize (bool): Whether to standardize the features.
-        feature_space (str): Feature space to use ("all", "landmark", "best inferred").
-        chunk_size (int): Chunk size for writing large CSV files.
+        feature_space (str): Which genes to use ("all", "landmark", "best inferred").
+        chunk_size (int): Number of rows per chunk when writing CSV.
 
-    Raises:
-        Exception: If any step in the preprocessing fails.
+    Returns:
+        pd.DataFrame: The final preprocessed DataFrame.
     """
     try:
-        # Load datasets
-        logging.debug("Loading datasets.")
-        X_rna = np.fromfile(config["data_paths"]["rna_file"], dtype=np.float32).reshape(
-            31567, -1
-        )
+        logging.debug("Starting preprocessing of gene data.")
+
+        # 1. Load datasets
+        # Assuming shape (31567, number_of_genes). Adjust if needed.
+        X_rna = np.memmap(config["data_paths"]["rna_file"], dtype=np.float32, mode="r")
+        X_rna = X_rna.reshape(31567, -1)  # Assign the reshaped view back to X_rna
+        logging.debug(f"Loaded RNA data with shape: {X_rna.shape}")
+
         geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
+        logging.debug(f"Loaded gene info with shape: {geneinfo.shape}")
+
         y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
-        print(geneinfo.shape), print(y_df.shape)
+        logging.debug(f"Loaded y data with shape: {y_df.shape}")
 
-        # Select genes based on user's choice
-        if feature_space == "landmark":
-            logging.debug("Using landmark genes.")
-            selected_genes = geneinfo[geneinfo.feature_space == "landmark"]
-        elif feature_space == "best inferred":
-            logging.debug("Using best inferred genes (including landmark genes).")
-            selected_genes = geneinfo[
-                geneinfo.feature_space.isin(["landmark", "best inferred"])
-            ]
-        elif feature_space == "all":
-            logging.debug("Using all genes.")
-            selected_genes = geneinfo
-        else:
-            raise ValueError("Invalid feature space selected.")
-
-        # Select corresponding gene expression data
+        # 2. Select genes based on the requested feature space
+        selected_genes = _select_genes(geneinfo, feature_space)
         selected_gene_indices = selected_genes.index
+
+        if X_rna.shape[1] < len(selected_gene_indices):
+            raise ValueError(
+                "Mismatch: The number of columns in the RNA data is less than the number of selected genes."
+            )
+
+        # 3. Select corresponding gene expression data
         X_selected = X_rna[:, selected_gene_indices]
         X_selected_df = pd.DataFrame(
             X_selected, index=y_df.index, columns=selected_genes.gene_symbol
         )
+        logging.debug(f"Gene expression DataFrame shape: {X_selected_df.shape}")
 
-        # Standardize data if required
+        # 4. Standardize data if required
         if standardize:
             logging.debug("Standardizing gene expression data.")
             scaler = StandardScaler()
+            scaled_values = scaler.fit_transform(X_selected_df)
             X_selected_df = pd.DataFrame(
-                scaler.fit_transform(X_selected_df), columns=X_selected_df.columns
+                scaled_values, columns=X_selected_df.columns, index=X_selected_df.index
             )
 
-        # Merge with additional columns
-        logging.debug(
-            "Merging gene expression data with 'viability', 'cell_mfc_name', and 'pert_dose'."
-        )
-        final_df = pd.concat(
-            [X_selected_df, y_df[["viability", "cell_mfc_name", "pert_dose"]]], axis=1
-        )
-
-        # Handle missing data
+        # 5. Merge gene expression data with metadata
+        final_df = _merge_data(X_selected_df, y_df)
+        # Drop any rows with missing data
         final_df.dropna(inplace=True)
-        logging.debug(f"Final DataFrame shape: {final_df.shape}")
-
-        # Write to CSV in chunks to avoid memory issues
-        logging.debug("Saving the preprocessed DataFrame in chunks.")
-        output_file = (
-            config["data_paths"]["preprocessed_landmark_file"]
-            if feature_space == "landmark"
-            else (
-                config["data_paths"]["preprocessed_best_inferred_file"]
-                if feature_space == "best inferred"
-                else config["data_paths"]["preprocessed_gene_file"]
-            )
+        logging.debug(
+            f"Final DataFrame shape after merging and dropping NA: {final_df.shape}"
         )
 
-        with open(output_file, mode="w", newline="") as f:
-            for start in range(0, final_df.shape[0], chunk_size):
-                chunk = final_df.iloc[start : start + chunk_size]
-                write_header = start == 0  # Write the header only once
-                chunk.to_csv(f, mode="a", header=write_header, index=False)
+        # 6. Determine output file based on feature space
+        if feature_space == "landmark":
+            output_file = config["data_paths"]["preprocessed_landmark_file"]
+        elif feature_space == "best inferred":
+            output_file = config["data_paths"]["preprocessed_best_inferred_file"]
+        else:
+            output_file = config["data_paths"]["preprocessed_gene_file"]
+
+        # Write final DataFrame in chunks
+        _write_df_in_chunks(final_df, output_file, chunk_size)
 
         logging.info("Preprocessing and chunked saving completed successfully.")
         return final_df
 
-    except Exception as e:
-        logging.error(f"Preprocessing failed: {e}")
-        raise
-
-
-def merge_chemical_and_y(y_df: pd.DataFrame, compound_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge chemical data with Y-labels.
-
-    Args:
-        y_df (pd.DataFrame): DataFrame containing Y-labels.
-        compound_df (pd.DataFrame): DataFrame containing chemical data.
-
-    Returns:
-        pd.DataFrame: Merged DataFrame.
-
-    Raises:
-        ValueError: If the merged DataFrame is empty.
-    """
-    logging.info("Merging chemical data with Y-labels")
-    merged_df = pd.merge(
-        y_df, compound_df, left_on="pert_mfc_id", right_on="pert_id", how="inner"
-    )
-
-    if merged_df.empty:
-        logging.error(
-            "Merging chemical data and Y-labels resulted in an empty DataFrame"
-        )
-        raise ValueError(
-            "Merged DataFrame is empty after merging Y-labels and chemical data"
-        )
-    merged_df.drop(columns=["pert_id"], inplace=True)
-    return merged_df
-
-
-def merge_with_transcriptomic(
-    merged_df: pd.DataFrame, x_df: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Merge the merged chemical and Y-labels DataFrame with transcriptomic data.
-
-    Args:
-        merged_df (pd.DataFrame): DataFrame containing merged chemical and Y-labels data.
-        x_df (pd.DataFrame): DataFrame containing transcriptomic data.
-
-    Returns:
-        pd.DataFrame: Final merged DataFrame.
-
-    Raises:
-        ValueError: If the final merged DataFrame is empty.
-    """
-    logging.info("Merging with transcriptomic data")
-    final_df = pd.merge(
-        merged_df, x_df, left_on="sig_id", right_on="cell_line", how="inner"
-    )
-    final_df.drop(columns=["cell_line"], inplace=True)
-    if final_df.empty:
-        logging.error("Merging with transcriptomic data resulted in an empty DataFrame")
-        raise ValueError(
-            "Merged DataFrame is empty after merging with transcriptomic data"
-        )
-    logging.info(f"Shape after merging with transcriptomic data: {final_df.shape}")
-    return final_df
-
-
-def preprocess_transcriptomic_features(
-    final_df: pd.DataFrame, x_df: pd.DataFrame, scale_features: bool = True
-) -> pd.DataFrame:
-    """
-    Preprocess transcriptomic features by scaling them if required.
-
-    Args:
-        final_df (pd.DataFrame): Final merged DataFrame.
-        x_df (pd.DataFrame): DataFrame containing transcriptomic data.
-        scale_features (bool): Whether to scale the transcriptomic features.
-
-    Returns:
-        pd.DataFrame: DataFrame with preprocessed transcriptomic features.
-
-    Raises:
-        ValueError: If there is an error during scaling.
-    """
-    if scale_features:
-        logging.info("Scaling transcriptomic features")
-        transcriptomic_features = [col for col in x_df.columns if col != "cell_line"]
-        scaler = StandardScaler()
-        try:
-            final_df[transcriptomic_features] = scaler.fit_transform(
-                final_df[transcriptomic_features]
-            )
-        except ValueError as e:
-            logging.error(f"Error scaling transcriptomic features: {e}")
-            raise ValueError(f"Error scaling transcriptomic features: {e}")
-    return final_df
-
-
-def partition_data(
-    final_df: pd.DataFrame,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Partition the merged dataset into chemical compounds, target viability scores, and gene expression data.
-
-    Args:
-        final_df (pd.DataFrame): The merged DataFrame containing all data.
-
-    Returns:
-        Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-            - DataFrame containing chemical compounds (SMILES strings).
-            - DataFrame containing target viability scores.
-            - DataFrame containing gene expression data.
-    """
-    # Extract chemical compounds (SMILES strings)
-    chemical_compounds_df = final_df[["canonical_smiles"]].copy()
-
-    # Extract target viability scores
-    viability_df = final_df[["viability"]].copy()
-
-    # Extract gene expression data (assuming columns are labeled from 1 to 682 and are the last columns)
-    gene_expression_df = final_df.iloc[:, -682:].copy()
-
-    return chemical_compounds_df, viability_df, gene_expression_df
-
-
-def preprocess_data(config: dict):
-    """
-    Preprocess data according to the configuration.
-
-    Args:
-        config (dict): Configuration dictionary.
-
-    Raises:
-        Exception: If any step in the preprocessing fails.
-    """
-    try:
-        # Load datasets
-        compound_df = pd.read_csv(config["data_paths"]["compoundinfo_file"])
-        x_df = pd.read_csv(config["data_paths"]["x_file"], delimiter="\t", header=None)
-        y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
-
-        # Set the name of the first column in x_df to 'cell_line'
-        x_df.columns = ["cell_line"] + x_df.columns.tolist()[1:]
-        logging.info(
-            f"Columns in x_df after setting column names: {x_df.columns.tolist()}"
-        )
-
-        # Merge datasets
-        merged_df = merge_chemical_and_y(y_df, compound_df)
-        final_df = merge_with_transcriptomic(merged_df, x_df)
-
-        # Handle missing data
-        logging.info(f"Handling missing data, initial shape: {final_df.shape}")
-        final_df.dropna(inplace=True)
-        logging.info(f"Shape after dropping missing data: {final_df.shape}")
-
-        # Preprocess transcriptomic features
-        final_df = preprocess_transcriptomic_features(
-            final_df, x_df, config["preprocess_params"]["scale_features"]
-        )
-
-        # Save the final dataset
-        final_df.to_csv(final_df, config["data_paths"]["output_file"])
     except Exception as e:
         logging.error(f"Preprocessing failed: {e}")
         raise
@@ -697,7 +534,5 @@ if __name__ == "__main__":
     config = load_config(args.config_file)
     # preprocess_tf_data(config, standardize=True)
     # preprocess_gene_data(config, standardize=True, feature_space="all")
-    preprocess_gene_data(
-        config, standardize=True, feature_space="best inferred", chunk_size=5000
-    )
+    preprocess_gene_data(config, standardize=True, feature_space="all", chunk_size=3000)
     # preprocess_gene_data(config, standardize=True, feature_space="landmark")

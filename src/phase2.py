@@ -69,7 +69,7 @@ datasets = {
 split_datasets = {}
 for name, (X, y_col) in datasets.items():
     X_train, y_train, X_val, y_val, X_test, y_test = split_data(
-        X, target_name=y_col, config=config, stratify_by="cell_mfc_name"
+        X, target_name=y_col, config=config, stratify_by=None
     )
     split_datasets[name] = {
         "train": (X_train, y_train),
