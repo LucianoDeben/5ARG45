@@ -57,22 +57,22 @@ datasets = {
         ),
         "viability",
     ),
-    "Best Inferred Data": (
-        load_sampled_data(
-            config["data_paths"]["preprocessed_best_inferred_file"],
-            sample_size=SAMPLE_SIZE,
-        ),
-        "viability",
-    ),
-    "Gene Data": (
-        load_sampled_data(
-            config["data_paths"]["preprocessed_gene_file"],
-            sample_size=SAMPLE_SIZE,
-            use_chunks=True,
-            chunk_size=1000,
-        ),
-        "viability",
-    ),
+    # "Best Inferred Data": (
+    #     load_sampled_data(
+    #         config["data_paths"]["preprocessed_best_inferred_file"],
+    #         sample_size=SAMPLE_SIZE,
+    #     ),
+    #     "viability",
+    # ),
+    # "Gene Data": (
+    #     load_sampled_data(
+    #         config["data_paths"]["preprocessed_gene_file"],
+    #         sample_size=SAMPLE_SIZE,
+    #         use_chunks=True,
+    #         chunk_size=1000,
+    #     ),
+    #     "viability",
+    # ),
 }
 
 landmark_mapping = load_mapping("../data/raw/landmark_mapping.txt")
