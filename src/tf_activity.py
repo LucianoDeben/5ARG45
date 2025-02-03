@@ -41,7 +41,7 @@ logging.info("Loading datasets and running TF activity inference...")
 
 
 # Global variables
-SAMPLE_SIZE = 30000
+SAMPLE_SIZE = None
 
 # Load Collectri network
 collectri_net = dc.get_collectri(organism="human", split_complexes=False)
@@ -72,18 +72,18 @@ datasets = {
     ),
 }
 
-# # Apply TF activity inference
-# datasets = {
-#     name: (
-#         run_tf_activity_inference(
-#             data,
-#             collectri_net,
-#             min_n=config.get("min_n", 1),
-#         ),
-#         target,
-#     )
-#     for name, (data, target) in datasets.items()
-# }
+# Apply TF activity inference
+datasets = {
+    name: (
+        run_tf_activity_inference(
+            data,
+            collectri_net,
+            min_n=config.get("min_n", 1),
+        ),
+        target,
+    )
+    for name, (data, target) in datasets.items()
+}
 
 # Log the shapes of the data after TF activity inference
 for name, (X, y_col) in datasets.items():
@@ -96,7 +96,7 @@ for name, (X, y_col) in datasets.items():
         X,
         target_name=y_col,
         config=config,
-        stratify_by=None,
+        stratify_by="cell_mfc_name",
     )
     split_datasets[name] = {
         "train": (X_train, y_train),
@@ -104,32 +104,32 @@ for name, (X, y_col) in datasets.items():
         "test": (X_test, y_test),
     }
 
-# # Standardize all the data splits using standard scaler
-# from sklearn.preprocessing import StandardScaler
+# Standardize all the data splits using standard scaler
+from sklearn.preprocessing import StandardScaler
 
-# for name, splits in split_datasets.items():
-#     # Fit the scaler on the training set
-#     X_train, y_train = splits["train"]
-#     scaler = StandardScaler()
-#     X_train_scaled = scaler.fit_transform(
-#         X_train.values
-#     )  # Fit and transform the training set
-#     X_train_scaled_df = pd.DataFrame(
-#         X_train_scaled, index=X_train.index, columns=X_train.columns
-#     )
-#     split_datasets[name]["train"] = (X_train_scaled_df, y_train)
+for name, splits in split_datasets.items():
+    # Fit the scaler on the training set
+    X_train, y_train = splits["train"]
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(
+        X_train.values
+    )  # Fit and transform the training set
+    X_train_scaled_df = pd.DataFrame(
+        X_train_scaled, index=X_train.index, columns=X_train.columns
+    )
+    split_datasets[name]["train"] = (X_train_scaled_df, y_train)
 
-#     # Transform the validation and test sets using the same scaler
-#     for split in ["val", "test"]:
-#         X, y = splits[split]
-#         X_scaled = scaler.transform(X.values)  # Transform using the fitted scaler
-#         X_scaled_df = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
-#         split_datasets[name][split] = (X_scaled_df, y)
+    # Transform the validation and test sets using the same scaler
+    for split in ["val", "test"]:
+        X, y = splits[split]
+        X_scaled = scaler.transform(X.values)  # Transform using the fitted scaler
+        X_scaled_df = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
+        split_datasets[name][split] = (X_scaled_df, y)
 
 # %% Create dataloaders
 dataloaders = {
     name: {
-        split: create_dataloader(X, y, batch_size=256)
+        split: create_dataloader(X, y, batch_size=256, shuffle=True)
         for split, (X, y) in splits.items()
     }
     for name, splits in split_datasets.items()

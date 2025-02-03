@@ -1,14 +1,18 @@
 import argparse
 import logging
 import sys
+import warnings
+from typing import Dict, List, Optional, Tuple
 
 import decoupler as dc
+import pandas as pd
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
+logger = logging.getLogger(__name__)
 sys.path.append("src")
 
-from typing import Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -135,6 +139,7 @@ def preprocess_gene_data(
         )
         geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
         y_df = pd.read_csv(config["data_paths"]["y_file"], delimiter="\t")
+        print(geneinfo.shape), print(y_df.shape)
 
         # Select genes based on user's choice
         if feature_space == "landmark":
@@ -366,106 +371,163 @@ def preprocess_data(config: dict):
 
 
 def split_data(
-    df,
-    config,
-    target_name="target_name",
-    stratify_by=None,
-    keep_columns=None,
-    random_state=42,
-):
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """
-    Split the DataFrame into train, validation, and test sets, optionally stratified by a column.
+    Split DataFrame into stratified train/val/test sets with proper column handling.
 
     Args:
-        df (pd.DataFrame): The preprocessed DataFrame.
-        config (dict): Configuration dictionary for train/val/test ratios.
-        target_name (str): The name of the target column.
-        stratify_by (str): Column name to stratify by (e.g., 'cell_mfc_name').
-        keep_columns (list): List of additional columns to retain (e.g., 'pert_dose').
-        random_state (int): The random seed for reproducibility.
+        df: Input DataFrame containing features and target
+        config: Dictionary with 'train_ratio', 'val_ratio', 'test_ratio'
+        target_name: Name of the target column
+        stratify_by: Column name to stratify by (None for random splitting)
+        keep_columns: Additional columns to retain in features
+        random_state: Seed for reproducibility
 
     Returns:
-        tuple: Splits of the dataset into features and labels for train, validation, and test sets.
+        Tuple of (X_train, y_train, X_val, y_val, X_test, y_test)
     """
-    # Ensure keep_columns is a list
+    # Validate configuration and inputs
+    _validate_ratios(config)
     keep_columns = keep_columns or []
 
+    # Handle column exclusions
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+
+    # Split dataset
     if stratify_by:
-        groups = df[stratify_by]
-
-        if groups.nunique() < 3:
-            raise ValueError(
-                f"Not enough unique groups in '{stratify_by}' for stratified splitting."
-            )
-
-        # Grouped split: train and temp (val + test)
-        gss = GroupShuffleSplit(
-            n_splits=1,
-            test_size=1 - config["preprocess"]["train_ratio"],
-            random_state=random_state,
+        train_df, val_df, test_df = _stratified_split(
+            df, stratify_by, config, random_state
         )
-        train_idx, temp_idx = next(gss.split(df, groups=groups))
-
-        train_df = df.iloc[train_idx]
-        temp_df = df.iloc[temp_idx]
-
-        # Further split temp into validation and test
-        gss_temp = GroupShuffleSplit(
-            n_splits=1,
-            test_size=config["preprocess"]["test_ratio"]
-            / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
-            random_state=random_state,
-        )
-        val_idx, test_idx = next(gss_temp.split(temp_df, groups=temp_df[stratify_by]))
-
-        val_df = temp_df.iloc[val_idx]
-        test_df = temp_df.iloc[test_idx]
     else:
-        # Default randomized splitting if no stratification is specified
-        train_df, temp_df = train_test_split(
-            df,
-            test_size=1 - config["preprocess"]["train_ratio"],
-            random_state=random_state,
-        )
-        val_df, test_df = train_test_split(
-            temp_df,
-            test_size=config["preprocess"]["test_ratio"]
-            / (config["preprocess"]["test_ratio"] + config["preprocess"]["val_ratio"]),
-            random_state=random_state,
-        )
+        train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
 
-    # Drop target and additional columns from X
-    exclude_columns = [target_name, stratify_by, "pert_dose"] + keep_columns
-    exclude_columns = [col for col in exclude_columns if col in df.columns]
+    # Prepare features and targets
+    X_train, X_val, X_test = [
+        _prepare_features(df, exclude_cols) for df in [train_df, val_df, test_df]
+    ]
+    y_train, y_val, y_test = [df[target_name] for df in [train_df, val_df, test_df]]
 
-    X_train = train_df.drop(columns=exclude_columns, errors="ignore")
-    y_train = train_df[target_name]
+    _log_split_details(X_train, X_val, X_test)
+    return X_train, y_train, X_val, y_val, X_test, y_test
 
-    X_val = val_df.drop(columns=exclude_columns, errors="ignore")
-    y_val = val_df[target_name]
 
-    X_test = test_df.drop(columns=exclude_columns, errors="ignore")
-    y_test = test_df[target_name]
+def _validate_ratios(config: Dict) -> None:
+    """Validate train/val/test split ratios."""
+    ratios = config.get("preprocess", {})
+    required_keys = {"train_ratio", "val_ratio", "test_ratio"}
 
-    # Validate group distribution in splits
+    if not required_keys.issubset(ratios.keys()):
+        missing = required_keys - set(ratios.keys())
+        raise ValueError(f"Missing required keys in config: {missing}")
+
+    train_ratio = ratios["train_ratio"]
+    val_ratio = ratios["val_ratio"]
+    test_ratio = ratios["test_ratio"]
+
+    if any(r < 0 or r > 1 for r in [train_ratio, val_ratio, test_ratio]):
+        raise ValueError("Train/val/test ratios must be between 0 and 1.")
+
+    total = train_ratio + val_ratio + test_ratio
+    if not (0.999 <= total <= 1.001):  # Allow for float precision tolerance
+        raise ValueError(f"Ratios must sum to 1.0 (current sum: {total:.4f})")
+
+
+def _get_excluded_columns(
+    df: pd.DataFrame,
+    target_name: str,
+    stratify_by: Optional[str],
+    keep_columns: List[str],
+) -> List[str]:
+    """Determine columns to exclude from features"""
+    exclude = [target_name]
+
+    # Handle stratification column
     if stratify_by:
-        logging.info(f"Train Groups: {train_df[stratify_by].nunique()} unique values.")
-        logging.info(
-            f"Validation Groups: {val_df[stratify_by].nunique()} unique values."
-        )
-        logging.info(f"Test Groups: {test_df[stratify_by].nunique()} unique values.")
+        if stratify_by in df.columns and stratify_by not in keep_columns:
+            exclude.append(stratify_by)
+    else:
+        # Always exclude cell_mfc_name if not explicitly kept
+        if "cell_mfc_name" in df.columns and "cell_mfc_name" not in keep_columns:
+            exclude.append("cell_mfc_name")
 
-    logging.debug(
-        f"Train Shape: {X_train.shape}, Validation Shape: {X_val.shape}, Test Shape: {X_test.shape}"
+    return exclude
+
+
+def _stratified_split(
+    df: pd.DataFrame, stratify_col: str, config: Dict, random_state: int
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split data using group stratification"""
+    groups = df[stratify_col]
+    if groups.nunique() < 2:
+        raise ValueError(
+            f"Need at least 2 groups in '{stratify_col}' for stratification"
+        )
+
+    # First split: train vs temp
+    gss = GroupShuffleSplit(
+        n_splits=1,
+        test_size=1 - config["preprocess"]["train_ratio"],
+        random_state=random_state,
+    )
+    train_idx, temp_idx = next(gss.split(df, groups=groups))
+    train_df, temp_df = df.iloc[train_idx], df.iloc[temp_idx]
+
+    # Second split: val vs test
+    test_size = config["preprocess"]["test_ratio"] / (
+        1 - config["preprocess"]["train_ratio"]
+    )
+    gss_temp = GroupShuffleSplit(
+        n_splits=1, test_size=test_size, random_state=random_state
+    )
+    val_idx, test_idx = next(gss_temp.split(temp_df, groups=temp_df[stratify_col]))
+
+    return train_df, temp_df.iloc[val_idx], temp_df.iloc[test_idx]
+
+
+def _random_split(
+    df: pd.DataFrame, config: Dict, target_name: str, random_state: int
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split data randomly without stratification (regression-specific)."""
+
+    # First split: train vs temp
+    train_df, temp_df = train_test_split(
+        df,
+        train_size=config["preprocess"]["train_ratio"],
+        random_state=random_state,
     )
 
-    # If not stratify_by then remove the cell_mfc_name column from the splits
-    if not stratify_by:
-        X_train = X_train.drop(columns=["cell_mfc_name"], errors="ignore")
-        X_val = X_val.drop(columns=["cell_mfc_name"], errors="ignore")
-        X_test = X_test.drop(columns=["cell_mfc_name"], errors="ignore")
+    # Second split: val vs test
+    val_test_ratio = config["preprocess"]["val_ratio"] / (
+        1 - config["preprocess"]["train_ratio"]
+    )
+    val_df, test_df = train_test_split(
+        temp_df,
+        test_size=val_test_ratio,
+        random_state=random_state,
+    )
 
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    return train_df, val_df, test_df
+
+
+def _prepare_features(df: pd.DataFrame, exclude_cols: List[str]) -> pd.DataFrame:
+    """Prepare feature DataFrame by dropping excluded columns"""
+    return df.drop(columns=exclude_cols, errors="ignore").copy()
+
+
+def _log_split_details(*feature_dfs: pd.DataFrame) -> None:
+    """Log split details for debugging"""
+    logger.info("Split sizes:")
+    for name, df in zip(["Train", "Validation", "Test"], feature_dfs):
+        logger.info(f"{name}: {len(df)} samples")
+        if len(df) == 0:
+            warnings.warn(f"{name} set is empty! Check your split ratios.")
+    logger.debug(f"Feature columns: {feature_dfs[0].columns.tolist()}")
 
 
 def filter_dataset_and_network(dataset: pd.DataFrame, network: pd.DataFrame) -> tuple:
@@ -635,5 +697,7 @@ if __name__ == "__main__":
     config = load_config(args.config_file)
     # preprocess_tf_data(config, standardize=True)
     # preprocess_gene_data(config, standardize=True, feature_space="all")
-    preprocess_gene_data(config, standardize=True, feature_space="best inferred")
+    preprocess_gene_data(
+        config, standardize=True, feature_space="best inferred", chunk_size=5000
+    )
     # preprocess_gene_data(config, standardize=True, feature_space="landmark")

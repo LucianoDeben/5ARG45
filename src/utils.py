@@ -64,30 +64,33 @@ def load_sampled_data(
     Returns:
     - pd.DataFrame: The loaded dataset, potentially sampled, with reset indices if sampled.
     """
-    if sample_size is None:
-        # Load entire dataset if no sample size is provided
-        return pd.read_csv(file_path)
-
     if use_chunks:
-        # Load dataset in chunks and sample iteratively
-        chunks, total_loaded = [], 0
+        # Load dataset in chunks
+        chunks = []
 
         for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            if total_loaded >= sample_size:
+            if sample_size is not None and len(chunks) * chunk_size >= sample_size:
                 break
-            sampled_chunk = chunk.sample(
-                min(sample_size - total_loaded, len(chunk)), random_state=42
-            )
-            chunks.append(sampled_chunk)
-            total_loaded += len(sampled_chunk)
+            if sample_size is not None:
+                sampled_chunk = chunk.sample(
+                    min(sample_size - len(chunks) * chunk_size, len(chunk)),
+                    random_state=42,
+                )
+                chunks.append(sampled_chunk)
+            else:
+                chunks.append(chunk)
 
         sampled_data = pd.concat(chunks, axis=0, ignore_index=True)
     else:
-        # Load entire file up to sample_size and then sample from it
-        full_data = pd.read_csv(file_path, nrows=sample_size)
-        sampled_data = full_data.sample(n=sample_size, random_state=42).reset_index(
-            drop=True
-        )
+        if sample_size is None:
+            # Load entire dataset if no sample size is provided
+            sampled_data = pd.read_csv(file_path)
+        else:
+            # Load entire file up to sample_size and then sample from it
+            full_data = pd.read_csv(file_path, nrows=sample_size)
+            sampled_data = full_data.sample(n=sample_size, random_state=42).reset_index(
+                drop=True
+            )
 
     return sampled_data
 
@@ -135,9 +138,6 @@ def sanity_check(
 
         if initial_loss is None:
             initial_loss = loss.item()
-            logging.info(f"Initial loss: {initial_loss}")
-
-        logging.info(f"Iteration {i+1}/{max_iters}, Loss: {loss.item()}")
 
         if loss.item() < loss_threshold * initial_loss:
             logging.info("Sanity check passed.")
