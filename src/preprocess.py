@@ -453,47 +453,56 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
 
 
 def run_tf_activity_inference(
-    X: pd.DataFrame, net: pd.DataFrame, min_n: int = 1
+    X: pd.DataFrame,
+    net: pd.DataFrame,
+    min_n: int = 1,
+    algorithm: str = "ulm"  # Default algorithm, can be changed dynamically
 ) -> pd.DataFrame:
     """
-    Run TF activity inference on the input data.
+    Run TF activity inference on the input data using one of several decoupler algorithms.
 
     Args:
         X (pd.DataFrame): Gene expression matrix, including metadata columns.
         net (pd.DataFrame): Regulatory network for TF activity inference.
         min_n (int): Minimum number of targets for each TF.
+        algorithm (str): Which decoupler algorithm to use. Options include:
+                         "ulm", "viper", "gsva", "gsea", "ora", "aucell",
+                         "mlm", "mdt", "udt", "wmean", "wsum", "consensus".
 
     Returns:
         pd.DataFrame: TF activity matrix with metadata reattached.
 
     Raises:
-        ValueError: If no shared genes are found between network and gene expression matrix.
+        ValueError: If required metadata columns or shared genes are missing,
+                    or if an unsupported algorithm is provided.
+        KeyError: If the expected key for the chosen algorithm is not found in AnnData.obsm.
     """
-    # Define metadata columns
+    import scanpy as sc
+    import decoupler as dc
+    import logging
+
+    # Define expected metadata columns
     metadata_cols = {"cell_mfc_name", "viability", "pert_dose"}
     missing_cols = metadata_cols - set(X.columns)
-
     if missing_cols:
         raise ValueError(f"Missing expected metadata columns: {missing_cols}")
 
+    # Separate metadata from gene expression data
     metadata = X[list(metadata_cols)]
     gene_expression = X.drop(columns=metadata_cols)
 
-    # Filter the network for shared genes
+    # Determine shared genes between the network and gene expression data
     shared_genes = set(net["target"]).intersection(gene_expression.columns)
     if not shared_genes:
-        raise ValueError(
-            "No shared genes found between network and gene expression matrix!"
-        )
-
+        raise ValueError("No shared genes found between network and gene expression matrix!")
     logging.debug(f"Number of shared genes: {len(shared_genes)}")
 
-    # Filter network and gene expression data
+    # Filter the network and gene expression data to include only shared genes
     net_filtered = net[net["target"].isin(shared_genes)]
     logging.debug(f"Filtered network has {len(net_filtered)} interactions.")
     gene_expression = gene_expression[list(shared_genes)]
 
-    # Create AnnData object
+    # Create an AnnData object for the gene expression data
     adata = sc.AnnData(
         X=gene_expression.values,
         obs=pd.DataFrame(index=gene_expression.index),
@@ -501,25 +510,157 @@ def run_tf_activity_inference(
     )
     logging.info(f"AnnData object created with shape: {adata.shape}")
 
-    # Run ULM for TF activity inference
-    dc.run_ulm(
-        mat=adata,
-        net=net_filtered,
-        source="source",
-        target="target",
-        weight="weight",
-        min_n=min_n,
-        use_raw=False,
-    )
+    # Define a mapping from algorithm names to the corresponding decoupler function,
+    # its keyword arguments, and the expected output key in adata.obsm.
+    algorithm = algorithm.lower()
+    methods = {
+        "ulm": {
+            "func": dc.run_ulm,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "min_n": min_n,
+                "use_raw": False,
+            },
+            "estimate_key": "ulm_estimate",
+        },
+        "viper": {
+            "func": dc.run_viper,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "use_raw": False,
+            },
+            "estimate_key": "viper_estimate",
+        },
+        "gsva": {
+            "func": dc.run_gsva,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "kcdf": "Gaussian",
+                "use_raw": False,
+            },
+            "estimate_key": "gsva_estimate",
+        },
+        "gsea": {
+            "func": dc.run_gsea,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "times": 1000,  # Example: number of permutations
+                "use_raw": False,
+            },
+            "estimate_key": "gsea_estimate",
+        },
+        "ora": {
+            "func": dc.run_ora,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "n_up": min_n,
+                "use_raw": False,
+            },
+            "estimate_key": "ora_estimate",
+        },
+        "aucell": {
+            "func": dc.run_aucell,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "n_up": min_n,
+                "use_raw": False,
+            },
+            "estimate_key": "aucell_estimate",
+        },
+        "mlm": {
+            "func": dc.run_mlm,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "use_raw": False,
+            },
+            "estimate_key": "mlm_estimate",
+        },
+        "mdt": {
+            "func": dc.run_mdt,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "use_raw": False,
+            },
+            "estimate_key": "mdt_estimate",
+        },
+        "udt": {
+            "func": dc.run_udt,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "use_raw": False,
+            },
+            "estimate_key": "udt_estimate",
+        },
+        "wmean": {
+            "func": dc.run_wmean,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "use_raw": False,
+            },
+            "estimate_key": "wmean_estimate",
+        },
+        "wsum": {
+            "func": dc.run_wsum,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "use_raw": False,
+            },
+            "estimate_key": "wsum_estimate",
+        },
+        "consensus": {
+            "func": dc.run_consensus,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "use_raw": False,
+            },
+            "estimate_key": "consensus_estimate",
+        },
+    }
 
-    # Extract TF activity estimates
-    tf_activity = pd.DataFrame(adata.obsm["ulm_estimate"], index=adata.obs.index)
-    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers
+    if algorithm not in methods:
+        raise ValueError(f"Algorithm '{algorithm}' is not supported. Choose from: {list(methods.keys())}")
 
-    # Reattach metadata columns
+    # Retrieve the decoupler function and its parameters from the mapping
+    method = methods[algorithm]
+    func = method["func"]
+    kwargs = method["kwargs"]
+
+    # Run the selected decoupler method
+    func(mat=adata, net=net_filtered, **kwargs)
+    estimate_key = method["estimate_key"]
+
+    # Check that the expected output key is present in adata.obsm
+    if estimate_key not in adata.obsm:
+        raise KeyError(f"Expected key '{estimate_key}' not found in AnnData.obsm. "
+                       "Ensure that the chosen algorithm populates obsm with its output.")
+
+    # Extract the TF activity estimates from the AnnData object
+    tf_activity = pd.DataFrame(adata.obsm[estimate_key], index=adata.obs.index)
+    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers if needed
+
+    # Reattach the metadata columns to the output
     tf_activity = tf_activity.join(metadata)
 
     return tf_activity
+
+
 
 
 if __name__ == "__main__":

@@ -566,7 +566,7 @@ if __name__ == "__main__":
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize="min-max",
-        n_rows=75000,
+        n_rows=10000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,
@@ -601,6 +601,10 @@ if __name__ == "__main__":
         task_type="gene-expression",  # Multitask learning
         fusion_type="gating",
     )
+    
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {num_params}")
+
 
     # Define multitask loss
     criterion = MultiTaskLoss(gene_loss_weight=1.0, viability_loss_weight=1.0)

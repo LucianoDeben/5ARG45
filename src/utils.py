@@ -341,3 +341,52 @@ def filter_dataset_columns(df, gene_mapping):
     new_columns = filtered_gene_cols + list(extra_cols)
     filtered_df = df[new_columns].copy()
     return filtered_df
+
+def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
+    """
+    Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
+
+    Args:
+        smiles_df (pd.DataFrame): DataFrame containing 'pert_id' and 'canonical_smiles' columns.
+
+    Returns:
+        Dict[str, str]: Dictionary mapping pert_id to canonical SMILES strings.
+    """
+    # Check if needed columns exist otherwise raise error
+    if (
+        "pert_id" not in smiles_df.columns
+        or "canonical_smiles" not in smiles_df.columns
+    ):
+        raise ValueError(
+            "The DataFrame must contain 'pert_id' and 'canonical_smiles' columns."
+        )
+
+    # Ensure no leading/trailing spaces
+    smiles_df["pert_id"] = smiles_df["pert_id"].str.strip()
+    smiles_df["canonical_smiles"] = smiles_df["canonical_smiles"].str.strip()
+
+    # Remove duplicates, keeping the first occurrence
+    smiles_df = smiles_df.drop_duplicates(subset="pert_id", keep="first")
+
+    # Check for missing values and handle them
+    if smiles_df["canonical_smiles"].isnull().any():
+        smiles_df.loc[smiles_df["canonical_smiles"].isnull(), "canonical_smiles"] = (
+            "UNKNOWN"
+        )
+
+    # Create the mapping dictionary
+    smiles_dict = dict(zip(smiles_df["pert_id"], smiles_df["canonical_smiles"]))
+
+    # Validate the dictionary
+    if not smiles_dict:
+        raise ValueError(
+            "The DataFrame must contain non-empty 'pert_id' and 'canonical_smiles' columns."
+        )
+
+    for pert_id, smiles in smiles_dict.items():
+        if not isinstance(pert_id, str) or not isinstance(smiles, str):
+            raise TypeError("The pert_id and canonical_smiles must be strings.")
+        if pd.isna(smiles):
+            raise ValueError("The canonical_smiles cannot be NaN.")
+
+    return smiles_dict
