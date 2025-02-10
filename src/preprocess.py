@@ -6,8 +6,14 @@ from typing import Dict, List, Optional, Tuple
 
 import decoupler as dc
 import pandas as pd
+from evaluation import evaluate_model
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+
+from training import train_model
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import KFold
+import numpy as np
 
 logger = logging.getLogger(__name__)
 sys.path.append("src")
@@ -365,6 +371,118 @@ def _log_split_details(*feature_dfs: pd.DataFrame) -> None:
         if len(df) == 0:
             warnings.warn(f"{name} set is empty! Check your split ratios.")
     logger.debug(f"Feature columns: {feature_dfs[0].columns.tolist()}")
+    
+from typing import Dict, List, Optional, Tuple
+import pandas as pd
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
+
+def split_data_train_test(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split the DataFrame into a training set and a test set.
+    
+    Args:
+        df: Input DataFrame.
+        config: Dictionary with 'train_ratio' under config["preprocess"].
+        target_name: The target column name.
+        stratify_by: Column name to stratify by (None for random splitting).
+        keep_columns: Columns to retain in the features.
+        random_state: Seed for reproducibility.
+    
+    Returns:
+        Tuple of (train_df, test_df)
+    """
+    keep_columns = keep_columns or []
+    # Determine columns to exclude from features if needed (if you use it later)
+    # For now, we're simply splitting the full DataFrame.
+    
+    train_ratio = config["preprocess"]["train_ratio"]
+    
+    if stratify_by:
+        # Use GroupShuffleSplit to perform a stratified split for train and test.
+        gss = GroupShuffleSplit(
+            n_splits=1, test_size=1 - train_ratio, random_state=random_state
+        )
+        groups = df[stratify_by]
+        train_idx, test_idx = next(gss.split(df, groups=groups))
+        train_df, test_df = df.iloc[train_idx], df.iloc[test_idx]
+    else:
+        # Random split using scikit-learn's train_test_split.
+        train_df, test_df = train_test_split(
+            df, train_size=train_ratio, random_state=random_state, shuffle=True
+        )
+    
+    return train_df, test_df
+
+def k_fold_cross_validation(
+    model_class,           # A callable returning a new model instance.
+    train_dataset,         # Your training dataset (a torch.utils.data.Dataset).
+    k_folds: int = 5,
+    batch_size: int = 32,
+    epochs: int = 10,
+    criterion_fn=None,     # e.g., torch.nn.MSELoss().
+    optimizer_fn=None,     # A callable that takes model parameters and returns an optimizer.
+    scheduler_fn=None,     # (Optional) A scheduler function.
+    device: str = "cuda",
+    use_mixed_precision: bool = True,
+):
+    """
+    Perform K-Fold cross-validation on the training dataset.
+    
+    Returns:
+        A dictionary with metrics for each fold.
+    """
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    fold_metrics = {}
+    
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(np.arange(len(train_dataset)))):
+        print(f"--- Fold {fold+1}/{k_folds} ---")
+        
+        # Create subsets for the current fold.
+        train_subset = Subset(train_dataset, train_idx)
+        val_subset = Subset(train_dataset, val_idx)
+        
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+        
+        # Create a new instance of your model for this fold.
+        model = model_class()
+        
+        optimizer = optimizer_fn(model.parameters())
+        scheduler = scheduler_fn(optimizer) if scheduler_fn is not None else None
+        
+        # Train the model on the current fold.
+        train_losses, val_losses = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epochs=epochs,
+            device=device,
+            use_mixed_precision=use_mixed_precision,
+        )
+        
+        # Evaluate the model on the validation fold.
+        metrics = evaluate_model(model, val_loader, criterion_fn, device=device, calculate_metrics=True)
+        fold_metrics[fold] = metrics
+        
+        print(f"Fold {fold+1} Metrics: {metrics}\n")
+        
+    # Optionally, average the metrics over the folds.
+    avg_metrics = {key: np.mean([fold_metrics[f][key] for f in fold_metrics]) for key in fold_metrics[0]}
+    print("Average Metrics Across Folds:", avg_metrics)
+    
+    return fold_metrics
+
+
 
 
 def filter_dataset_and_network(dataset: pd.DataFrame, network: pd.DataFrame) -> tuple:
@@ -450,6 +568,158 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
         f"(num_genes={len(genes)}, num_tfs={len(unique_tfs)})."
     )
     return gene_tf_matrix
+
+from typing import Dict, List, Optional, Tuple
+import pandas as pd
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
+import warnings
+import logging
+
+# (Assume the following helper functions are imported or defined elsewhere:)
+# - _validate_ratios(config)
+# - _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+# - _prepare_features(df, exclude_cols)
+# - _log_split_details_custom(...)
+
+def split_data_train_test(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Split the DataFrame into train and test sets with proper column handling.
+    
+    This function reuses the same helper logic as `split_data` so that metadata columns
+    (e.g. the target and stratification columns) are removed from the features before scaling.
+    
+    Args:
+        df: Input DataFrame containing features and target.
+        config: Dictionary with key "preprocess" that must include a "train_ratio" value.
+        target_name: Name of the target column.
+        stratify_by: Column name to stratify by (None for random splitting).
+        keep_columns: Additional columns to retain in features.
+        random_state: Seed for reproducibility.
+    
+    Returns:
+        Tuple of (X_train, y_train, X_test, y_test)
+    """
+    # Use provided keep_columns or an empty list.
+    keep_columns = keep_columns or []
+    
+    # Get the list of columns to exclude from features (such as target and metadata).
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+    
+    # Use the training ratio from the config. (The test ratio is implicitly 1 - train_ratio.)
+    train_ratio = config["preprocess"]["train_ratio"]
+    
+    # Split the dataset using stratification if requested.
+    if stratify_by:
+        gss = GroupShuffleSplit(n_splits=1, test_size=1 - train_ratio, random_state=random_state)
+        groups = df[stratify_by]
+        train_idx, test_idx = next(gss.split(df, groups=groups))
+        train_df, test_df = df.iloc[train_idx], df.iloc[test_idx]
+    else:
+        train_df, test_df = train_test_split(df, train_size=train_ratio, random_state=random_state, shuffle=True)
+    
+    # Prepare features by dropping excluded columns.
+    X_train = _prepare_features(train_df, exclude_cols)
+    X_test = _prepare_features(test_df, exclude_cols)
+    
+    # Extract the target column.
+    y_train = train_df[target_name]
+    y_test = test_df[target_name]
+    
+    # Log the split details using our custom logging function.
+    _log_split_details_custom(X_train, X_test, names=["Train", "Test"])
+    
+    return X_train, y_train, X_test, y_test
+
+def split_data_flexible(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+    return_val: bool = True  # If True, perform train/val/test split; if False, perform train/test split.
+) -> Tuple:
+    """
+    Split the DataFrame either into train/val/test sets or into train/test sets,
+    depending on the return_val flag. This function reuses the same helper functions
+    for column exclusion and feature preparation.
+    
+    Args:
+        df: Input DataFrame.
+        config: Dictionary with keys "train_ratio", and if return_val is True, also "val_ratio" and "test_ratio".
+        target_name: Name of the target column.
+        stratify_by: Column to stratify by.
+        keep_columns: Columns to retain in features.
+        random_state: Seed for reproducibility.
+        return_val: If True, return (X_train, y_train, X_val, y_val, X_test, y_test);
+                    if False, return (X_train, y_train, X_test, y_test).
+    
+    Returns:
+        Tuple with the appropriate splits.
+    """
+    keep_columns = keep_columns or []
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+    
+    if return_val:
+        # Use your existing fixed-split logic.
+        # (Assumes that _validate_ratios and _random_split/_stratified_split are defined.)
+        _validate_ratios(config)
+        if stratify_by:
+            train_df, val_df, test_df = _stratified_split(df, stratify_by, config, random_state)
+        else:
+            train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
+        
+        X_train = _prepare_features(train_df, exclude_cols)
+        X_val = _prepare_features(val_df, exclude_cols)
+        X_test = _prepare_features(test_df, exclude_cols)
+        y_train = train_df[target_name]
+        y_val = val_df[target_name]
+        y_test = test_df[target_name]
+        _log_split_details_custom(X_train, X_val, X_test)
+        return X_train, y_train, X_val, y_val, X_test, y_test
+    else:
+        # Return only train/test splits.
+        train_ratio = config["preprocess"]["train_ratio"]
+        if stratify_by:
+            gss = GroupShuffleSplit(n_splits=1, test_size=1 - train_ratio, random_state=random_state)
+            groups = df[stratify_by]
+            train_idx, test_idx = next(gss.split(df, groups=groups))
+            train_df, test_df = df.iloc[train_idx], df.iloc[test_idx]
+        else:
+            train_df, test_df = train_test_split(df, train_size=train_ratio, random_state=random_state, shuffle=True)
+        
+        X_train = _prepare_features(train_df, exclude_cols)
+        X_test = _prepare_features(test_df, exclude_cols)
+        y_train = train_df[target_name]
+        y_test = test_df[target_name]
+        _log_split_details_custom(X_train, X_test, names=["Train", "Test"])
+        return X_train, y_train, X_test, y_test
+
+
+def _log_split_details_custom(*feature_dfs: pd.DataFrame, names: list = None) -> None:
+    """
+    Log split details for an arbitrary number of DataFrame splits.
+    
+    Args:
+        *feature_dfs: One or more DataFrames representing different splits.
+        names (list): Optional list of names to assign to each split.
+    """
+    if names is None:
+        default_names = ["Train", "Validation", "Test"]
+        names = default_names[:len(feature_dfs)]
+    logging.info("Split sizes:")
+    for name, df in zip(names, feature_dfs):
+        logging.info(f"{name}: {len(df)} samples")
+        if len(df) == 0:
+            warnings.warn(f"{name} set is empty! Check your split ratios.")
+    logging.debug(f"Feature columns: {feature_dfs[0].columns.tolist()}")
 
 
 def run_tf_activity_inference(

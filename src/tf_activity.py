@@ -76,12 +76,12 @@ min_n_values = [1]
 # Define the list of algorithms to benchmark
 algorithms = [
     "ulm",
-    "viper",
+    # "viper",
     # "gsva",
     # "gsea",
     # "ora",
-    "aucell",
-    "mlm",
+    # "aucell",
+    # "mlm",
     # "mdt",
     # "udt",
     # "wmean",
