@@ -1,10 +1,9 @@
 import logging
-
 import torch
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
-# Set logging
+# Configure logging
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -15,17 +14,25 @@ logging.basicConfig(
 def _forward_pass(model, X_batch, device):
     """
     Perform a forward pass through the model, ensuring all inputs are on the correct device.
+    
+    Args:
+        model (nn.Module): The PyTorch model.
+        X_batch (list of torch.Tensor): List of input tensors.
+        device (torch.device or str): The device to run the computation on.
+    
+    Returns:
+        torch.Tensor: The model outputs.
     """
-    # Move input tensors to the correct device if necessary
+    # Move each input tensor to the target device if not already there.
     X_batch = [x.to(device) if x.device != device else x for x in X_batch]
-
-    # Ensure all tensors are on the correct device type
+    
+    # Confirm that every tensor is on the proper device.
     for i, x in enumerate(X_batch):
-        assert (
-            x.device.type == device.type
-        ), f"Input tensor {i} is on {x.device.type}, expected {device.type}."
-
-    # Perform forward pass
+        assert x.device.type == torch.device(device).type, (
+            f"Input tensor {i} is on {x.device.type}, expected {torch.device(device).type}."
+        )
+    
+    # Call the model using unpacked inputs.
     return model(*X_batch)
 
 
@@ -44,28 +51,28 @@ def train_model(
     use_mixed_precision=True,
 ):
     """
-    A unified training loop for any PyTorch model. This loop:
-    - Handles regression or classification based on criterion and model outputs.
-    - Supports early stopping, gradient clipping, LR scheduling.
-    - Uses mixed precision if enabled.
-    - Works for single or multiple input modalities (unimodal/multimodal).
-
+    A unified training loop for any PyTorch model. This loop handles:
+      - Forward and backward passes with optional mixed precision.
+      - Multiple input modalities (unimodal/multimodal) where the last element of a batch is assumed to be the target.
+      - Gradient clipping and learning rate scheduling.
+      - Early stopping based on validation loss.
+    
     Args:
-        model (nn.Module): PyTorch model to train.
+        model (torch.nn.Module): The PyTorch model to train.
         train_loader (DataLoader): DataLoader for training data.
         val_loader (DataLoader): DataLoader for validation data.
         criterion (callable): Loss function.
         optimizer (torch.optim.Optimizer): Optimizer.
-        scheduler (optional): Learning rate scheduler that implements step(val_loss).
-        epochs (int): Max number of training epochs.
-        device (str): "cpu" or "cuda".
-        gradient_clipping (float): Gradient norm clipping value.
-        early_stopping_patience (int): Patience for early stopping based on val_loss.
-        model_name (str): Name of the model for logging.
-        use_mixed_precision (bool): Use AMP for faster training on GPU.
-
+        scheduler (optional): Learning rate scheduler (expects scheduler.step(val_loss)).
+        epochs (int): Maximum number of training epochs.
+        device (str): Device to use, e.g., "cpu" or "cuda".
+        gradient_clipping (float): Maximum norm for gradient clipping.
+        early_stopping_patience (int): Number of epochs with no improvement to wait before stopping.
+        model_name (str): Name of the model for logging purposes.
+        use_mixed_precision (bool): If True, uses automatic mixed precision for faster GPU training.
+    
     Returns:
-        (train_losses, val_losses): Lists of training and validation losses per epoch.
+        (train_losses, val_losses): Tuple of lists containing the training and validation loss per epoch.
     """
     model.to(device)
     scaler = GradScaler(enabled=use_mixed_precision)
@@ -76,14 +83,12 @@ def train_model(
     patience_counter = 0
     best_model_state = None
 
-    for epoch in tqdm(range(epochs)):
+    for epoch in tqdm(range(epochs), desc=f"Training {model_name}"):
         model.train()
         running_train_loss = 0.0
 
         for batch in train_loader:
-            # Expecting batch to be (X, y)
-            # If multiple inputs, batch may be (X1, X2, ..., y)
-            # Last element is assumed to be y
+            # Unpack batch assuming the last element is the target.
             *X_batch, y_batch = batch
             y_batch = y_batch.to(device)
 
@@ -91,55 +96,56 @@ def train_model(
 
             with autocast(enabled=use_mixed_precision):
                 outputs = _forward_pass(model, X_batch, device)
-                outputs = (
-                    outputs.squeeze(dim=-1)
-                    if outputs.dim() > 1 and outputs.size(-1) == 1
-                    else outputs
-                )
+                # If the output is of shape (..., 1), squeeze the final dimension.
+                if outputs.dim() > 1 and outputs.size(-1) == 1:
+                    outputs = outputs.squeeze(dim=-1)
                 loss = criterion(outputs, y_batch)
 
             scaler.scale(loss).backward()
-            # Gradient Clipping
+
             if gradient_clipping is not None:
+                # Unscale before clipping to get the true gradients.
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
 
             scaler.step(optimizer)
             scaler.update()
 
+            # Multiply the batch loss by the batch size for correct averaging later.
             running_train_loss += loss.item() * y_batch.size(0)
 
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
         train_losses.append(epoch_train_loss)
 
-        # Validation Phase
+        # Validation phase
         model.eval()
         running_val_loss = 0.0
         with torch.no_grad(), autocast(enabled=use_mixed_precision):
             for batch in val_loader:
                 *X_batch, y_batch = batch
                 y_batch = y_batch.to(device)
-
                 outputs = _forward_pass(model, X_batch, device)
-                outputs = (
-                    outputs.squeeze(dim=-1)
-                    if outputs.dim() > 1 and outputs.size(-1) == 1
-                    else outputs
-                )
+                if outputs.dim() > 1 and outputs.size(-1) == 1:
+                    outputs = outputs.squeeze(dim=-1)
                 val_loss = criterion(outputs, y_batch)
                 running_val_loss += val_loss.item() * y_batch.size(0)
 
         epoch_val_loss = running_val_loss / len(val_loader.dataset)
         val_losses.append(epoch_val_loss)
 
-        # Learning Rate Scheduler Step
+        # Step the scheduler if provided (e.g., ReduceLROnPlateau expects a metric).
         if scheduler is not None:
             scheduler.step(epoch_val_loss)
 
-        # Early Stopping Check
+        logging.info(
+            f"Epoch {epoch+1}/{epochs} | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}"
+        )
+
+        # Early stopping check: reset patience if validation loss improves.
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             patience_counter = 0
+            # Save the best model state (moved to CPU for portability).
             best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
         else:
             patience_counter += 1
@@ -149,8 +155,8 @@ def train_model(
                 )
                 break
 
-    # Restore best model weights
-    if best_model_state:
+    # Restore the best model weights.
+    if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
     return train_losses, val_losses

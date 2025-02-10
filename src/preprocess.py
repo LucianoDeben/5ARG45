@@ -534,36 +534,36 @@ def run_tf_activity_inference(
             },
             "estimate_key": "viper_estimate",
         },
-        "gsva": {
-            "func": dc.run_gsva,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "kcdf": "Gaussian",
-                "use_raw": False,
-            },
-            "estimate_key": "gsva_estimate",
-        },
-        "gsea": {
-            "func": dc.run_gsea,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "times": 1000,  # Example: number of permutations
-                "use_raw": False,
-            },
-            "estimate_key": "gsea_estimate",
-        },
-        "ora": {
-            "func": dc.run_ora,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "n_up": min_n,
-                "use_raw": False,
-            },
-            "estimate_key": "ora_estimate",
-        },
+        # "gsva": {
+        #     "func": dc.run_gsva,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "kcdf": "gaussian",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "gsva_estimate",
+        # },
+        # "gsea": {
+        #     "func": dc.run_gsea,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "times": 1000,  # Example: number of permutations
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "gsea_estimate",
+        # },
+        # "ora": {
+        #     "func": dc.run_ora,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "n_up": min_n,
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "ora_estimate",
+        # },
         "aucell": {
             "func": dc.run_aucell,
             "kwargs": {
@@ -584,54 +584,54 @@ def run_tf_activity_inference(
             },
             "estimate_key": "mlm_estimate",
         },
-        "mdt": {
-            "func": dc.run_mdt,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "weight": "weight",
-                "use_raw": False,
-            },
-            "estimate_key": "mdt_estimate",
-        },
-        "udt": {
-            "func": dc.run_udt,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "weight": "weight",
-                "use_raw": False,
-            },
-            "estimate_key": "udt_estimate",
-        },
-        "wmean": {
-            "func": dc.run_wmean,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "use_raw": False,
-            },
-            "estimate_key": "wmean_estimate",
-        },
-        "wsum": {
-            "func": dc.run_wsum,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "weight": "weight",
-                "use_raw": False,
-            },
-            "estimate_key": "wsum_estimate",
-        },
-        "consensus": {
-            "func": dc.run_consensus,
-            "kwargs": {
-                "source": "source",
-                "target": "target",
-                "use_raw": False,
-            },
-            "estimate_key": "consensus_estimate",
-        },
+        # "mdt": {
+        #     "func": dc.run_mdt,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "weight": "weight",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "mdt_estimate",
+        # },
+        # "udt": {
+        #     "func": dc.run_udt,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "weight": "weight",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "udt_estimate",
+        # },
+        # "wmean": {
+        #     "func": dc.run_wmean,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "wmean_estimate",
+        # },
+        # "wsum": {
+        #     "func": dc.run_wsum,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "weight": "weight",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "wsum_estimate",
+        # },
+        # "consensus": {
+        #     "func": dc.run_consensus,
+        #     "kwargs": {
+        #         "source": "source",
+        #         "target": "target",
+        #         "use_raw": False,
+        #     },
+        #     "estimate_key": "consensus_estimate",
+        # },
     }
 
     if algorithm not in methods:
@@ -654,6 +654,9 @@ def run_tf_activity_inference(
     # Extract the TF activity estimates from the AnnData object
     tf_activity = pd.DataFrame(adata.obsm[estimate_key], index=adata.obs.index)
     tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers if needed
+    
+    # Set Nan values to 0.0 (if any)
+    tf_activity.fillna(0.0, inplace=True)
 
     # Reattach the metadata columns to the output
     tf_activity = tf_activity.join(metadata)
