@@ -502,10 +502,11 @@ class MultiTaskLoss(nn.Module):
 
         # Ensure at least one loss is computed
         if total_loss == 0.0:
-            raise ValueError("No valid labels or outputs provided for loss calculation.")
+            raise ValueError(
+                "No valid labels or outputs provided for loss calculation."
+            )
 
         return total_loss
-
 
 
 if __name__ == "__main__":
@@ -601,10 +602,9 @@ if __name__ == "__main__":
         task_type="gene-expression",  # Multitask learning
         fusion_type="gating",
     )
-    
+
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_params}")
-
 
     # Define multitask loss
     criterion = MultiTaskLoss(gene_loss_weight=1.0, viability_loss_weight=1.0)
@@ -647,13 +647,23 @@ if __name__ == "__main__":
 
     # Log gene expression metrics if available
     if "gene_expression_metrics" in test_metrics:
-        logging.info(f"Gene Expression Metrics: {test_metrics['gene_expression_metrics']}")
+        logging.info(
+            f"Gene Expression Metrics: {test_metrics['gene_expression_metrics']}"
+        )
         wandb.log(
             {
-                "Gene Expression MSE": test_metrics["gene_expression_metrics"].get("MSE", None),
-                "Gene Expression MAE": test_metrics["gene_expression_metrics"].get("MAE", None),
-                "Gene Expression R2": test_metrics["gene_expression_metrics"].get("R2", None),
-                "Gene Expression PCC": test_metrics["gene_expression_metrics"].get("PCC", None),
+                "Gene Expression MSE": test_metrics["gene_expression_metrics"].get(
+                    "MSE", None
+                ),
+                "Gene Expression MAE": test_metrics["gene_expression_metrics"].get(
+                    "MAE", None
+                ),
+                "Gene Expression R2": test_metrics["gene_expression_metrics"].get(
+                    "R2", None
+                ),
+                "Gene Expression PCC": test_metrics["gene_expression_metrics"].get(
+                    "PCC", None
+                ),
             }
         )
 
@@ -670,4 +680,3 @@ if __name__ == "__main__":
         )
 
     wandb.finish()
-

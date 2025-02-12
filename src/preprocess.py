@@ -5,15 +5,14 @@ import warnings
 from typing import Dict, List, Optional, Tuple
 
 import decoupler as dc
-import pandas as pd
-from evaluation import evaluate_model
-import torch
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
-
-from training import train_model
-from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import KFold
 import numpy as np
+import pandas as pd
+import torch
+from sklearn.model_selection import GroupShuffleSplit, KFold, train_test_split
+from torch.utils.data import DataLoader, Subset
+
+from evaluation import evaluate_model
+from training import train_model
 
 logger = logging.getLogger(__name__)
 sys.path.append("src")
@@ -151,8 +150,11 @@ def preprocess_gene_data(
 
         # 1. Load datasets
         # Assuming shape (31567, number_of_genes). Adjust if needed.
-        X_rna = np.memmap(config["data_paths"]["rna_file"], dtype=np.float32, mode="r")
+        X_rna = np.memmap(config["data_paths"]["rna_file"], dtype=np.float64, mode="r")
         X_rna = X_rna.reshape(31567, -1)  # Assign the reshaped view back to X_rna
+        # Assert that the X_rna is loaded correctly with 12.328 columns
+        assert X_rna.shape[1] == 12328
+
         logging.debug(f"Loaded RNA data with shape: {X_rna.shape}")
 
         geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
@@ -211,6 +213,7 @@ def preprocess_gene_data(
     except Exception as e:
         logging.error(f"Preprocessing failed: {e}")
         raise
+
 
 def _validate_ratios(config: Dict) -> None:
     """Validate train/val/test split ratios."""
@@ -313,44 +316,47 @@ def _random_split(
 def _prepare_features(df: pd.DataFrame, exclude_cols: List[str]) -> pd.DataFrame:
     """Prepare feature DataFrame by dropping excluded columns"""
     return df.drop(columns=exclude_cols, errors="ignore").copy()
-    
+
+
 def k_fold_cross_validation(
-    model_class,           
-    train_dataset,         
+    model_class,
+    train_dataset,
     k_folds: int = 5,
     batch_size: int = 32,
     epochs: int = 10,
-    criterion_fn=None,     
-    optimizer_fn=None,     
-    scheduler_fn=None,     
+    criterion_fn=None,
+    optimizer_fn=None,
+    scheduler_fn=None,
     device: str = "cuda",
     use_mixed_precision: bool = True,
 ):
     """
     Perform K-Fold cross-validation on the training dataset.
-    
+
     Returns:
         A dictionary with metrics for each fold.
     """
     kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     fold_metrics = {}
-    
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(np.arange(len(train_dataset)))):
+
+    for fold, (train_idx, val_idx) in enumerate(
+        kfold.split(np.arange(len(train_dataset)))
+    ):
         print(f"--- Fold {fold+1}/{k_folds} ---")
-        
+
         # Create subsets for the current fold.
         train_subset = Subset(train_dataset, train_idx)
         val_subset = Subset(train_dataset, val_idx)
-        
+
         train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
-        
+
         # Create a new instance of your model for this fold.
         model = model_class()
-        
+
         optimizer = optimizer_fn(model.parameters())
         scheduler = scheduler_fn(optimizer) if scheduler_fn is not None else None
-        
+
         # Train the model on the current fold.
         train_losses, val_losses = train_model(
             model=model,
@@ -363,18 +369,24 @@ def k_fold_cross_validation(
             device=device,
             use_mixed_precision=use_mixed_precision,
         )
-        
+
         # Evaluate the model on the validation fold.
-        metrics = evaluate_model(model, val_loader, criterion_fn, device=device, calculate_metrics=True)
+        metrics = evaluate_model(
+            model, val_loader, criterion_fn, device=device, calculate_metrics=True
+        )
         fold_metrics[fold] = metrics
-        
+
         print(f"Fold {fold+1} Metrics: {metrics}\n")
-        
+
     # Optionally, average the metrics over the folds.
-    avg_metrics = {key: np.mean([fold_metrics[f][key] for f in fold_metrics]) for key in fold_metrics[0]}
+    avg_metrics = {
+        key: np.mean([fold_metrics[f][key] for f in fold_metrics])
+        for key in fold_metrics[0]
+    }
     print("Average Metrics Across Folds:", avg_metrics)
-    
+
     return fold_metrics
+
 
 def filter_dataset_and_network(dataset: pd.DataFrame, network: pd.DataFrame) -> tuple:
     """
@@ -460,6 +472,7 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
     )
     return gene_tf_matrix
 
+
 def split_data(
     df: pd.DataFrame,
     config: Dict,
@@ -506,6 +519,7 @@ def split_data(
     _log_split_details(X_train, X_val, X_test)
     return X_train, y_train, X_val, y_val, X_test, y_test
 
+
 def split_data_flexible(
     df: pd.DataFrame,
     config: Dict,
@@ -513,13 +527,13 @@ def split_data_flexible(
     stratify_by: Optional[str] = None,
     keep_columns: Optional[List[str]] = None,
     random_state: int = 42,
-    return_val: bool = True 
+    return_val: bool = True,
 ) -> Tuple:
     """
     Split the DataFrame either into train/val/test sets or into train/test sets,
     depending on the return_val flag. This function reuses the same helper functions
     for column exclusion and feature preparation.
-    
+
     Args:
         df: Input DataFrame.
         config: Dictionary with keys "train_ratio", and if return_val is True, also "val_ratio" and "test_ratio".
@@ -529,22 +543,26 @@ def split_data_flexible(
         random_state: Seed for reproducibility.
         return_val: If True, return (X_train, y_train, X_val, y_val, X_test, y_test);
                     if False, return (X_train, y_train, X_test, y_test).
-    
+
     Returns:
         Tuple with the appropriate splits.
     """
     keep_columns = keep_columns or []
     exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
-    
+
     if return_val:
         # Use your existing fixed-split logic.
         # (Assumes that _validate_ratios and _random_split/_stratified_split are defined.)
         _validate_ratios(config)
         if stratify_by:
-            train_df, val_df, test_df = _stratified_split(df, stratify_by, config, random_state)
+            train_df, val_df, test_df = _stratified_split(
+                df, stratify_by, config, random_state
+            )
         else:
-            train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
-        
+            train_df, val_df, test_df = _random_split(
+                df, config, target_name, random_state
+            )
+
         X_train = _prepare_features(train_df, exclude_cols)
         X_val = _prepare_features(val_df, exclude_cols)
         X_test = _prepare_features(test_df, exclude_cols)
@@ -557,13 +575,17 @@ def split_data_flexible(
         # Return only train/test splits.
         train_ratio = config["preprocess"]["train_ratio"]
         if stratify_by:
-            gss = GroupShuffleSplit(n_splits=1, test_size=1 - train_ratio, random_state=random_state)
+            gss = GroupShuffleSplit(
+                n_splits=1, test_size=1 - train_ratio, random_state=random_state
+            )
             groups = df[stratify_by]
             train_idx, test_idx = next(gss.split(df, groups=groups))
             train_df, test_df = df.iloc[train_idx], df.iloc[test_idx]
         else:
-            train_df, test_df = train_test_split(df, train_size=train_ratio, random_state=random_state, shuffle=True)
-        
+            train_df, test_df = train_test_split(
+                df, train_size=train_ratio, random_state=random_state, shuffle=True
+            )
+
         X_train = _prepare_features(train_df, exclude_cols)
         X_test = _prepare_features(test_df, exclude_cols)
         y_train = train_df[target_name]
@@ -575,14 +597,14 @@ def split_data_flexible(
 def _log_split_details(*feature_dfs: pd.DataFrame, names: list = None) -> None:
     """
     Log split details for an arbitrary number of DataFrame splits.
-    
+
     Args:
         *feature_dfs: One or more DataFrames representing different splits.
         names (list): Optional list of names to assign to each split.
     """
     if names is None:
         default_names = ["Train", "Validation", "Test"]
-        names = default_names[:len(feature_dfs)]
+        names = default_names[: len(feature_dfs)]
     logging.info("Split sizes:")
     for name, df in zip(names, feature_dfs):
         logging.info(f"{name}: {len(df)} samples")
@@ -595,7 +617,7 @@ def run_tf_activity_inference(
     X: pd.DataFrame,
     net: pd.DataFrame,
     min_n: int = 1,
-    algorithm: str = "ulm"  # Default algorithm, can be changed dynamically
+    algorithm: str = "ulm",  # Default algorithm, can be changed dynamically
 ) -> pd.DataFrame:
     """
     Run TF activity inference on the input data using one of several decoupler algorithms.
@@ -616,9 +638,10 @@ def run_tf_activity_inference(
                     or if an unsupported algorithm is provided.
         KeyError: If the expected key for the chosen algorithm is not found in AnnData.obsm.
     """
-    import scanpy as sc
-    import decoupler as dc
     import logging
+
+    import decoupler as dc
+    import scanpy as sc
 
     # Define expected metadata columns
     metadata_cols = {"cell_mfc_name", "viability", "pert_dose"}
@@ -633,7 +656,9 @@ def run_tf_activity_inference(
     # Determine shared genes between the network and gene expression data
     shared_genes = set(net["target"]).intersection(gene_expression.columns)
     if not shared_genes:
-        raise ValueError("No shared genes found between network and gene expression matrix!")
+        raise ValueError(
+            "No shared genes found between network and gene expression matrix!"
+        )
     logging.debug(f"Number of shared genes: {len(shared_genes)}")
 
     # Filter the network and gene expression data to include only shared genes
@@ -696,7 +721,9 @@ def run_tf_activity_inference(
     }
 
     if algorithm not in methods:
-        raise ValueError(f"Algorithm '{algorithm}' is not supported. Choose from: {list(methods.keys())}")
+        raise ValueError(
+            f"Algorithm '{algorithm}' is not supported. Choose from: {list(methods.keys())}"
+        )
 
     # Retrieve the decoupler function and its parameters from the mapping
     method = methods[algorithm]
@@ -709,13 +736,17 @@ def run_tf_activity_inference(
 
     # Check that the expected output key is present in adata.obsm
     if estimate_key not in adata.obsm:
-        raise KeyError(f"Expected key '{estimate_key}' not found in AnnData.obsm. "
-                       "Ensure that the chosen algorithm populates obsm with its output.")
+        raise KeyError(
+            f"Expected key '{estimate_key}' not found in AnnData.obsm. "
+            "Ensure that the chosen algorithm populates obsm with its output."
+        )
 
     # Extract the TF activity estimates from the AnnData object
     tf_activity = pd.DataFrame(adata.obsm[estimate_key], index=adata.obs.index)
-    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers if needed
-    
+    tf_activity.index = tf_activity.index.astype(
+        int
+    )  # Convert index to integers if needed
+
     # Set Nan values to 0.0 (if any)
     tf_activity.fillna(0.0, inplace=True)
 
@@ -723,6 +754,7 @@ def run_tf_activity_inference(
     tf_activity = tf_activity.join(metadata)
 
     return tf_activity
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess datasets.")
@@ -735,6 +767,10 @@ if __name__ == "__main__":
 
     config = load_config(args.config_file)
     # preprocess_tf_data(config, standardize=True)
-    # preprocess_gene_data(config, standardize=True, feature_space="all")
+    preprocess_gene_data(
+        config, standardize=True, feature_space="landmark", chunk_size=3000
+    )
+    preprocess_gene_data(
+        config, standardize=True, feature_space="best inferred", chunk_size=3000
+    )
     preprocess_gene_data(config, standardize=True, feature_space="all", chunk_size=3000)
-    # preprocess_gene_data(config, standardize=True, feature_space="landmark")

@@ -52,7 +52,8 @@ datasets = {
     ),
     "Best Inferred Data": (
         load_sampled_data(
-            config["data_paths"]["preprocessed_best_inferred_file"], sample_size=SAMPLE_SIZE
+            config["data_paths"]["preprocessed_best_inferred_file"],
+            sample_size=SAMPLE_SIZE,
         ),
         "viability",
     ),
@@ -173,7 +174,7 @@ for name, loaders in dataloaders.items():
         weight_init="xavier",
         use_batchnorm=True,
     ).to(device)
-    
+
     num_params = sum(p.numel() for p in sparse_model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters Constrained model: {num_params}")
 
