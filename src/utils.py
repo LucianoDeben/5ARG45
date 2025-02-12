@@ -158,6 +158,14 @@ def sanity_check(
     logging.info("Sanity check failed.")
     return False
 
+def create_dataset(X: pd.DataFrame, y: pd.Series) -> TensorDataset:
+    if X.empty or y.empty:
+        raise ValueError("Input features and labels cannot be empty.")
+    if len(X) != len(y):
+        raise ValueError("Feature matrix X and target variable y must have the same number of samples.")
+    X_tensor = torch.tensor(X.values, dtype=torch.float32)
+    y_tensor = torch.tensor(y.values, dtype=torch.float32)
+    return TensorDataset(X_tensor, y_tensor)
 
 def create_dataloader(
     X: Union[pd.DataFrame, pd.Series],
@@ -165,34 +173,7 @@ def create_dataloader(
     batch_size: int = 32,
     shuffle: bool = True,
 ) -> DataLoader:
-    """
-    Creates a PyTorch DataLoader from input features and labels.
-
-    Args:
-        X (Union[pd.DataFrame, pd.Series]): Feature dataset with samples as rows.
-        y (pd.Series): Target variable.
-        batch_size (int): Batch size for the DataLoader.
-        shuffle (bool): Whether to shuffle the dataset.
-
-    Returns:
-        DataLoader: PyTorch DataLoader with a TensorDataset.
-
-    Raises:
-        ValueError: If X or y are empty or have mismatched lengths.
-    """
-    if X.empty or y.empty:
-        raise ValueError("Input features and labels cannot be empty.")
-
-    if len(X) != len(y):
-        raise ValueError(
-            "Feature matrix X and target variable y must have the same number of samples."
-        )
-
-    # Convert pandas DataFrame/Series to PyTorch tensors
-    X_tensor = torch.tensor(X.values, dtype=torch.float32)
-    y_tensor = torch.tensor(y.values, dtype=torch.float32)
-
-    dataset = TensorDataset(X_tensor, y_tensor)
+    dataset = create_dataset(X, y)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 

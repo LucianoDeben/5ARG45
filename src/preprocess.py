@@ -460,6 +460,52 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
     )
     return gene_tf_matrix
 
+def split_data(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Split DataFrame into stratified train/val/test sets with proper column handling.
+
+    Args:
+        df: Input DataFrame containing features and target
+        config: Dictionary with 'train_ratio', 'val_ratio', 'test_ratio'
+        target_name: Name of the target column
+        stratify_by: Column name to stratify by (None for random splitting)
+        keep_columns: Additional columns to retain in features
+        random_state: Seed for reproducibility
+
+    Returns:
+        Tuple of (X_train, y_train, X_val, y_val, X_test, y_test)
+    """
+    # Validate configuration and inputs
+    _validate_ratios(config)
+    keep_columns = keep_columns or []
+
+    # Handle column exclusions
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+
+    # Split dataset
+    if stratify_by:
+        train_df, val_df, test_df = _stratified_split(
+            df, stratify_by, config, random_state
+        )
+    else:
+        train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
+
+    # Prepare features and targets
+    X_train, X_val, X_test = [
+        _prepare_features(df, exclude_cols) for df in [train_df, val_df, test_df]
+    ]
+    y_train, y_val, y_test = [df[target_name] for df in [train_df, val_df, test_df]]
+
+    _log_split_details(X_train, X_val, X_test)
+    return X_train, y_train, X_val, y_val, X_test, y_test
+
 def split_data_flexible(
     df: pd.DataFrame,
     config: Dict,
