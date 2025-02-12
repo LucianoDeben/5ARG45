@@ -44,25 +44,25 @@ logging.info("Loading datasets...")
 datasets = {
     "Landmark Data": (
         load_sampled_data(
-            config["data_paths"]["preprocessed_landmark_file"], sample_size=30000
+            config["data_paths"]["preprocessed_landmark_file"], sample_size=1000
         ),
         "viability",
     ),
-    "Best Inferred Data": (
-        load_sampled_data(
-            config["data_paths"]["preprocessed_best_inferred_file"], sample_size=30000
-        ),
-        "viability",
-    ),
-    "Gene Data": (
-        load_sampled_data(
-            config["data_paths"]["preprocessed_gene_file"],
-            sample_size=30000,
-            use_chunks=True,
-            chunk_size=1000,
-        ),
-        "viability",
-    ),
+    # "Best Inferred Data": (
+    #     load_sampled_data(
+    #         config["data_paths"]["preprocessed_best_inferred_file"], sample_size=30000
+    #     ),
+    #     "viability",
+    # ),
+    # "Gene Data": (
+    #     load_sampled_data(
+    #         config["data_paths"]["preprocessed_gene_file"],
+    #         sample_size=30000,
+    #         use_chunks=True,
+    #         chunk_size=1000,
+    #     ),
+    #     "viability",
+    # ),
 }
 
 # %% Split datasets into train/val/test sets
@@ -127,6 +127,9 @@ for name, loaders in dataloaders.items():
         norm_type="batchnorm",
         weight_init="xavier",
     ).to(device)
+
+    num_params = sum(p.numel() for p in fcnn_model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {num_params}")
 
     fcnn_criterion = nn.MSELoss()
     fcnn_optimizer = optim.AdamW(fcnn_model.parameters(), lr=0.001, weight_decay=1e-4)

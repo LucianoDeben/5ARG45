@@ -153,6 +153,11 @@ for name, loaders in dataloaders.items():
         num_hiddens_final,
     ).to(device)
 
+    num_params = sum(
+        p.numel() for p in gene_ontology_model.parameters() if p.requires_grad
+    )
+    print(f"Number of trainable parameters: {num_params}")
+
     ontology_criterion = nn.MSELoss()
     ontology_optimizer = optim.AdamW(
         gene_ontology_model.parameters(), lr=0.001, weight_decay=1e-4
