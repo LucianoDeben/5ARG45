@@ -567,7 +567,7 @@ if __name__ == "__main__":
         smiles_dict=smiles_dict,
         plate_column="det_plate",
         normalize="min-max",
-        n_rows=50,
+        n_rows=10000,
         pairing="random",
         landmark_only=True,
         tokenizer=smiles_tokenizer,

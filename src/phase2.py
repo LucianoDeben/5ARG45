@@ -40,36 +40,39 @@ logging.info(f"Using device: {device}")
 # %% Load and Preprocess Datasets
 logging.info("Loading datasets...")
 
+SAMPLE_SIZE = None
+
 # Load datasets
 datasets = {
     "Landmark Data": (
         load_sampled_data(
-            config["data_paths"]["preprocessed_landmark_file"], sample_size=1000
+            config["data_paths"]["preprocessed_landmark_file"], sample_size=SAMPLE_SIZE
         ),
         "viability",
     ),
-    # "Best Inferred Data": (
-    #     load_sampled_data(
-    #         config["data_paths"]["preprocessed_best_inferred_file"], sample_size=30000
-    #     ),
-    #     "viability",
-    # ),
-    # "Gene Data": (
-    #     load_sampled_data(
-    #         config["data_paths"]["preprocessed_gene_file"],
-    #         sample_size=30000,
-    #         use_chunks=True,
-    #         chunk_size=1000,
-    #     ),
-    #     "viability",
-    # ),
+    "Best Inferred Data": (
+        load_sampled_data(
+            config["data_paths"]["preprocessed_best_inferred_file"],
+            sample_size=SAMPLE_SIZE,
+        ),
+        "viability",
+    ),
+    "Gene Data": (
+        load_sampled_data(
+            config["data_paths"]["preprocessed_gene_file"],
+            sample_size=SAMPLE_SIZE,
+            use_chunks=True,
+            chunk_size=1000,
+        ),
+        "viability",
+    ),
 }
 
 # %% Split datasets into train/val/test sets
 split_datasets = {}
 for name, (X, y_col) in datasets.items():
     X_train, y_train, X_val, y_val, X_test, y_test = split_data(
-        X, target_name=y_col, config=config, stratify_by=None
+        X, target_name=y_col, config=config, stratify_by="cell_mfc_name"
     )
     split_datasets[name] = {
         "train": (X_train, y_train),
@@ -127,9 +130,8 @@ for name, loaders in dataloaders.items():
         norm_type="batchnorm",
         weight_init="xavier",
     ).to(device)
-
     num_params = sum(p.numel() for p in fcnn_model.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters: {num_params}")
+    print(f"Number of trainable parameters FCNN model: {num_params}")
 
     fcnn_criterion = nn.MSELoss()
     fcnn_optimizer = optim.AdamW(fcnn_model.parameters(), lr=0.001, weight_decay=1e-4)
@@ -172,6 +174,9 @@ for name, loaders in dataloaders.items():
         weight_init="xavier",
         use_batchnorm=True,
     ).to(device)
+
+    num_params = sum(p.numel() for p in sparse_model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters Constrained model: {num_params}")
 
     sparse_criterion = nn.MSELoss()
     sparse_optimizer = optim.AdamW(

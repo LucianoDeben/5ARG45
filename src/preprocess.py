@@ -6,8 +6,14 @@ from typing import Dict, List, Optional, Tuple
 
 import decoupler as dc
 import pandas as pd
+from evaluation import evaluate_model
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+
+from training import train_model
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import KFold
+import numpy as np
 
 logger = logging.getLogger(__name__)
 sys.path.append("src")
@@ -206,54 +212,6 @@ def preprocess_gene_data(
         logging.error(f"Preprocessing failed: {e}")
         raise
 
-
-def split_data(
-    df: pd.DataFrame,
-    config: Dict,
-    target_name: str = "viability",
-    stratify_by: Optional[str] = None,
-    keep_columns: Optional[List[str]] = None,
-    random_state: int = 42,
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
-    """
-    Split DataFrame into stratified train/val/test sets with proper column handling.
-
-    Args:
-        df: Input DataFrame containing features and target
-        config: Dictionary with 'train_ratio', 'val_ratio', 'test_ratio'
-        target_name: Name of the target column
-        stratify_by: Column name to stratify by (None for random splitting)
-        keep_columns: Additional columns to retain in features
-        random_state: Seed for reproducibility
-
-    Returns:
-        Tuple of (X_train, y_train, X_val, y_val, X_test, y_test)
-    """
-    # Validate configuration and inputs
-    _validate_ratios(config)
-    keep_columns = keep_columns or []
-
-    # Handle column exclusions
-    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
-
-    # Split dataset
-    if stratify_by:
-        train_df, val_df, test_df = _stratified_split(
-            df, stratify_by, config, random_state
-        )
-    else:
-        train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
-
-    # Prepare features and targets
-    X_train, X_val, X_test = [
-        _prepare_features(df, exclude_cols) for df in [train_df, val_df, test_df]
-    ]
-    y_train, y_val, y_test = [df[target_name] for df in [train_df, val_df, test_df]]
-
-    _log_split_details(X_train, X_val, X_test)
-    return X_train, y_train, X_val, y_val, X_test, y_test
-
-
 def _validate_ratios(config: Dict) -> None:
     """Validate train/val/test split ratios."""
     ratios = config.get("preprocess", {})
@@ -355,17 +313,68 @@ def _random_split(
 def _prepare_features(df: pd.DataFrame, exclude_cols: List[str]) -> pd.DataFrame:
     """Prepare feature DataFrame by dropping excluded columns"""
     return df.drop(columns=exclude_cols, errors="ignore").copy()
-
-
-def _log_split_details(*feature_dfs: pd.DataFrame) -> None:
-    """Log split details for debugging"""
-    logger.info("Split sizes:")
-    for name, df in zip(["Train", "Validation", "Test"], feature_dfs):
-        logger.info(f"{name}: {len(df)} samples")
-        if len(df) == 0:
-            warnings.warn(f"{name} set is empty! Check your split ratios.")
-    logger.debug(f"Feature columns: {feature_dfs[0].columns.tolist()}")
-
+    
+def k_fold_cross_validation(
+    model_class,           
+    train_dataset,         
+    k_folds: int = 5,
+    batch_size: int = 32,
+    epochs: int = 10,
+    criterion_fn=None,     
+    optimizer_fn=None,     
+    scheduler_fn=None,     
+    device: str = "cuda",
+    use_mixed_precision: bool = True,
+):
+    """
+    Perform K-Fold cross-validation on the training dataset.
+    
+    Returns:
+        A dictionary with metrics for each fold.
+    """
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    fold_metrics = {}
+    
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(np.arange(len(train_dataset)))):
+        print(f"--- Fold {fold+1}/{k_folds} ---")
+        
+        # Create subsets for the current fold.
+        train_subset = Subset(train_dataset, train_idx)
+        val_subset = Subset(train_dataset, val_idx)
+        
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False)
+        
+        # Create a new instance of your model for this fold.
+        model = model_class()
+        
+        optimizer = optimizer_fn(model.parameters())
+        scheduler = scheduler_fn(optimizer) if scheduler_fn is not None else None
+        
+        # Train the model on the current fold.
+        train_losses, val_losses = train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion_fn,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epochs=epochs,
+            device=device,
+            use_mixed_precision=use_mixed_precision,
+        )
+        
+        # Evaluate the model on the validation fold.
+        metrics = evaluate_model(model, val_loader, criterion_fn, device=device, calculate_metrics=True)
+        fold_metrics[fold] = metrics
+        
+        print(f"Fold {fold+1} Metrics: {metrics}\n")
+        
+    # Optionally, average the metrics over the folds.
+    avg_metrics = {key: np.mean([fold_metrics[f][key] for f in fold_metrics]) for key in fold_metrics[0]}
+    print("Average Metrics Across Folds:", avg_metrics)
+    
+    return fold_metrics
 
 def filter_dataset_and_network(dataset: pd.DataFrame, network: pd.DataFrame) -> tuple:
     """
@@ -451,49 +460,188 @@ def create_gene_tf_matrix(net: pd.DataFrame, genes: list) -> torch.Tensor:
     )
     return gene_tf_matrix
 
+def split_data(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Split DataFrame into stratified train/val/test sets with proper column handling.
+
+    Args:
+        df: Input DataFrame containing features and target
+        config: Dictionary with 'train_ratio', 'val_ratio', 'test_ratio'
+        target_name: Name of the target column
+        stratify_by: Column name to stratify by (None for random splitting)
+        keep_columns: Additional columns to retain in features
+        random_state: Seed for reproducibility
+
+    Returns:
+        Tuple of (X_train, y_train, X_val, y_val, X_test, y_test)
+    """
+    # Validate configuration and inputs
+    _validate_ratios(config)
+    keep_columns = keep_columns or []
+
+    # Handle column exclusions
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+
+    # Split dataset
+    if stratify_by:
+        train_df, val_df, test_df = _stratified_split(
+            df, stratify_by, config, random_state
+        )
+    else:
+        train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
+
+    # Prepare features and targets
+    X_train, X_val, X_test = [
+        _prepare_features(df, exclude_cols) for df in [train_df, val_df, test_df]
+    ]
+    y_train, y_val, y_test = [df[target_name] for df in [train_df, val_df, test_df]]
+
+    _log_split_details(X_train, X_val, X_test)
+    return X_train, y_train, X_val, y_val, X_test, y_test
+
+def split_data_flexible(
+    df: pd.DataFrame,
+    config: Dict,
+    target_name: str = "viability",
+    stratify_by: Optional[str] = None,
+    keep_columns: Optional[List[str]] = None,
+    random_state: int = 42,
+    return_val: bool = True 
+) -> Tuple:
+    """
+    Split the DataFrame either into train/val/test sets or into train/test sets,
+    depending on the return_val flag. This function reuses the same helper functions
+    for column exclusion and feature preparation.
+    
+    Args:
+        df: Input DataFrame.
+        config: Dictionary with keys "train_ratio", and if return_val is True, also "val_ratio" and "test_ratio".
+        target_name: Name of the target column.
+        stratify_by: Column to stratify by.
+        keep_columns: Columns to retain in features.
+        random_state: Seed for reproducibility.
+        return_val: If True, return (X_train, y_train, X_val, y_val, X_test, y_test);
+                    if False, return (X_train, y_train, X_test, y_test).
+    
+    Returns:
+        Tuple with the appropriate splits.
+    """
+    keep_columns = keep_columns or []
+    exclude_cols = _get_excluded_columns(df, target_name, stratify_by, keep_columns)
+    
+    if return_val:
+        # Use your existing fixed-split logic.
+        # (Assumes that _validate_ratios and _random_split/_stratified_split are defined.)
+        _validate_ratios(config)
+        if stratify_by:
+            train_df, val_df, test_df = _stratified_split(df, stratify_by, config, random_state)
+        else:
+            train_df, val_df, test_df = _random_split(df, config, target_name, random_state)
+        
+        X_train = _prepare_features(train_df, exclude_cols)
+        X_val = _prepare_features(val_df, exclude_cols)
+        X_test = _prepare_features(test_df, exclude_cols)
+        y_train = train_df[target_name]
+        y_val = val_df[target_name]
+        y_test = test_df[target_name]
+        _log_split_details(X_train, X_val, X_test)
+        return X_train, y_train, X_val, y_val, X_test, y_test
+    else:
+        # Return only train/test splits.
+        train_ratio = config["preprocess"]["train_ratio"]
+        if stratify_by:
+            gss = GroupShuffleSplit(n_splits=1, test_size=1 - train_ratio, random_state=random_state)
+            groups = df[stratify_by]
+            train_idx, test_idx = next(gss.split(df, groups=groups))
+            train_df, test_df = df.iloc[train_idx], df.iloc[test_idx]
+        else:
+            train_df, test_df = train_test_split(df, train_size=train_ratio, random_state=random_state, shuffle=True)
+        
+        X_train = _prepare_features(train_df, exclude_cols)
+        X_test = _prepare_features(test_df, exclude_cols)
+        y_train = train_df[target_name]
+        y_test = test_df[target_name]
+        _log_split_details(X_train, X_test, names=["Train", "Test"])
+        return X_train, y_train, X_test, y_test
+
+
+def _log_split_details(*feature_dfs: pd.DataFrame, names: list = None) -> None:
+    """
+    Log split details for an arbitrary number of DataFrame splits.
+    
+    Args:
+        *feature_dfs: One or more DataFrames representing different splits.
+        names (list): Optional list of names to assign to each split.
+    """
+    if names is None:
+        default_names = ["Train", "Validation", "Test"]
+        names = default_names[:len(feature_dfs)]
+    logging.info("Split sizes:")
+    for name, df in zip(names, feature_dfs):
+        logging.info(f"{name}: {len(df)} samples")
+        if len(df) == 0:
+            warnings.warn(f"{name} set is empty! Check your split ratios.")
+    logging.debug(f"Feature columns: {feature_dfs[0].columns.tolist()}")
+
 
 def run_tf_activity_inference(
-    X: pd.DataFrame, net: pd.DataFrame, min_n: int = 1
+    X: pd.DataFrame,
+    net: pd.DataFrame,
+    min_n: int = 1,
+    algorithm: str = "ulm"  # Default algorithm, can be changed dynamically
 ) -> pd.DataFrame:
     """
-    Run TF activity inference on the input data.
+    Run TF activity inference on the input data using one of several decoupler algorithms.
 
     Args:
         X (pd.DataFrame): Gene expression matrix, including metadata columns.
         net (pd.DataFrame): Regulatory network for TF activity inference.
         min_n (int): Minimum number of targets for each TF.
+        algorithm (str): Which decoupler algorithm to use. Options include:
+                         "ulm", "viper", "aucell",
+                         "mlm".
 
     Returns:
         pd.DataFrame: TF activity matrix with metadata reattached.
 
     Raises:
-        ValueError: If no shared genes are found between network and gene expression matrix.
+        ValueError: If required metadata columns or shared genes are missing,
+                    or if an unsupported algorithm is provided.
+        KeyError: If the expected key for the chosen algorithm is not found in AnnData.obsm.
     """
-    # Define metadata columns
+    import scanpy as sc
+    import decoupler as dc
+    import logging
+
+    # Define expected metadata columns
     metadata_cols = {"cell_mfc_name", "viability", "pert_dose"}
     missing_cols = metadata_cols - set(X.columns)
-
     if missing_cols:
         raise ValueError(f"Missing expected metadata columns: {missing_cols}")
 
+    # Separate metadata from gene expression data
     metadata = X[list(metadata_cols)]
     gene_expression = X.drop(columns=metadata_cols)
 
-    # Filter the network for shared genes
+    # Determine shared genes between the network and gene expression data
     shared_genes = set(net["target"]).intersection(gene_expression.columns)
     if not shared_genes:
-        raise ValueError(
-            "No shared genes found between network and gene expression matrix!"
-        )
-
+        raise ValueError("No shared genes found between network and gene expression matrix!")
     logging.debug(f"Number of shared genes: {len(shared_genes)}")
 
-    # Filter network and gene expression data
+    # Filter the network and gene expression data to include only shared genes
     net_filtered = net[net["target"].isin(shared_genes)]
     logging.debug(f"Filtered network has {len(net_filtered)} interactions.")
     gene_expression = gene_expression[list(shared_genes)]
 
-    # Create AnnData object
+    # Create an AnnData object for the gene expression data
     adata = sc.AnnData(
         X=gene_expression.values,
         obs=pd.DataFrame(index=gene_expression.index),
@@ -501,26 +649,80 @@ def run_tf_activity_inference(
     )
     logging.info(f"AnnData object created with shape: {adata.shape}")
 
-    # Run ULM for TF activity inference
-    dc.run_ulm(
-        mat=adata,
-        net=net_filtered,
-        source="source",
-        target="target",
-        weight="weight",
-        min_n=min_n,
-        use_raw=False,
-    )
+    # Define a mapping from algorithm names to the corresponding decoupler function,
+    # its keyword arguments, and the expected output key in adata.obsm.
+    algorithm = algorithm.lower()
+    methods = {
+        "ulm": {
+            "func": dc.run_ulm,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "min_n": min_n,
+                "use_raw": False,
+            },
+            "estimate_key": "ulm_estimate",
+        },
+        "viper": {
+            "func": dc.run_viper,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "use_raw": False,
+            },
+            "estimate_key": "viper_estimate",
+        },
+        "aucell": {
+            "func": dc.run_aucell,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "n_up": min_n,
+                "use_raw": False,
+            },
+            "estimate_key": "aucell_estimate",
+        },
+        "mlm": {
+            "func": dc.run_mlm,
+            "kwargs": {
+                "source": "source",
+                "target": "target",
+                "weight": "weight",
+                "use_raw": False,
+            },
+            "estimate_key": "mlm_estimate",
+        },
+    }
 
-    # Extract TF activity estimates
-    tf_activity = pd.DataFrame(adata.obsm["ulm_estimate"], index=adata.obs.index)
-    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers
+    if algorithm not in methods:
+        raise ValueError(f"Algorithm '{algorithm}' is not supported. Choose from: {list(methods.keys())}")
 
-    # Reattach metadata columns
+    # Retrieve the decoupler function and its parameters from the mapping
+    method = methods[algorithm]
+    func = method["func"]
+    kwargs = method["kwargs"]
+
+    # Run the selected decoupler method
+    func(mat=adata, net=net_filtered, **kwargs)
+    estimate_key = method["estimate_key"]
+
+    # Check that the expected output key is present in adata.obsm
+    if estimate_key not in adata.obsm:
+        raise KeyError(f"Expected key '{estimate_key}' not found in AnnData.obsm. "
+                       "Ensure that the chosen algorithm populates obsm with its output.")
+
+    # Extract the TF activity estimates from the AnnData object
+    tf_activity = pd.DataFrame(adata.obsm[estimate_key], index=adata.obs.index)
+    tf_activity.index = tf_activity.index.astype(int)  # Convert index to integers if needed
+    
+    # Set Nan values to 0.0 (if any)
+    tf_activity.fillna(0.0, inplace=True)
+
+    # Reattach the metadata columns to the output
     tf_activity = tf_activity.join(metadata)
 
     return tf_activity
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess datasets.")

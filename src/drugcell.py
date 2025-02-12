@@ -4,6 +4,8 @@ import os
 import sys
 import warnings
 
+import wandb
+
 # Add the src directory to the Python path
 sys.path.append(os.path.abspath(os.path.join("..", "src")))
 
@@ -48,7 +50,7 @@ logging.info(f"Using device: {device}")
 # %% Load and Preprocess Datasets
 logging.info("Loading datasets...")
 
-SAMPLE_SIZE = 10
+SAMPLE_SIZE = None
 
 datasets = {
     "Landmark Data": (
@@ -57,22 +59,22 @@ datasets = {
         ),
         "viability",
     ),
-    # "Best Inferred Data": (
-    #     load_sampled_data(
-    #         config["data_paths"]["preprocessed_best_inferred_file"],
-    #         sample_size=SAMPLE_SIZE,
-    #     ),
-    #     "viability",
-    # ),
-    # "Gene Data": (
-    #     load_sampled_data(
-    #         config["data_paths"]["preprocessed_gene_file"],
-    #         sample_size=SAMPLE_SIZE,
-    #         use_chunks=True,
-    #         chunk_size=1000,
-    #     ),
-    #     "viability",
-    # ),
+        # "Best Inferred Data": (
+        #     load_sampled_data(
+        #         config["data_paths"]["preprocessed_best_inferred_file"],
+        #         sample_size=SAMPLE_SIZE,
+        #     ),
+        #     "viability",
+        # ),
+        # "Gene Data": (
+        #     load_sampled_data(
+        #         config["data_paths"]["preprocessed_gene_file"],
+        #         sample_size=SAMPLE_SIZE,
+        #         use_chunks=True,
+        #         chunk_size=1000,
+        #     ),
+        #     "viability",
+        # ),
 }
 
 landmark_mapping = load_mapping("../data/raw/landmark_mapping.txt")
@@ -94,7 +96,7 @@ for name, (df, target_col) in datasets.items():
 filtered_split_datasets = {}
 for name, (df, target_col) in filtered_datasets.items():
     X_train, y_train, X_val, y_val, X_test, y_test = split_data(
-        df, target_name=target_col, config=config, stratify_by=None
+        df, target_name=target_col, config=config, stratify_by="cell_mfc_name"
     )
     filtered_split_datasets[name] = {
         "train": (X_train, y_train),
@@ -104,7 +106,7 @@ for name, (df, target_col) in filtered_datasets.items():
 
 dataloaders = {
     name: {
-        split: create_dataloader(X, y, batch_size=32)
+        split: create_dataloader(X, y, batch_size=2056)
         for split, (X, y) in splits.items()
     }
     for name, splits in filtered_split_datasets.items()
@@ -117,14 +119,31 @@ class GenecellWrapper(genecell_nn):
     """
     A wrapper around genecell_nn that returns only the final prediction.
     """
-
     def forward(self, x):
         aux_out_map, term_out_map = super().forward(x)
         return aux_out_map["final"]
 
 
-# In your training loop:
+
+results = {}
+
 for name, loaders in dataloaders.items():
+    # Initialize Weights & Biases for each experiment
+    wandb.init(
+        project="5ARG45",
+        name=f"genecell_{name}",
+        mode="online",  # Change to "online" if you want to sync immediately
+    )
+    wandb.config = {
+        "lr": 0.001,
+        "architecture": "GeneCell",
+        "dataset": "LINCS/CTRPv2",  # Update this as appropriate
+        "epochs": 20,
+        "batch_size": 32,
+        "num_hiddens_genotype": 6,
+        "num_hiddens_final": 6,
+    }
+    
     logging.info(f"Training on {name} feature set...")
     train_loader = loaders["train"]
     val_loader = loaders["val"]
@@ -133,14 +152,12 @@ for name, loaders in dataloaders.items():
     logging.info(f"Training GeneOntologyModel on {name} feature set...")
     # Use the mapping corresponding to this feature set to load the ontology.
     mapping = mapping_dict[name]
-    dG, root, term_size_map, term_direct_gene_map = load_ontology(
-        "../data/raw/drugcell_ont.txt", mapping
-    )
+    dG, root, term_size_map, term_direct_gene_map = load_ontology("../data/raw/drugcell_ont.txt", mapping)
 
     # Determine gene_dim from training data (assumes X_train is a DataFrame or tensor with features as columns)
     gene_dim = filtered_split_datasets[name]["train"][0].shape[1]
     num_hiddens_genotype = 6  # Example hyperparameter
-    num_hiddens_final = 6  # Example hyperparameter
+    num_hiddens_final = 6     # Example hyperparameter
 
     # Instantiate the wrapped model that returns only the final output.
     gene_ontology_model = GenecellWrapper(
@@ -159,13 +176,10 @@ for name, loaders in dataloaders.items():
     print(f"Number of trainable parameters: {num_params}")
 
     ontology_criterion = nn.MSELoss()
-    ontology_optimizer = optim.AdamW(
-        gene_ontology_model.parameters(), lr=0.001, weight_decay=1e-4
-    )
-    ontology_scheduler = ReduceLROnPlateau(
-        ontology_optimizer, mode="min", patience=5, verbose=True
-    )
+    ontology_optimizer = optim.AdamW(gene_ontology_model.parameters(), lr=0.001, weight_decay=1e-4)
+    ontology_scheduler = ReduceLROnPlateau(ontology_optimizer, mode="min", patience=5, verbose=True)
 
+    # Train the model using your train_model function (which remains unchanged).
     ontology_train_losses, ontology_val_losses = train_model(
         model=gene_ontology_model,
         train_loader=train_loader,
@@ -180,6 +194,12 @@ for name, loaders in dataloaders.items():
         model_name=f"GeneOntologyModel_{name}",
     )
 
+    # Optionally log losses to wandb.
+    wandb.log({
+        "train_loss": ontology_train_losses[-1],
+        "val_loss": ontology_val_losses[-1],
+    })
+
     ontology_metrics = evaluate_model(
         gene_ontology_model,
         test_loader,
@@ -189,11 +209,14 @@ for name, loaders in dataloaders.items():
     )
     results[f"{name}_GeneOntologyModel"] = ontology_metrics
 
+    # Finish this wandb run.
+    wandb.finish()
+
 logging.info(f"Training and evaluation completed. Results: {results}")
 results_df = pd.DataFrame.from_dict(results, orient="index")
 results_df.index = pd.MultiIndex.from_tuples(
     [tuple(key.split("_")) for key in results_df.index],
     names=["Feature Set", "Model"],
 )
-results_df.to_csv("results.csv", index=True)
+results_df.to_csv("results_drugcell.csv", index=True)
 logging.info("Results saved to results.csv.")
