@@ -150,12 +150,12 @@ def preprocess_gene_data(
 
         # 1. Load datasets
         # Assuming shape (31567, number_of_genes). Adjust if needed.
-        X_rna = np.memmap(config["data_paths"]["rna_file"], dtype=np.float64, mode="r")
+        X_rna = np.memmap(config["data_paths"]["rna_file"], dtype=np.float32, mode="r")
         X_rna = X_rna.reshape(31567, -1)  # Assign the reshaped view back to X_rna
         # Assert that the X_rna is loaded correctly with 12.328 columns
         assert X_rna.shape[1] == 12328
 
-        logging.debug(f"Loaded RNA data with shape: {X_rna.shape}")
+        logging.info(f"Loaded RNA data with shape: {X_rna.shape}")
 
         geneinfo = pd.read_csv(config["data_paths"]["geneinfo_file"], sep="\t")
         logging.debug(f"Loaded gene info with shape: {geneinfo.shape}")
@@ -770,7 +770,7 @@ if __name__ == "__main__":
     preprocess_gene_data(
         config, standardize=True, feature_space="landmark", chunk_size=3000
     )
-    preprocess_gene_data(
-        config, standardize=True, feature_space="best inferred", chunk_size=3000
-    )
-    preprocess_gene_data(config, standardize=True, feature_space="all", chunk_size=3000)
+    # preprocess_gene_data(
+    #     config, standardize=True, feature_space="best inferred", chunk_size=3000
+    # )
+    # preprocess_gene_data(config, standardize=True, feature_space="all", chunk_size=3000)

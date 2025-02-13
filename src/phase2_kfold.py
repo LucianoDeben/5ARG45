@@ -202,28 +202,4 @@ results_df.index = pd.MultiIndex.from_tuples(
 results_df.to_csv("results_feature_sets.csv", index=True)
 logging.info("All results saved to results_feature_sets.csv.")
 
-# %% Plotting: Create a bar plot for performance (e.g. R²) for each feature set.
-# Read the CSV file that was written out.
-results_df = pd.read_csv("results_feature_sets.csv", index_col=[0, 1])
-results_df = results_df.reset_index()
 
-# We assume that the column "R²" contains the R² scores.
-performance_data = {}
-for dataset_name, group in results_df.groupby("Dataset_and_Model"):
-    # For this analysis, we take the final R² score for each feature set.
-    # (If multiple rows exist, you might take the mean; here we assume one value per dataset.)
-    r2_score = group["Pearson Correlation"].mean()  # Use mean() in case there are multiple rows.
-    performance_data[dataset_name] = r2_score
-
-# Create a bar plot.
-plt.figure(figsize=(8, 6))
-plt.bar(performance_data.keys(), performance_data.values(), color="skyblue")
-plt.xlabel("Feature Set")
-plt.ylabel("Pearson Correlation")
-plt.title("Final Performance for Different Feature Sets (Genes Directly)")
-plt.grid(axis="y", linestyle="--", alpha=0.7)
-plt.tight_layout()
-plt.savefig("performance_feature_sets.png")
-plt.show()
-
-logging.info("Plot saved as performance_feature_sets.png")

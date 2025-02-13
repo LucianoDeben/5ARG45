@@ -52,7 +52,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"Using device: {device}")
 
 logging.info("Loading original datasets...")
-SAMPLE_SIZE = None  # Or set a sample size if desired
+SAMPLE_SIZE = 10000  # Or set a sample size if desired
 
 # Load Dorothea network (we are now using only Dorothea)
 dorothea_net = dc.get_collectri(organism="human")
