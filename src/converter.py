@@ -2,128 +2,153 @@ import h5py
 import numpy as np
 import pandas as pd
 import os
+import logging
 
-# Example file paths – update these as needed.
-gctx_file = "../data/raw/level3_beta_trt_cp_n1805898x12328.gctx"
-h5_file = "../data/processed/compound_perturbation_dataset.h5"
-geneinfo_file = "../data/raw/geneinfo_beta.txt"
-pert_info_file = "../data/raw/compound_perturbation_metadata.txt"
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ---------------------------
-# Step 1: Read and filter row metadata
+# File paths (update these as needed)
 # ---------------------------
-
-# Open the .gctx file and extract the row IDs.
-with h5py.File(gctx_file, "r") as f_in:
-    # Here, we assume the row metadata is stored at the path "/0/META/COL/id"
-    row_ids = f_in["/0/META/COL/id"][:].astype(str)
-
-# Load external metadata for genes and perturbations.
-gene_metadata = pd.read_csv(geneinfo_file, sep="\t")
-pert_info = pd.read_csv(pert_info_file, sep="\t")
-
-# Filter perturbation metadata: for example, keep only samples that pass QC and of a given type.
-filtered_pert_info = pert_info[(pert_info["qc_pass"] == 1.0) & (pert_info["pert_type"] == "trt_cp")].copy()
-filtered_pert_info.set_index("sample_id", inplace=True)
-
-# Determine which row IDs (samples) from the gctx file are present in the filtered perturbation metadata.
-subset_row_ids = pd.Index(row_ids).intersection(filtered_pert_info.index)
-# Get the subset of metadata corresponding to the kept row IDs.
-subset_pert_info = filtered_pert_info.loc[subset_row_ids].copy()
-subset_pert_info.sort_index(inplace=True)
-subset_pert_info["sample_id"] = subset_pert_info.index
-
-# Map each row ID from the gctx file to its index.
-row_idx_map = {rid: idx for idx, rid in enumerate(row_ids)}
-# Build a list of row indices (from the gctx file) that correspond to our filtered samples.
-filtered_row_indices = [row_idx_map[sid] for sid in subset_pert_info.index]
+bin_file = "../data/raw/X_RNA.bin"          # float64 gene expression matrix (31567 x 12328)
+y_tsv_file = "../data/raw/Y.tsv"              # row metadata (experiments)
+compoundinfo_file = "../data/raw/compoundinfo.csv"  # compound metadata (drug info)
+geneinfo_file = "../data/raw/geneinfo_beta.txt"      # gene metadata (columns)
+output_h5_file = "../data/processed/LINCS.gctx"       # output file using .gctx convention
 
 # ---------------------------
-# Step 2: Determine Column Subset (or Use All Columns)
+# Step 1: Load Gene Expression Data from .bin
 # ---------------------------
-
-# In your gctx, assume the column metadata (gene IDs) is stored at "/0/META/ROW/id".
-with h5py.File(gctx_file, "r") as f_in:
-    col_ids_all = f_in["/0/META/ROW/id"][:].astype(int)
-
-# Create a mapping from gene ID to gene symbol using gene_metadata.
-gene_mapping = gene_metadata.set_index("gene_id")["gene_symbol"].to_dict()
-# Create a list of gene symbols corresponding to each column.
-col_symbols_all = [gene_mapping.get(gid, f"Gene_{gid}") for gid in col_ids_all]
-
-# Define which columns to include.
-# Here we take all columns. To use a subset (e.g., landmark genes), define a subset of indices.
-col_indices = np.arange(len(col_ids_all))
+logging.info("Loading gene expression data from binary file...")
+X_rna = np.memmap(bin_file, dtype=np.float64, mode="r")
+X_rna = X_rna.reshape(31567, 12328)
+assert X_rna.shape == (31567, 12328), f"Expected shape (31567,12328), got {X_rna.shape}"
+logging.info(f"Gene expression data shape: {X_rna.shape}")
 
 # ---------------------------
-# Step 3: Create the Output HDF5 Dataset in Chunks
+# Step 2: Load and Prepare Row Metadata
 # ---------------------------
+logging.info("Loading row metadata from Y.tsv...")
+row_metadata = pd.read_csv(y_tsv_file, sep="\t")
+assert row_metadata.shape[0] == 31567, f"Expected 31567 rows before join, got {row_metadata.shape[0]}"
 
-# Define how many rows to read at a time from the .gctx file.
-chunk_rows_read = 50000  # Adjust this based on your memory constraints.
+logging.info("Loading compound info...")
+compound_info = pd.read_csv(compoundinfo_file)
+# Select only desired columns (e.g., SMILES string info)
+compound_info = compound_info[["pert_id", "cmap_name", "canonical_smiles"]]
+compound_info.set_index("pert_id", inplace=True)
+# Remove duplicate entries, keeping only the first instance for each compound.
+compound_info = compound_info[~compound_info.index.duplicated(keep='first')]
+logging.info(f"Compound info shape after dropping duplicates: {compound_info.shape}")
 
-# Determine the final shape of the output:
-n_rows_out = len(filtered_row_indices)  # Only keeping filtered rows.
-n_cols_out = len(col_indices)           # Number of columns chosen.
+# Merge row metadata with compound info.
+# Use a left join on "pert_mfc_id" (from row_metadata) matching compound_info's index.
+row_metadata = pd.merge(
+    row_metadata,
+    compound_info,
+    left_on="pert_mfc_id",
+    right_index=True,
+    how="left"
+)
+assert X_rna.shape[0] == row_metadata.shape[0], (
+    f"Mismatch in rows: {X_rna.shape[0]} (X_rna) vs. {row_metadata.shape[0]} (row_metadata)"
+)
 
-# Define an appropriate chunk shape for the output HDF5 dataset.
-chunk_shape_out = (128, n_cols_out)
+# ---------------------------
+# Step 2.1: Drop Rows with NaN in Expression Data or Metadata
+# ---------------------------
+# Create a mask for rows without any NaN in row_metadata.
+mask_metadata = row_metadata.notnull().all(axis=1).values  # boolean array
 
-# Open the input and output files.
-with h5py.File(gctx_file, "r") as f_in, h5py.File(h5_file, "w") as f_out:
-    # Access the large gene expression matrix in the gctx file.
-    data_in = f_in["/0/DATA/0/matrix"]
-    
-    # Create an output dataset in HDF5 for the gene expression matrix with compression.
-    dset_out = f_out.create_dataset(
-        "data",
+# Create a mask for rows in X_rna without any NaN.
+# (Note: This loads a boolean mask from the memmap; be cautious with very large datasets.)
+mask_expr = ~np.any(np.isnan(X_rna), axis=1)
+
+# Combine both masks.
+final_mask = mask_metadata & mask_expr
+num_dropped = np.sum(~final_mask)
+logging.info(f"Dropping {num_dropped} rows due to NaN values.")
+
+# Apply the mask to row_metadata and X_rna.
+row_metadata = row_metadata.loc[final_mask].copy()
+X_rna = X_rna[final_mask, :]
+
+# ---------------------------
+# Step 3: Process Row and Column IDs, and Column Metadata
+# ---------------------------
+# Set the index to "sig_id" so that the order aligns with the gene data.
+row_metadata.set_index("sig_id", inplace=True)
+# Do not re-sort; we want the original order preserved.
+row_ids = row_metadata.index.astype(str).tolist()
+logging.info(f"Final row metadata shape: {row_metadata.shape}")
+
+logging.info("Loading column metadata from geneinfo_beta.txt...")
+col_metadata = pd.read_csv(geneinfo_file, sep="\t")
+assert X_rna.shape[1] == col_metadata.shape[0], (
+    f"Mismatch in columns: {X_rna.shape[1]} (X_rna) vs. {col_metadata.shape[0]} (col_metadata)"
+)
+
+# We assume the gene metadata rows match the order of columns in X_rna.
+col_ids = col_metadata["gene_id"].astype(str).tolist()
+col_symbols = col_metadata["gene_symbol"].tolist()
+logging.info(f"Column metadata loaded with {len(col_ids)} entries.")
+
+# ---------------------------
+# Step 4: Write to .gctx File
+# ---------------------------
+n_rows_out = len(row_ids)  # updated number of experiments after dropping NaNs
+n_cols_out = X_rna.shape[1]  # number of genes (should remain 12328)
+logging.info(f"Writing {n_rows_out} rows and {n_cols_out} columns to HDF5 file.")
+
+# Define the output chunk shape for the gene expression data.
+chunk_shape_out = (256, n_cols_out)
+
+with h5py.File(output_h5_file, "w") as f_out:
+    # Create the .gctx structure.
+    # Data matrix at "/0/DATA/0/matrix"
+    grp_data = f_out.create_group("0/DATA/0")
+    dset = grp_data.create_dataset(
+        "matrix",
         shape=(n_rows_out, n_cols_out),
-        dtype="float32",
+        dtype="float32",  # Converting to float32 for efficiency.
         compression="gzip",
         chunks=chunk_shape_out,
     )
 
-    # Keep track of the current row in the output.
-    out_row_start = 0
-    total_rows = n_rows_out
+    # Write the gene expression data in chunks.
+    chunk_rows_read = 16384   # number of rows to read at a time from X_rna
+    out_row = 0
+    for start in range(0, n_rows_out, chunk_rows_read):
+        end = min(start + chunk_rows_read, n_rows_out)
+        # IMPORTANT: Here we assume that the order in the .bin file corresponds exactly to the order in row_metadata.
+        chunk_data = X_rna[start:end, :].astype("float32")
+        dset[out_row:out_row + (end - start), :] = chunk_data
+        out_row += (end - start)
+    logging.info("Gene expression data written.")
 
-    # Process the data in chunks.
-    for start_idx in range(0, total_rows, chunk_rows_read):
-        end_idx = min(start_idx + chunk_rows_read, total_rows)
-        chunk_size = end_idx - start_idx
-        
-        # Get the corresponding global row indices for this chunk.
-        row_subset = filtered_row_indices[start_idx:end_idx]
-        
-        # Read the chunk from the input file: first select the rows, then the columns.
-        chunk_data = data_in[row_subset, :][:, col_indices]
-        
-        # Write the chunk data to the output dataset.
-        dset_out[out_row_start:out_row_start + chunk_size, :] = chunk_data
-        out_row_start += chunk_size
+    # Write Row Metadata in .gctx Format (/0/META/ROW)
+    meta_row_grp = f_out.create_group("0/META/ROW")
+    for col in row_metadata.columns:
+        data_array = row_metadata[col].astype(str).values
+        meta_row_grp.create_dataset(col, data=data_array.astype("S"))
+    # Also store row IDs.
+    meta_row_grp.create_dataset("id", data=np.array(row_ids, dtype="S"))
+    logging.info("Row metadata written.")
 
-    # ---------------------------
-    # Step 4: Write Metadata into the HDF5 File
-    # ---------------------------
+    # Write Column Metadata in .gctx Format (/0/META/COL)
+    meta_col_grp = f_out.create_group("0/META/COL")
+    for col in col_metadata.columns:
+        data_array = col_metadata[col].astype(str).values
+        meta_col_grp.create_dataset(col, data=data_array.astype("S"))
+    # Also store column IDs (using gene symbols).
+    meta_col_grp.create_dataset("id", data=np.array(col_symbols, dtype="S"))
+    logging.info("Column metadata written.")
     
-    # Write row-level metadata. Each metadata field is saved as a separate dataset.
-    for column in subset_pert_info.columns:
-        f_out.create_dataset(
-            f"row_metadata/{column}",
-            data=subset_pert_info[column].values.astype("S"),
-        )
-    
-    # Write column-level metadata.
-    # You can store the full gene metadata table or only selected columns.
-    for col_name in gene_metadata.columns:
-        f_out.create_dataset(
-            f"col_metadata/{col_name}",
-            data=gene_metadata[col_name].values.astype("S"),
-        )
-    
-    # Write the final row IDs and column symbols.
-    f_out.create_dataset("row_ids", data=subset_pert_info.index.values.astype("S"))
-    selected_col_symbols = [col_symbols_all[i] for i in col_indices]
-    f_out.create_dataset("col_ids", data=[s.encode("utf-8") for s in selected_col_symbols])
+    # Add attributes to the root group.
+    f_out.attrs["version"] = "1.0"
+    f_out.attrs["description"] = "LINCS gene expression data in .gctx format combined with CTRPv2 cell viability data."
+    f_out.attrs["data_source"] = "CLUE.io, CTRPv2"
+    f_out.attrs["creation_date"] = pd.Timestamp.now().isoformat()
 
-print(f"Filtered data and metadata successfully written to {h5_file} in chunks!")
+print(f"Data and metadata successfully written to {output_h5_file} in .gctx format!")
+print("Conversion complete.")

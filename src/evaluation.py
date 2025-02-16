@@ -1,16 +1,8 @@
-import numpy as np
+from metrics import get_regression_metrics
 import torch
-from scipy.stats import pearsonr
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error
 
 from training import _forward_pass
-
-
-def weighted_score_func(y_true, y_pred):
-    r2_val = r2_score(y_true, y_pred)
-    pearson_val, _ = pearsonr(y_true, y_pred)
-    return 0.5 * r2_val + 0.5 * pearson_val
-
 
 def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     """
@@ -39,7 +31,7 @@ def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     y_true = y_test.to_numpy() if hasattr(y_test, "to_numpy") else y_test
 
     if calculate_metrics:
-        mse, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        mse, mae, r2, pearson_coef = get_regression_metrics(y_true, y_pred)
 
         # Compute weighted score (average of R² and Pearson)
         weighted_score = 0.5 * r2 + 0.5 * pearson_coef
@@ -100,7 +92,7 @@ def evaluate_model(model, test_loader, criterion, device="cpu", calculate_metric
     metrics = {"MSE": test_loss}
     if calculate_metrics:
         # Adjust to your use-case (e.g., if classification, you'd compute accuracy, etc.)
-        _, mae, r2, pearson_coef = evaluate_regression_metrics(y_true, y_pred)
+        _, mae, r2, pearson_coef = get_regression_metrics(y_true, y_pred)
         # You might change or extend evaluate_regression_metrics to handle other tasks
         metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
 
@@ -151,7 +143,7 @@ def evaluate_multimodal_model(
     if gene_preds and gene_labels:
         gene_preds = torch.cat(gene_preds, dim=0).numpy()
         gene_labels = torch.cat(gene_labels, dim=0).numpy()
-        gene_metrics = evaluate_regression_metrics(gene_labels, gene_preds)
+        gene_metrics = get_regression_metrics(gene_labels, gene_preds)
         metrics["gene_expression_metrics"] = {
             "MSE": gene_metrics[0],
             "MAE": gene_metrics[1],
@@ -162,7 +154,7 @@ def evaluate_multimodal_model(
     if viability_preds and viability_labels:
         viability_preds = torch.cat(viability_preds, dim=0).squeeze().numpy()
         viability_labels = torch.cat(viability_labels, dim=0).squeeze().numpy()
-        viability_metrics = evaluate_regression_metrics(
+        viability_metrics = get_regression_metrics(
             viability_labels, viability_preds
         )
         metrics["viability_metrics"] = {
@@ -178,31 +170,4 @@ def evaluate_multimodal_model(
     return metrics
 
 
-def evaluate_regression_metrics(y_true, y_pred):
-    """
-    Evaluate regression metrics: MSE, MAE, R², Pearson correlation.
 
-    Args:
-        y_true (array-like or tensor): True values.
-        y_pred (array-like or tensor): Predicted values.
-
-    Returns:
-        tuple: (mse, mae, r2, pearson_coef)
-    """
-    # Convert PyTorch tensors to NumPy arrays if necessary
-    if isinstance(y_true, torch.Tensor):
-        y_true = y_true.detach().cpu().numpy()
-    if isinstance(y_pred, torch.Tensor):
-        y_pred = y_pred.detach().cpu().numpy()
-
-    # Ensure the inputs are flattened
-    y_true = y_true.flatten()
-    y_pred = y_pred.flatten()
-
-    # Calculate metrics
-    mse = mean_squared_error(y_true, y_pred)
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
-    pearson_coef, _ = pearsonr(y_true, y_pred)
-
-    return mse, mae, r2, pearson_coef
