@@ -1,13 +1,11 @@
 import os
 import random
 from collections import defaultdict
-from sklearn.linear_model import LinearRegression
 from typing import List, Optional, Tuple, Union
 
 import h5py
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
 import torch
 from torch.utils.data import Dataset
 import logging
@@ -233,35 +231,24 @@ class PerturbationDataset(Dataset):
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
 
-
 class LINCSDataset(Dataset):
     """
-    Unified dataset for LINCS data stored in a .gctx file with optional standardization
-    and gene selection.
+    Unified dataset for LINCS data stored in a .gctx file with optional standardization and gene selection.
     
-    This class supports both lazy loading (for deep learning with PyTorch) and
-    full in-memory loading (via to_numpy()) for classical ML models (e.g., regression,
-    random forests). Additionally, it can apply standardization to the gene expression data
-    and select a subset of genes based on a feature space criterion.
+    Supports lazy loading (for deep learning with PyTorch) and full in-memory loading (for classical ML).
+    Applies optional normalization ("min-max" or "z-score") and gene selection based on a feature space criterion.
     
-    The .gctx file is assumed to follow the LINCS convention:
-      - Gene expression data at '/0/DATA/0/matrix'
-      - Row metadata (experiments) under '/0/META/ROW/' (with "viability" as a column)
-      - Column metadata (genes) under '/0/META/COL/' (including a 'feature_space' field)
-      
+    Assumptions:
+      - Expression data is at '/0/DATA/0/matrix'
+      - Row metadata (including "viability") is at '/0/META/ROW/'
+      - Column metadata (including 'feature_space') is at '/0/META/COL/'
+    
     Parameters:
-        h5_path (str): Path to the .gctx file.
-        in_memory (bool): If True, load the entire dataset into memory.
-                         If False (default), use lazy loading.
-        normalize (str or None): Data standardization method. Options:
-                         "min-max" for min–max scaling,
-                         "z-score" for z-score standardization,
-                         or None for no normalization.
-        feature_space (Union[str, List[str]]): Specifies which genes to select based on the 
-                         'feature_space' field in the gene metadata.
-                         Allowed values are "landmark", "best inferred", and "inferred".
-                         To select all genes, you may pass "all" (case-insensitive) or
-                         a list containing "all" (e.g. ["all"]).
+        gctx_path (str): Path to the .gctx file.
+        in_memory (bool): If True, loads all data into memory; else, uses lazy loading.
+        normalize (str or None): "min-max", "z-score", or None.
+        feature_space (Union[str, List[str]]): Allowed values are "landmark", "best inferred", "inferred". 
+                                              Use "all" (or ["all"]) for all genes.
     """
     def __init__(
         self, 
@@ -274,18 +261,18 @@ class LINCSDataset(Dataset):
         self.in_memory = in_memory
         self.normalize = normalize
         self.feature_space = feature_space
-
-        # Validate normalization parameter.
+        
         if self.normalize not in (None, "min-max", "z-score"):
             raise ValueError("normalize must be one of 'min-max', 'z-score', or None")
-        
-        # Validate file existence.
         if not os.path.exists(self.gctx_path):
             raise FileNotFoundError(f"The file {self.gctx_path} does not exist.")
 
-        # --- Load Expression Data and Row Metadata ---
+        # Initialize cached metadata to None.
+        self._col_metadata = None
+        self._row_metadata = None
+
+        # Load expression data and row metadata.
         if self.in_memory:
-            # Full in-memory loading.
             with h5py.File(self.gctx_path, "r") as f:
                 self.X = f["0/DATA/0/matrix"][:].astype(np.float32)
                 viability_data = f["0/META/ROW"]["viability"][:]
@@ -295,11 +282,10 @@ class LINCSDataset(Dataset):
                     self.y = viability_data.astype(np.float32)
                 row_ids = f["0/META/ROW"]["id"][:]
                 try:
-                    self.row_ids = np.array([x.decode("utf-8") for x in row_ids])
+                    self._row_ids = np.array([x.decode("utf-8") for x in row_ids])
                 except AttributeError:
-                    self.row_ids = row_ids
+                    self._row_ids = row_ids
         else:
-            # Lazy loading: keep file open.
             self.file = h5py.File(self.gctx_path, "r")
             self.X_dataset = self.file["0/DATA/0/matrix"]
             viability_data = self.file["0/META/ROW"]["viability"][:]
@@ -308,34 +294,28 @@ class LINCSDataset(Dataset):
             except AttributeError:
                 self.y = viability_data.astype(np.float32)
         
+        # Gene selection
         geneinfo = self.get_col_metadata()
         selected_genes = self._select_genes(geneinfo, self.feature_space)
-        # The gene metadata DataFrame index corresponds to the column order.
-        selected_gene_indices = selected_genes.index.to_numpy()
-        logging.info(f"Selected {len(selected_gene_indices)} genes using feature_space '{self.feature_space}'.")
+        self._selected_gene_indices = selected_genes.index.to_numpy()
+        logging.info(f"Selected {len(self._selected_gene_indices)} genes using feature_space '{self.feature_space}'.")
 
         if self.in_memory:
-            if self.X.shape[1] < len(selected_gene_indices):
-                raise ValueError(
-                    "Mismatch: The number of columns in the RNA data is less than the number of selected genes."
-                )
-            # Update the in-memory expression matrix to only include selected genes.
-            self.X = self.X[:, selected_gene_indices]
+            if self.X.shape[1] < len(self._selected_gene_indices):
+                raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
+            self.X = self.X[:, self._selected_gene_indices]
         else:
-            if self.X_dataset.shape[1] < len(selected_gene_indices):
-                raise ValueError(
-                    "Mismatch: The number of columns in the RNA data is less than the number of selected genes."
-                )
-            # For lazy loading, store the selected gene indices.
-            self.selected_gene_indices = selected_gene_indices
+            if self.X_dataset.shape[1] < len(self._selected_gene_indices):
+                raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
         
+        # Normalization
         if self.normalize is not None:
             if self.in_memory:
-                data = self.X  # Already subset.
+                data = self.X
             else:
                 with h5py.File(self.gctx_path, "r") as f:
                     data = f["0/DATA/0/matrix"][:].astype(np.float32)
-                data = data[:, self.selected_gene_indices]
+                data = data[:, self._selected_gene_indices]
             if self.normalize == "min-max":
                 self.global_min = data.min(axis=0)
                 self.global_max = data.max(axis=0)
@@ -345,90 +325,59 @@ class LINCSDataset(Dataset):
                 self.global_std[self.global_std == 0] = 1e-8
 
     def get_col_metadata(self) -> pd.DataFrame:
-        """
-        Load the gene metadata from the /0/META/COL/ group in the .gctx file.
-        Assumes that each dataset in the group corresponds to a column in the gene metadata.
-        
-        Returns:
-            pd.DataFrame: Gene metadata with an integer index corresponding to gene order.
-        """
-        with h5py.File(self.gctx_path, "r") as f:
-            meta_col_grp = f["0/META/COL"]
-            col_dict = {}
-            for key in meta_col_grp.keys():
-                col_dict[key] = meta_col_grp[key][:].astype(str)
-            col_df = pd.DataFrame(col_dict)
-            col_df.index = np.arange(col_df.shape[0])
-        return col_df
+        if self._col_metadata is None:
+            with h5py.File(self.gctx_path, "r") as f:
+                meta_col_grp = f["0/META/COL"]
+                col_dict = {key: meta_col_grp[key][:].astype(str) for key in meta_col_grp.keys()}
+                self._col_metadata = pd.DataFrame(col_dict)
+                self._col_metadata.index = np.arange(self._col_metadata.shape[0])
+        return self._col_metadata
 
     def get_row_metadata(self) -> pd.DataFrame:
-        """
-        Load the row metadata from the /0/META/ROW/ group in the .gctx file.
-        
-        Returns:
-            pd.DataFrame: Row metadata with an integer index corresponding to sample order.
-        """
-        with h5py.File(self.gctx_path, "r") as f:
-            meta_row_grp = f["0/META/ROW"]
-            row_dict = {}
-            for key in meta_row_grp.keys():
-                row_dict[key] = meta_row_grp[key][:].astype(str)
-            row_df = pd.DataFrame(row_dict)
-            row_df.index = np.arange(row_df.shape[0])
-        return row_df
+        if self._row_metadata is None:
+            with h5py.File(self.gctx_path, "r") as f:
+                meta_row_grp = f["0/META/ROW"]
+                row_dict = {key: meta_row_grp[key][:].astype(str) for key in meta_row_grp.keys()}
+                self._row_metadata = pd.DataFrame(row_dict)
+                self._row_metadata.index = np.arange(self._row_metadata.shape[0])
+        return self._row_metadata
+
+    @property
+    def row_ids(self) -> List[str]:
+        """Return the list of row IDs."""
+        if self.in_memory:
+            return self._row_ids.tolist() if isinstance(self._row_ids, np.ndarray) else self._row_ids
+        else:
+            # For lazy loading, load row metadata and extract IDs.
+            return self.get_row_metadata()["id"].tolist()
+
+    @property
+    def selected_gene_indices(self) -> np.ndarray:
+        """Return the selected gene indices."""
+        return self._selected_gene_indices
 
     def get_expression_matrix(self) -> np.ndarray:
-        """
-        Retrieve the full gene expression matrix. If the dataset is loaded in memory,
-        return the in-memory copy; otherwise, read from the file and apply gene selection.
-        
-        Returns:
-            np.ndarray: Gene expression matrix (float32) with selected genes.
-        """
         if self.in_memory:
             return self.X
         else:
             with h5py.File(self.gctx_path, "r") as f:
                 X = f["0/DATA/0/matrix"][:].astype(np.float32)
-            return X[:, self.selected_gene_indices]
+            return X[:, self._selected_gene_indices]
 
     @staticmethod
     def _select_genes(geneinfo: pd.DataFrame, feature_space: Union[str, List[str]]) -> pd.DataFrame:
-        """
-        Filter the geneinfo DataFrame based on the requested feature space(s).
-        
-        Parameters:
-            geneinfo (pd.DataFrame): DataFrame containing gene metadata.
-            feature_space (Union[str, List[str]]): Either a single feature space or a list of them.
-                Allowed values are "landmark", "best inferred", and "inferred".
-                If the string "all" is provided (case-insensitive) or included in a list,
-                it will be converted to all three allowed values.
-            
-        Returns:
-            pd.DataFrame: Filtered gene metadata.
-        """
         allowed_values = {"landmark", "best inferred", "inferred"}
-        
-        # Convert feature_space into a list of values.
         if isinstance(feature_space, str):
-            if feature_space.lower() == "all":
-                fs = ["landmark", "best inferred", "inferred"]
-            else:
-                if feature_space not in allowed_values:
-                    raise ValueError(f"Invalid feature_space: {feature_space}. Allowed values: {allowed_values} or 'all'")
-                fs = [feature_space]
+            fs = ["landmark", "best inferred", "inferred"] if feature_space.lower() == "all" else [feature_space]
+            if fs[0] not in allowed_values:
+                raise ValueError(f"Invalid feature_space: {feature_space}. Allowed: {allowed_values} or 'all'.")
         elif isinstance(feature_space, list):
-            # If "all" is in the list (case-insensitive), select all.
-            if any(x.lower() == "all" for x in feature_space):
-                fs = ["landmark", "best inferred", "inferred"]
-            else:
-                for x in feature_space:
-                    if x not in allowed_values:
-                        raise ValueError(f"Invalid feature_space value in list: {x}. Allowed values: {allowed_values} or 'all'")
-                fs = feature_space
+            fs = ["landmark", "best inferred", "inferred"] if any(x.lower() == "all" for x in feature_space) else feature_space
+            for x in fs:
+                if x not in allowed_values:
+                    raise ValueError(f"Invalid feature_space value: {x}. Allowed: {allowed_values} or 'all'.")
         else:
             raise ValueError("feature_space must be a string or a list of strings.")
-        
         selected_genes = geneinfo[geneinfo.feature_space.isin(fs)]
         if selected_genes.empty:
             raise ValueError(f"No genes found for feature_space values: {fs}")
@@ -436,57 +385,28 @@ class LINCSDataset(Dataset):
         return selected_genes
 
     def _normalize_sample(self, sample: np.ndarray) -> np.ndarray:
-        """
-        Apply the selected normalization to the sample.
-        
-        Parameters:
-            sample (np.ndarray): Gene expression data for one or more samples.
-            
-        Returns:
-            np.ndarray: Normalized data.
-        """
         if self.normalize == "min-max":
             rng = self.global_max - self.global_min
             rng[rng == 0] = 1e-8
             return (sample - self.global_min) / rng
         elif self.normalize == "z-score":
             return (sample - self.global_mean) / self.global_std
-        else:
-            return sample
+        return sample
 
     def __len__(self) -> int:
-        if self.in_memory:
-            return self.X.shape[0]
-        else:
-            return self.X_dataset.shape[0]
+        return self.X.shape[0] if self.in_memory else self.X_dataset.shape[0]
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.in_memory:
-            sample = self.X[idx, :]  # Already subset.
-            label = self.y[idx]
+            sample, label = self.X[idx, :], self.y[idx]
         else:
-            # Lazy loading: read only the requested row.
-            sample = self.X_dataset[idx, :].astype(np.float32)
-            sample = sample[self.selected_gene_indices]
+            sample = self.X_dataset[idx, :].astype(np.float32)[self._selected_gene_indices]
             label = self.y[idx]
-        
-        # Apply normalization if requested.
         if self.normalize is not None:
             sample = self._normalize_sample(sample)
-        
-        # Convert to PyTorch tensors.
-        sample_tensor = torch.tensor(sample)
-        label_tensor = torch.tensor(label, dtype=torch.float32)
-        return sample_tensor, label_tensor
+        return torch.tensor(sample), torch.tensor(label, dtype=torch.float32)
 
     def to_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Loads the entire dataset into memory as NumPy arrays.
-        
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: (X, y) where X is the gene expression matrix 
-                                           (float32) and y are the viability labels (float32).
-        """
         if not self.in_memory:
             with h5py.File(self.gctx_path, "r") as f:
                 X = f["0/DATA/0/matrix"][:].astype(np.float32)
@@ -495,7 +415,7 @@ class LINCSDataset(Dataset):
                     y = np.array([float(x.decode("utf-8")) for x in viability_data])
                 except AttributeError:
                     y = viability_data.astype(np.float32)
-            X = X[:, self.selected_gene_indices]
+            X = X[:, self._selected_gene_indices]
         else:
             X, y = self.X, self.y
         if self.normalize is not None:
@@ -508,136 +428,15 @@ class LINCSDataset(Dataset):
 
     def __del__(self) -> None:
         self.close()
-        
-        
-def stratified_group_split(
-    dataset: LINCSDataset, 
-    n_outer_splits: int = 5, 
-    n_inner_splits: int = 4, 
-    random_state: int = 42
-) -> List[Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]]:
-    """
-    Performs nested stratified and group-aware splitting on the dataset.
-    
-    For each outer fold:
-      - The outer test set is one fold.
-      - The outer training set (the remaining samples) is further split into inner folds.
-        These inner splits can be used for hyperparameter tuning (train/validation).
-    
-    Parameters:
-        dataset: An instance of LINCSDataset.
-        n_outer_splits: Number of outer folds (each will be the test set once).
-        n_inner_splits: Number of inner splits on the outer training set.
-        random_state: Seed for reproducibility.
-        
-    Returns:
-        A list of tuples, where each tuple is:
-          (outer_train_idx, outer_test_idx, inner_splits)
-        inner_splits is itself a list of (inner_train_idx, inner_val_idx) tuples.
-    """
-    # Retrieve row metadata from the dataset.
-    row_metadata: pd.DataFrame = dataset.get_row_metadata()
-    if "cell_mfc_name" not in row_metadata.columns:
-        raise ValueError("Row metadata must include a 'cell_mfc_name' column for splitting.")
-    
-    # Use the "cell_mfc_name" column as both the stratification label and grouping variable.
-    groups = row_metadata["cell_mfc_name"].values
-    # For stratification we use the same values.
-    y = groups.copy()
-    indices = np.arange(len(dataset))
-    
-    # Outer split: each fold will serve as the test set once.
-    outer_splitter = StratifiedGroupKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state)
-    
-    nested_splits = []
-    
-    for outer_train_idx, outer_test_idx in outer_splitter.split(np.zeros(len(dataset)), y, groups):
-        # Now, for the outer training set, do inner splits.
-        # Get groups and y for the outer training set.
-        outer_train_groups = groups[outer_train_idx]
-        outer_train_y = y[outer_train_idx]
-        
-        inner_splitter = StratifiedGroupKFold(n_splits=n_inner_splits, shuffle=True, random_state=random_state)
-        inner_splits = []
-        # Note: inner splitter returns indices relative to the outer_train_idx array.
-        for inner_train_rel, inner_val_rel in inner_splitter.split(np.zeros(len(outer_train_idx)), outer_train_y, outer_train_groups):
-            inner_train_idx = outer_train_idx[inner_train_rel]
-            inner_val_idx = outer_train_idx[inner_val_rel]
-            inner_splits.append((inner_train_idx, inner_val_idx))
-        
-        nested_splits.append((outer_train_idx, outer_test_idx, inner_splits))
-    
-    return nested_splits
 
-# Main script using nested splits with inner cross-validation.
-if __name__ == "__main__":
-    test_file = "../data/processed/LINCS.gctx"
-    dataset = LINCSDataset(
-        gctx_path=test_file,
-        in_memory=True,          # or False for lazy loading
-        normalize="z-score",
-        feature_space="landmark"   # or a list, e.g., ["landmark", "best inferred"]
-    )
-    
-    # Obtain the nested splits (outer and inner splits)
-    nested_splits = stratified_group_split(
-        dataset, n_outer_splits=5, n_inner_splits=4, random_state=42
-    )
-    
-    # Load entire dataset in-memory.
-    X_all, y_all = dataset.to_numpy()
-    
-    # Lists to store metrics.
-    outer_metrics = []  # final test metrics per outer fold
-    inner_metrics_all = []  # inner CV metrics per outer fold
-    
-    for fold, (outer_train_idx, outer_test_idx, inner_splits) in enumerate(nested_splits):
-        logging.info(f"--- Outer Fold {fold+1} ---")
-        # ---- Inner Cross-Validation on Outer Training Set ----
-        inner_metrics = []
-        for inner_fold, (inner_train_idx, inner_val_idx) in enumerate(inner_splits):
-            X_inner_train = X_all[inner_train_idx]
-            y_inner_train = y_all[inner_train_idx]
-            X_inner_val = X_all[inner_val_idx]
-            y_inner_val = y_all[inner_val_idx]
-            
-            # Train model on inner training set.
-            model_inner = LinearRegression()
-            model_inner.fit(X_inner_train, y_inner_train)
-            y_inner_pred = model_inner.predict(X_inner_val)
-            
-            # Evaluate inner metrics.
-            mse_i, mae_i, r2_i, pearson_i = evaluate_regression_metrics(y_inner_val, y_inner_pred)
-            logging.info(f"Outer Fold {fold+1}, Inner Fold {inner_fold+1}: "
-                         f"MSE={mse_i:.4f}, MAE={mae_i:.4f}, R²={r2_i:.4f}, Pearson={pearson_i:.4f}")
-            inner_metrics.append((mse_i, mae_i, r2_i, pearson_i))
-        
-        inner_metrics = np.array(inner_metrics)
-        inner_mean = np.mean(inner_metrics, axis=0)
-        inner_std = np.std(inner_metrics, axis=0)
-        logging.info(f"Outer Fold {fold+1} Inner CV Mean: {inner_mean}, Std: {inner_std}")
-        inner_metrics_all.append(inner_metrics)
-        
-        # ---- Outer Test Evaluation ----
-        X_train_outer = X_all[outer_train_idx]
-        y_train_outer = y_all[outer_train_idx]
-        X_test_outer = X_all[outer_test_idx]
-        y_test_outer = y_all[outer_test_idx]
-        
-        model_outer = LinearRegression()
-        model_outer.fit(X_train_outer, y_train_outer)
-        y_pred_outer = model_outer.predict(X_test_outer)
-        
-        mse_o, mae_o, r2_o, pearson_o = evaluate_regression_metrics(y_test_outer, y_pred_outer)
-        logging.info(f"Outer Fold {fold+1} Test: MSE={mse_o:.4f}, MAE={mae_o:.4f}, R²={r2_o:.4f}, Pearson={pearson_o:.4f}")
-        outer_metrics.append((mse_o, mae_o, r2_o, pearson_o))
-    
-    outer_metrics = np.array(outer_metrics)
-    overall_mean = np.mean(outer_metrics, axis=0)
-    overall_std = np.std(outer_metrics, axis=0)
-    metric_names = ["MSE", "MAE", "R²", "Pearson"]
-    for i, name in enumerate(metric_names):
-        logging.info(f"Overall {name}: mean = {overall_mean[i]:.4f}, std = {overall_std[i]:.4f}")
+    def __enter__(self):
+        """Enable use with the 'with' statement."""
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Ensure resources are closed when exiting the 'with' block."""
+        self.close()
+
 
 
     

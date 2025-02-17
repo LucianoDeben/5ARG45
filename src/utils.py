@@ -1,11 +1,14 @@
 import logging
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import networkx as nx
 import networkx.algorithms.components.connected as nxacc
 import networkx.algorithms.dag as nxadag
+import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedGroupKFold
+from data_sets import LINCSDataset
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -338,7 +341,6 @@ def filter_dataset_columns(df, gene_mapping):
     filtered_df = df[new_columns].copy()
     return filtered_df
 
-
 def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
     """
     Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
@@ -388,52 +390,61 @@ def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
 
     return smiles_dict
 
-
-def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
+def stratified_group_split(
+    dataset: LINCSDataset, 
+    n_outer_splits: int = 5, 
+    n_inner_splits: int = 4, 
+    random_state: int = 42
+) -> List[Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]]:
     """
-    Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
-
-    Args:
-        smiles_df (pd.DataFrame): DataFrame containing 'pert_id' and 'canonical_smiles' columns.
-
+    Performs nested stratified and group-aware splitting on the dataset.
+    
+    For each outer fold:
+      - The outer test set is one fold.
+      - The outer training set (the remaining samples) is further split into inner folds.
+        These inner splits can be used for hyperparameter tuning (train/validation).
+    
+    Parameters:
+        dataset: An instance of LINCSDataset.
+        n_outer_splits: Number of outer folds (each will be the test set once).
+        n_inner_splits: Number of inner splits on the outer training set.
+        random_state: Seed for reproducibility.
+        
     Returns:
-        Dict[str, str]: Dictionary mapping pert_id to canonical SMILES strings.
+        A list of tuples, where each tuple is:
+          (outer_train_idx, outer_test_idx, inner_splits)
+        inner_splits is itself a list of (inner_train_idx, inner_val_idx) tuples.
     """
-    # Check if needed columns exist otherwise raise error
-    if (
-        "pert_id" not in smiles_df.columns
-        or "canonical_smiles" not in smiles_df.columns
-    ):
-        raise ValueError(
-            "The DataFrame must contain 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    # Ensure no leading/trailing spaces
-    smiles_df["pert_id"] = smiles_df["pert_id"].str.strip()
-    smiles_df["canonical_smiles"] = smiles_df["canonical_smiles"].str.strip()
-
-    # Remove duplicates, keeping the first occurrence
-    smiles_df = smiles_df.drop_duplicates(subset="pert_id", keep="first")
-
-    # Check for missing values and handle them
-    if smiles_df["canonical_smiles"].isnull().any():
-        smiles_df.loc[smiles_df["canonical_smiles"].isnull(), "canonical_smiles"] = (
-            "UNKNOWN"
-        )
-
-    # Create the mapping dictionary
-    smiles_dict = dict(zip(smiles_df["pert_id"], smiles_df["canonical_smiles"]))
-
-    # Validate the dictionary
-    if not smiles_dict:
-        raise ValueError(
-            "The DataFrame must contain non-empty 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    for pert_id, smiles in smiles_dict.items():
-        if not isinstance(pert_id, str) or not isinstance(smiles, str):
-            raise TypeError("The pert_id and canonical_smiles must be strings.")
-        if pd.isna(smiles):
-            raise ValueError("The canonical_smiles cannot be NaN.")
-
-    return smiles_dict
+    # Retrieve row metadata from the dataset.
+    row_metadata: pd.DataFrame = dataset.get_row_metadata()
+    if "cell_mfc_name" not in row_metadata.columns:
+        raise ValueError("Row metadata must include a 'cell_mfc_name' column for splitting.")
+    
+    # Use the "cell_mfc_name" column as both the stratification label and grouping variable.
+    groups = row_metadata["cell_mfc_name"].values
+    # For stratification we use the same values.
+    y = groups.copy()
+    indices = np.arange(len(dataset))
+    
+    # Outer split: each fold will serve as the test set once.
+    outer_splitter = StratifiedGroupKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state)
+    
+    nested_splits = []
+    
+    for outer_train_idx, outer_test_idx in outer_splitter.split(np.zeros(len(dataset)), y, groups):
+        # Now, for the outer training set, do inner splits.
+        # Get groups and y for the outer training set.
+        outer_train_groups = groups[outer_train_idx]
+        outer_train_y = y[outer_train_idx]
+        
+        inner_splitter = StratifiedGroupKFold(n_splits=n_inner_splits, shuffle=True, random_state=random_state)
+        inner_splits = []
+        # Note: inner splitter returns indices relative to the outer_train_idx array.
+        for inner_train_rel, inner_val_rel in inner_splitter.split(np.zeros(len(outer_train_idx)), outer_train_y, outer_train_groups):
+            inner_train_idx = outer_train_idx[inner_train_rel]
+            inner_val_idx = outer_train_idx[inner_val_rel]
+            inner_splits.append((inner_train_idx, inner_val_idx))
+        
+        nested_splits.append((outer_train_idx, outer_test_idx, inner_splits))
+    
+    return nested_splits
