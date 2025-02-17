@@ -390,61 +390,59 @@ def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
 
     return smiles_dict
 
-def stratified_group_split(
-    dataset: LINCSDataset, 
-    n_outer_splits: int = 5, 
-    n_inner_splits: int = 4, 
+def nested_stratified_group_split_fixed(
+    dataset, 
+    n_folds: int = 5, 
     random_state: int = 42
 ) -> List[Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]]:
     """
-    Performs nested stratified and group-aware splitting on the dataset.
+    Generates fixed nested stratified group splits.
     
+    For a given n_folds, the entire dataset is assigned fold labels.
     For each outer fold:
-      - The outer test set is one fold.
-      - The outer training set (the remaining samples) is further split into inner folds.
-        These inner splits can be used for hyperparameter tuning (train/validation).
+      - Outer test set: samples with fold label == i.
+      - Outer training set: samples with fold label != i.
+      - Inner splits: Partition the outer training set into groups by their assigned fold labels.
+        Each inner split uses one group as validation and the union of the remaining groups as training.
     
-    Parameters:
-        dataset: An instance of LINCSDataset.
-        n_outer_splits: Number of outer folds (each will be the test set once).
-        n_inner_splits: Number of inner splits on the outer training set.
-        random_state: Seed for reproducibility.
+    This guarantees that in a 5-fold split:
+      - Each fold is test once.
+      - For the remaining 4 folds, each fold is used as validation exactly once
+        (and the other 3 folds are used for training).
+    
+    Args:
+        dataset: An instance of LINCSDataset (or similar) that implements get_row_metadata().
+        n_folds (int): Number of folds (e.g., 5).
+        random_state (int): Random seed.
         
     Returns:
-        A list of tuples, where each tuple is:
-          (outer_train_idx, outer_test_idx, inner_splits)
-        inner_splits is itself a list of (inner_train_idx, inner_val_idx) tuples.
+        List of tuples: (outer_train_idx, outer_test_idx, inner_splits)
+        where inner_splits is a list of (inner_train_idx, inner_val_idx) tuples.
     """
-    # Retrieve row metadata from the dataset.
     row_metadata: pd.DataFrame = dataset.get_row_metadata()
     if "cell_mfc_name" not in row_metadata.columns:
         raise ValueError("Row metadata must include a 'cell_mfc_name' column for splitting.")
     
-    # Use the "cell_mfc_name" column as both the stratification label and grouping variable.
     groups = row_metadata["cell_mfc_name"].values
-    # For stratification we use the same values.
-    y = groups.copy()
     indices = np.arange(len(dataset))
     
-    # Outer split: each fold will serve as the test set once.
-    outer_splitter = StratifiedGroupKFold(n_splits=n_outer_splits, shuffle=True, random_state=random_state)
-    
+    # Assign each sample a fold label.
+    fold_labels = -1 * np.ones(len(dataset), dtype=int)
+    outer_splitter = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    for fold, (_, test_idx) in enumerate(outer_splitter.split(np.zeros(len(dataset)), groups, groups)):
+        fold_labels[test_idx] = fold
+
     nested_splits = []
-    
-    for outer_train_idx, outer_test_idx in outer_splitter.split(np.zeros(len(dataset)), y, groups):
-        # Now, for the outer training set, do inner splits.
-        # Get groups and y for the outer training set.
-        outer_train_groups = groups[outer_train_idx]
-        outer_train_y = y[outer_train_idx]
-        
-        inner_splitter = StratifiedGroupKFold(n_splits=n_inner_splits, shuffle=True, random_state=random_state)
+    for fold in range(n_folds):
+        outer_test_idx = indices[fold_labels == fold]
+        outer_train_idx = indices[fold_labels != fold]
+        # For inner splits, group the outer training indices by their fold labels.
+        outer_train_fold_labels = fold_labels[outer_train_idx]
+        unique_inner_labels = np.unique(outer_train_fold_labels)
         inner_splits = []
-        # Note: inner splitter returns indices relative to the outer_train_idx array.
-        for inner_train_rel, inner_val_rel in inner_splitter.split(np.zeros(len(outer_train_idx)), outer_train_y, outer_train_groups):
-            inner_train_idx = outer_train_idx[inner_train_rel]
-            inner_val_idx = outer_train_idx[inner_val_rel]
+        for label in unique_inner_labels:
+            inner_val_idx = outer_train_idx[outer_train_fold_labels == label]
+            inner_train_idx = np.setdiff1d(outer_train_idx, inner_val_idx)
             inner_splits.append((inner_train_idx, inner_val_idx))
-        
         nested_splits.append((outer_train_idx, outer_test_idx, inner_splits))
-    
     return nested_splits
