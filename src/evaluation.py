@@ -47,56 +47,36 @@ def evaluate_shallow_model(model, X_test, y_test, calculate_metrics=True):
     return test_loss
 
 
-def evaluate_model(model, test_loader, criterion, device="cpu", calculate_metrics=True):
+def evaluate_model(model, test_loader, device="cpu"):
     """
-    Evaluate a trained model on a test set.
+    Evaluate a trained model on a test set and return raw y_true and y_pred.
 
     Args:
         model (nn.Module): Trained PyTorch model.
         test_loader (DataLoader): DataLoader for test set.
-        criterion (callable): Loss function.
+        criterion (callable): Loss function (not used here, kept for interface consistency).
         device (str): "cpu" or "cuda".
-        calculate_metrics (bool): If True, calculate additional regression metrics.
 
     Returns:
-        metrics (dict): Dictionary with keys like "MSE", "MAE", "R²", "Pearson Correlation".
+        tuple: (y_true, y_pred) as torch.Tensor objects.
     """
     model.to(device)
     model.eval()
-
-    test_loss = 0.0
     y_true = []
     y_pred = []
-
     with torch.no_grad():
         for batch in test_loader:
             *X_batch, y_batch = batch
             y_batch = y_batch.to(device)
-            outputs = _forward_pass(model, X_batch, device)
-            outputs = (
-                outputs.squeeze(dim=-1)
-                if outputs.dim() > 1 and outputs.size(-1) == 1
-                else outputs
-            )
-
-            loss = criterion(outputs, y_batch)
-            test_loss += loss.item() * y_batch.size(0)
-
+            outputs = model(*[x.to(device) for x in X_batch])
+            if outputs.dim() > 1 and outputs.size(-1) == 1:
+                outputs = outputs.squeeze(dim=-1)
             y_true.append(y_batch.cpu())
             y_pred.append(outputs.cpu())
-
-    test_loss /= len(test_loader.dataset)
     y_true = torch.cat(y_true, dim=0)
     y_pred = torch.cat(y_pred, dim=0)
+    return y_true.numpy(), y_pred.numpy()
 
-    metrics = {"MSE": test_loss}
-    if calculate_metrics:
-        # Adjust to your use-case (e.g., if classification, you'd compute accuracy, etc.)
-        _, mae, r2, pearson_coef = get_regression_metrics(y_true, y_pred)
-        # You might change or extend evaluate_regression_metrics to handle other tasks
-        metrics.update({"MAE": mae, "R²": r2, "Pearson Correlation": pearson_coef})
-
-    return metrics
 
 
 def evaluate_multimodal_model(

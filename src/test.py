@@ -1,29 +1,27 @@
 import logging
 import numpy as np
+import pandas as pd
 from data_sets import LINCSDataset
-from utils import nested_stratified_group_split_fixed  # Fixed nested splits (single fold assignment)
+from utils import nested_stratified_group_split_fixed
 from metrics import get_regression_metrics
-from cv_trainers import SklearnNestedCVTrainer
-from results import CVResults  # The updated CVResults class
+from cv_trainers import SklearnNestedCVTrainer, PyTorchNestedCVTrainer
+from results import CVResults
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from models import FlexibleFCNN
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     
-    # Define feature space options.
-    # "all" means all allowed gene types (i.e. landmark, best inferred, inferred)
-    feature_space_options = ["landmark", ["landmark", "best inferred"], "all"]
-    
-    # Define model builders for scikit-learn models.
-    model_builders = {
+    # Example for Scikit-Learn models:
+    feature_space_options = ["landmark"]
+    sklearn_model_builders = {
         "LinearRegression": lambda: LinearRegression(),
         "Ridge": lambda: Ridge(alpha=0.5),
-        "Lasso": lambda: Lasso(alpha=0.1)
     }
     
-    # Create a common set of nested splits using the full dataset's row metadata.
-    # (Assuming row_metadata is independent of feature_space selection.)
-    # We'll use the dataset built with the default feature space (say, "landmark") for splitting.
     base_dataset = LINCSDataset(
         gctx_path="../data/processed/LINCS.gctx",
         in_memory=True,
@@ -34,22 +32,16 @@ if __name__ == "__main__":
     
     results = {}
     for feature_space in feature_space_options:
-        # Create a label for the feature space.
-        if isinstance(feature_space, list):
-            feat_label = ",".join(feature_space)
-        else:
-            feat_label = feature_space
-        for model_name, builder in model_builders.items():
+        feat_label = feature_space if isinstance(feature_space, str) else ",".join(feature_space)
+        for model_name, builder in sklearn_model_builders.items():
             combined_key = (feat_label, model_name)
             logging.info(f"Evaluating {combined_key}")
-            # Reinitialize dataset with the given feature_space.
             dataset = LINCSDataset(
                 gctx_path="../data/processed/LINCS.gctx",
                 in_memory=True,
                 normalize="z-score",
                 feature_space=feature_space
             )
-            # Use the same nested_splits computed above (since row metadata is unchanged)
             trainer = SklearnNestedCVTrainer(
                 dataset=dataset,
                 nested_splits=nested_splits,
@@ -57,9 +49,66 @@ if __name__ == "__main__":
                 model_builder=builder,
                 use_inner_cv=False
             )
-            outer_metrics, (overall_mean, overall_std), _ = trainer.run()
-            results[combined_key] = {"mean": overall_mean, "std": overall_std}
+            cv_results = trainer.run(result_key=combined_key)
+            results[combined_key] = cv_results.get_results_df().loc[combined_key]
     
-    cv_results = CVResults(results)
-    print(cv_results.get_results_df())
-    cv_results.plot_metric("MSE")
+    # Example for PyTorch models:
+    pytorch_model_builders = {
+        "FlexibleFCNN_1": lambda ds: FlexibleFCNN(
+            input_dim=ds.to_numpy()[0].shape[1],
+            hidden_dims=[512, 256, 128, 64],
+            output_dim=1,
+            activation_fn="relu",
+            dropout_prob=0.2,
+            residual=False,
+            norm_type="batchnorm",
+            weight_init="kaiming"
+        ),
+        "FlexibleFCNN_2": lambda ds: FlexibleFCNN(
+            input_dim=ds.to_numpy()[0].shape[1],
+            hidden_dims=[256, 128, 64],
+            output_dim=1,
+            activation_fn="relu",
+            dropout_prob=0.3,
+            residual=False,
+            norm_type="batchnorm",
+            weight_init="kaiming"
+        )
+    }
+    
+    train_params = {
+        "epochs": 20,
+        "batch_size": 32,
+        "learning_rate": 1e-3,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "gradient_clipping": 5.0,
+        "early_stopping_patience": 10,
+        "use_mixed_precision": False,
+        "criterion": nn.MSELoss(),
+        "optimizer_fn": optim.Adam
+    }
+    
+    for feature_space in feature_space_options:
+        feat_label = feature_space if isinstance(feature_space, str) else ",".join(feature_space)
+        for model_name, builder in pytorch_model_builders.items():
+            combined_key = (feat_label, model_name)
+            logging.info(f"Evaluating {combined_key}")
+            dataset = LINCSDataset(
+                gctx_path="../data/processed/LINCS.gctx",
+                in_memory=True,
+                normalize="z-score",
+                feature_space=feature_space
+            )
+            trainer = PyTorchNestedCVTrainer(
+                dataset=dataset,
+                nested_splits=nested_splits,
+                evaluation_fn=get_regression_metrics,
+                model_builder=lambda: builder(dataset),
+                train_params=train_params,
+                use_inner_cv=False
+            )
+            cv_results = trainer.run(result_key=combined_key)
+            results[combined_key] = cv_results.get_results_df().loc[combined_key]
+    
+    final_df = pd.concat(results.values(), axis=0)
+    print(final_df)
