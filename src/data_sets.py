@@ -1,16 +1,16 @@
 import os
-import random
-from collections import defaultdict
-from typing import List, Optional, Tuple, Union
-
+import logging
 import h5py
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-import logging
+from typing import Optional, Union, List, Tuple, Callable
+import scanpy as sc
+import decoupler as dc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 
 class PerturbationDataset(Dataset):
     """
@@ -231,139 +231,129 @@ class PerturbationDataset(Dataset):
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
 
+import os
+import logging
+import h5py
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+import scanpy as sc
+import decoupler as dc
+from typing import Optional, Union, List, Tuple, Callable
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 class LINCSDataset(Dataset):
     """
-    Unified dataset for LINCS data stored in a .gctx file with optional standardization and gene selection.
-    
-    Supports lazy loading (for deep learning with PyTorch) and full in-memory loading (for classical ML).
-    Applies optional normalization ("min-max" or "z-score") and gene selection based on a feature space criterion.
-    
+    Unified dataset for LINCS data stored in a .gctx file with optional standardization,
+    gene selection, and TF interference.
+
+    Loads all data into memory using NumPy arrays internally (for scikit-learn compatibility)
+    and returns torch.Tensors via __getitem__ for PyTorch model training.
+
+    Features:
+      - Gene selection based on a feature_space criterion.
+      - Optional normalization ("min-max" or "z-score"), computed on-the-fly or with precomputed parameters.
+      - TF interference using decoupler.
+      - Option to load only the first nrows (useful for debugging).
+
     Assumptions:
-      - Expression data is at '/0/DATA/0/matrix'
-      - Row metadata (including "viability") is at '/0/META/ROW/'
-      - Column metadata (including 'feature_space') is at '/0/META/COL/'
-    
+      - Expression data is stored at '/0/DATA/0/matrix'
+      - Row metadata (including "viability") is stored at '/0/META/ROW/'
+      - Column metadata (including 'feature_space') is stored at '/0/META/COL/'
+
     Parameters:
         gctx_path (str): Path to the .gctx file.
-        in_memory (bool): If True, loads all data into memory; else, uses lazy loading.
         normalize (str or None): "min-max", "z-score", or None.
         feature_space (Union[str, List[str]]): Allowed values are "landmark", "best inferred", "inferred". 
                                               Use "all" (or ["all"]) for all genes.
+        transform (Callable, optional): Optional function to apply sample-level transformations.
+        precomputed_params (dict, optional): Precomputed normalization parameters. For "min-max", provide
+            {"global_min": array, "global_max": array}; for "z-score", provide {"global_mean": array, "global_std": array}.
+        nrows (int, optional): If specified, only the first nrows rows are loaded (useful for debugging).
     """
     def __init__(
         self, 
         gctx_path: str, 
-        in_memory: bool = False, 
         normalize: Optional[str] = None,
-        feature_space: Union[str, List[str]] = "landmark"
+        feature_space: Union[str, List[str]] = "landmark",
+        transform: Optional[Callable] = None,
+        precomputed_params: Optional[dict] = None,
+        nrows: Optional[int] = None
     ):
         self.gctx_path = gctx_path
-        self.in_memory = in_memory
         self.normalize = normalize
         self.feature_space = feature_space
-        
+        self.transform = transform
+        self.precomputed_params = precomputed_params
+        self.requested_nrows = nrows
+
         if self.normalize not in (None, "min-max", "z-score"):
             raise ValueError("normalize must be one of 'min-max', 'z-score', or None")
         if not os.path.exists(self.gctx_path):
             raise FileNotFoundError(f"The file {self.gctx_path} does not exist.")
 
-        # Initialize cached metadata to None.
-        self._col_metadata = None
-        self._row_metadata = None
+        # Load all data into memory as NumPy arrays.
+        with h5py.File(self.gctx_path, "r") as f:
+            self.X = f["0/DATA/0/matrix"][:].astype(np.float32)
+            viability_data = f["0/META/ROW"]["viability"][:]
+            self.y = self._decode_viability(viability_data)
+            row_ids = f["0/META/ROW"]["id"][:]
+            self._row_ids = self._decode_ids(row_ids)
 
-        # Load expression data and row metadata.
-        if self.in_memory:
-            with h5py.File(self.gctx_path, "r") as f:
-                self.X = f["0/DATA/0/matrix"][:].astype(np.float32)
-                viability_data = f["0/META/ROW"]["viability"][:]
-                try:
-                    self.y = np.array([float(x.decode("utf-8")) for x in viability_data])
-                except AttributeError:
-                    self.y = viability_data.astype(np.float32)
-                row_ids = f["0/META/ROW"]["id"][:]
-                try:
-                    self._row_ids = np.array([x.decode("utf-8") for x in row_ids])
-                except AttributeError:
-                    self._row_ids = row_ids
-        else:
-            self.file = h5py.File(self.gctx_path, "r")
-            self.X_dataset = self.file["0/DATA/0/matrix"]
-            viability_data = self.file["0/META/ROW"]["viability"][:]
-            try:
-                self.y = np.array([float(x.decode("utf-8")) for x in viability_data])
-            except AttributeError:
-                self.y = viability_data.astype(np.float32)
-        
-        # Gene selection
+        full_nrows = self.X.shape[0]
+        self._nrows = min(self.requested_nrows, full_nrows) if self.requested_nrows is not None else full_nrows
+        # Subset rows if requested.
+        self.X = self.X[:self._nrows, :]
+        self.y = self.y[:self._nrows]
+        self._row_ids = self._row_ids[:self._nrows]
+
+        # Gene selection: load column metadata and select genes.
         geneinfo = self.get_col_metadata()
         selected_genes = self._select_genes(geneinfo, self.feature_space)
         self._selected_gene_indices = selected_genes.index.to_numpy()
         logging.info(f"Selected {len(self._selected_gene_indices)} genes using feature_space '{self.feature_space}'.")
-
-        if self.in_memory:
-            if self.X.shape[1] < len(self._selected_gene_indices):
-                raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
-            self.X = self.X[:, self._selected_gene_indices]
-        else:
-            if self.X_dataset.shape[1] < len(self._selected_gene_indices):
-                raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
         
-        # Normalization
+        total_genes = self.X.shape[1]
+        if total_genes < len(self._selected_gene_indices):
+            raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
+        self.X = self.X[:, self._selected_gene_indices]
+
+        # Normalization: either use precomputed parameters or compute them.
         if self.normalize is not None:
-            if self.in_memory:
-                data = self.X
+            if self.precomputed_params is not None:
+                if self.normalize == "min-max":
+                    if not all(k in self.precomputed_params for k in ("global_min", "global_max")):
+                        raise ValueError("Precomputed parameters must include 'global_min' and 'global_max' for min-max normalization.")
+                    self.global_min = self.precomputed_params["global_min"]
+                    self.global_max = self.precomputed_params["global_max"]
+                elif self.normalize == "z-score":
+                    if not all(k in self.precomputed_params for k in ("global_mean", "global_std")):
+                        raise ValueError("Precomputed parameters must include 'global_mean' and 'global_std' for z-score normalization.")
+                    self.global_mean = self.precomputed_params["global_mean"]
+                    self.global_std = self.precomputed_params["global_std"]
             else:
-                with h5py.File(self.gctx_path, "r") as f:
-                    data = f["0/DATA/0/matrix"][:].astype(np.float32)
-                data = data[:, self._selected_gene_indices]
-            if self.normalize == "min-max":
-                self.global_min = data.min(axis=0)
-                self.global_max = data.max(axis=0)
-            elif self.normalize == "z-score":
-                self.global_mean = data.mean(axis=0)
-                self.global_std = data.std(axis=0)
-                self.global_std[self.global_std == 0] = 1e-8
+                if self.normalize == "min-max":
+                    self.global_min = self.X.min(axis=0)
+                    self.global_max = self.X.max(axis=0)
+                elif self.normalize == "z-score":
+                    self.global_mean = self.X.mean(axis=0)
+                    self.global_std = self.X.std(axis=0)
+                    self.global_std[self.global_std == 0] = 1e-8
 
-    def get_col_metadata(self) -> pd.DataFrame:
-        if self._col_metadata is None:
-            with h5py.File(self.gctx_path, "r") as f:
-                meta_col_grp = f["0/META/COL"]
-                col_dict = {key: meta_col_grp[key][:].astype(str) for key in meta_col_grp.keys()}
-                self._col_metadata = pd.DataFrame(col_dict)
-                self._col_metadata.index = np.arange(self._col_metadata.shape[0])
-        return self._col_metadata
+    def _decode_viability(self, viability_data) -> np.ndarray:
+        try:
+            return np.array([float(x.decode("utf-8")) for x in viability_data])
+        except AttributeError:
+            return viability_data.astype(np.float32)
 
-    def get_row_metadata(self) -> pd.DataFrame:
-        if self._row_metadata is None:
-            with h5py.File(self.gctx_path, "r") as f:
-                meta_row_grp = f["0/META/ROW"]
-                row_dict = {key: meta_row_grp[key][:].astype(str) for key in meta_row_grp.keys()}
-                self._row_metadata = pd.DataFrame(row_dict)
-                self._row_metadata.index = np.arange(self._row_metadata.shape[0])
-        return self._row_metadata
-
-    @property
-    def row_ids(self) -> List[str]:
-        """Return the list of row IDs."""
-        if self.in_memory:
-            return self._row_ids.tolist() if isinstance(self._row_ids, np.ndarray) else self._row_ids
-        else:
-            # For lazy loading, load row metadata and extract IDs.
-            return self.get_row_metadata()["id"].tolist()
-
-    @property
-    def selected_gene_indices(self) -> np.ndarray:
-        """Return the selected gene indices."""
-        return self._selected_gene_indices
-
-    def get_expression_matrix(self) -> np.ndarray:
-        if self.in_memory:
-            return self.X
-        else:
-            with h5py.File(self.gctx_path, "r") as f:
-                X = f["0/DATA/0/matrix"][:].astype(np.float32)
-            return X[:, self._selected_gene_indices]
-
+    def _decode_ids(self, ids_data) -> List[str]:
+        try:
+            return [x.decode("utf-8") for x in ids_data]
+        except AttributeError:
+            return ids_data.tolist()
+        
     @staticmethod
     def _select_genes(geneinfo: pd.DataFrame, feature_space: Union[str, List[str]]) -> pd.DataFrame:
         allowed_values = {"landmark", "best inferred", "inferred"}
@@ -384,6 +374,107 @@ class LINCSDataset(Dataset):
         logging.debug(f"Selected {selected_genes.shape[0]} genes for feature_space {fs}.")
         return selected_genes
 
+    def get_col_metadata(self) -> pd.DataFrame:
+        if not hasattr(self, "_col_metadata") or self._col_metadata is None:
+            with h5py.File(self.gctx_path, "r") as f:
+                meta_col_grp = f["0/META/COL"]
+                col_dict = {key: meta_col_grp[key][:].astype(str) for key in meta_col_grp.keys()}
+                self._col_metadata = pd.DataFrame(col_dict)
+                self._col_metadata.index = np.arange(self._col_metadata.shape[0])
+        return self._col_metadata
+
+    def get_row_metadata(self) -> pd.DataFrame:
+        if not hasattr(self, "_row_metadata") or self._row_metadata is None:
+            with h5py.File(self.gctx_path, "r") as f:
+                meta_row_grp = f["0/META/ROW"]
+                row_dict = {key: meta_row_grp[key][:].astype(str) for key in meta_row_grp.keys()}
+                self._row_metadata = pd.DataFrame(row_dict)
+                self._row_metadata.index = np.arange(self._row_metadata.shape[0])
+        return self._row_metadata
+
+    @property
+    def row_ids(self) -> List[str]:
+        return self._row_ids if isinstance(self._row_ids, list) else self._row_ids.tolist()
+
+    @property
+    def selected_gene_indices(self) -> np.ndarray:
+        return self._selected_gene_indices
+
+    def get_expression_matrix(self) -> np.ndarray:
+        return self.X
+
+    def run_tf_interference(
+        self,
+        net: pd.DataFrame,
+        methods: List[str] = ["ulm"],
+        consensus: bool = False,
+        consensus_key: str = "consensus",
+        source_col: str = "source",
+        target_col: str = "target",
+        weight_col: str = "weight",
+        verbose: bool = True,
+        use_raw: bool = False,
+        **method_kwargs
+    ):
+        """
+        Runs one or multiple TF inference methods from decoupler on the dataset's
+        gene expression matrix, optionally computing a consensus score.
+        """
+        # Retrieve column metadata and gene IDs.
+        col_meta = self.get_col_metadata().iloc[self._selected_gene_indices]
+        col_ids = col_meta["id"].values
+
+        # Convert the expression matrix to a DataFrame and create an AnnData object.
+        df_expr = pd.DataFrame(self.X, index=self.row_ids, columns=col_ids)
+        self._adata = sc.AnnData(
+            X=df_expr.values,
+            obs=pd.DataFrame(index=df_expr.index),
+            var=pd.DataFrame(index=df_expr.columns)
+        )
+
+        # Run each decoupler method.
+        for method in methods:
+            if verbose:
+                print(f"Running TF inference method: {method}")
+            method_fn = getattr(dc, f"run_{method}", None)
+            if method_fn is None:
+                raise ValueError(f"Method '{method}' not found in decoupler. Check the decoupler docs for valid methods.")
+            method_fn(
+                mat=self._adata,
+                net=net,
+                source=source_col,
+                target=target_col,
+                weight=weight_col,
+                use_raw=use_raw,
+                verbose=verbose,
+                **method_kwargs
+            )
+            if "ulm_estimate" in self._adata.obsm:
+                self._adata.obsm[f"{method}_estimate"] = self._adata.obsm["ulm_estimate"].copy()
+                del self._adata.obsm["ulm_estimate"]
+            if "ulm_pvals" in self._adata.obsm:
+                self._adata.obsm[f"{method}_pvals"] = self._adata.obsm["ulm_pvals"].copy()
+                del self._adata.obsm["ulm_pvals"]
+
+        # Compute consensus if requested.
+        if consensus and len(methods) > 1:
+            if verbose:
+                print("Computing consensus across methods...")
+            resdict = {}
+            for m in methods:
+                est_key = f"{m}_estimate"
+                if est_key in self._adata.obsm:
+                    resdict[m] = self._adata.obsm[est_key]
+            consensus_est, consensus_pvals = dc.cons(resdict)
+            self._adata.obsm[f"{consensus_key}_estimate"] = consensus_est
+            self._adata.obsm[f"{consensus_key}_pvals"] = consensus_pvals
+        if verbose:
+            print("TF interference complete. Results stored in self._adata.obsm.")
+
+    @property
+    def adata(self):
+        return self._adata if hasattr(self, "_adata") else None
+
     def _normalize_sample(self, sample: np.ndarray) -> np.ndarray:
         if self.normalize == "min-max":
             rng = self.global_max - self.global_min
@@ -394,48 +485,54 @@ class LINCSDataset(Dataset):
         return sample
 
     def __len__(self) -> int:
-        return self.X.shape[0] if self.in_memory else self.X_dataset.shape[0]
+        return self._nrows
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.in_memory:
-            sample, label = self.X[idx, :], self.y[idx]
-        else:
-            sample = self.X_dataset[idx, :].astype(np.float32)[self._selected_gene_indices]
-            label = self.y[idx]
+        sample = self.X[idx, :]
+        label = self.y[idx]
         if self.normalize is not None:
             sample = self._normalize_sample(sample)
+        if self.transform is not None:
+            sample = self.transform(sample)
         return torch.tensor(sample), torch.tensor(label, dtype=torch.float32)
 
     def to_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
-        if not self.in_memory:
-            with h5py.File(self.gctx_path, "r") as f:
-                X = f["0/DATA/0/matrix"][:].astype(np.float32)
-                viability_data = f["0/META/ROW"]["viability"][:]
-                try:
-                    y = np.array([float(x.decode("utf-8")) for x in viability_data])
-                except AttributeError:
-                    y = viability_data.astype(np.float32)
-            X = X[:, self._selected_gene_indices]
-        else:
-            X, y = self.X, self.y
+        # Convenience function for scikit-learn usage.
+        X_np = self.X.copy()
         if self.normalize is not None:
-            X = self._normalize_sample(X)
-        return X, y
+            X_np = self._normalize_sample(X_np)
+        return X_np, self.y.copy()
+
+    def get_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Returns a tuple of (row_metadata, col_metadata) as pandas DataFrames.
+        """
+        return self.get_row_metadata(), self.get_col_metadata()
+
+    def __repr__(self) -> str:
+        return (f"{self.__class__.__name__}(n_samples={self._nrows}, "
+                f"n_genes={self.X.shape[1]}, normalize={self.normalize}, "
+                f"feature_space={self.feature_space})")
 
     def close(self) -> None:
-        if not self.in_memory and hasattr(self, "file"):
-            self.file.close()
+        pass
 
     def __del__(self) -> None:
         self.close()
 
     def __enter__(self):
-        """Enable use with the 'with' statement."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        """Ensure resources are closed when exiting the 'with' block."""
         self.close()
+
+        
+        
+        
+        
+
+
+
 
 
 
