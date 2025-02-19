@@ -51,6 +51,8 @@ class PerturbationDataset(Dataset):
                 controls_file, max_rows=n_rows, landmark_only=self.landmark_only
             )
         )
+        
+        
 
         # Load all perturbation data + metadata
         self.pert_data, self.pert_metadata, self.pert_ids, _ = self._load_h5(
@@ -59,6 +61,9 @@ class PerturbationDataset(Dataset):
             landmark_only=self.landmark_only,
             col_subset=self.ctrl_col_indices,
         )
+        
+        # Print a sample of the pert_data
+        logging.info(f"Sample perturbation data:\n{self.pert_data[:20, :20]}")
 
         # Precompute metadata indices for faster lookups
         self.ctrl_index_map = {
@@ -231,31 +236,18 @@ class PerturbationDataset(Dataset):
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
 
-import os
-import logging
-import h5py
-import numpy as np
-import pandas as pd
-import torch
-from torch.utils.data import Dataset
-import scanpy as sc
-import decoupler as dc
-from typing import Optional, Union, List, Tuple, Callable
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
 class LINCSDataset(Dataset):
     """
     Unified dataset for LINCS data stored in a .gctx file with optional standardization,
     gene selection, and TF interference.
 
-    Loads all data into memory using NumPy arrays internally (for scikit-learn compatibility)
+    Loads all data into memory using NumPy arrays (for scikit-learn compatibility)
     and returns torch.Tensors via __getitem__ for PyTorch model training.
 
     Features:
       - Gene selection based on a feature_space criterion.
       - Optional normalization ("min-max" or "z-score"), computed on-the-fly or with precomputed parameters.
-      - TF interference using decoupler.
+      - TF interference via decoupler is implemented in a stateless manner.
       - Option to load only the first nrows (useful for debugging).
 
     Assumptions:
@@ -353,26 +345,6 @@ class LINCSDataset(Dataset):
             return [x.decode("utf-8") for x in ids_data]
         except AttributeError:
             return ids_data.tolist()
-        
-    @staticmethod
-    def _select_genes(geneinfo: pd.DataFrame, feature_space: Union[str, List[str]]) -> pd.DataFrame:
-        allowed_values = {"landmark", "best inferred", "inferred"}
-        if isinstance(feature_space, str):
-            fs = ["landmark", "best inferred", "inferred"] if feature_space.lower() == "all" else [feature_space]
-            if fs[0] not in allowed_values:
-                raise ValueError(f"Invalid feature_space: {feature_space}. Allowed: {allowed_values} or 'all'.")
-        elif isinstance(feature_space, list):
-            fs = ["landmark", "best inferred", "inferred"] if any(x.lower() == "all" for x in feature_space) else feature_space
-            for x in fs:
-                if x not in allowed_values:
-                    raise ValueError(f"Invalid feature_space value: {x}. Allowed: {allowed_values} or 'all'.")
-        else:
-            raise ValueError("feature_space must be a string or a list of strings.")
-        selected_genes = geneinfo[geneinfo.feature_space.isin(fs)]
-        if selected_genes.empty:
-            raise ValueError(f"No genes found for feature_space values: {fs}")
-        logging.debug(f"Selected {selected_genes.shape[0]} genes for feature_space {fs}.")
-        return selected_genes
 
     def get_col_metadata(self) -> pd.DataFrame:
         if not hasattr(self, "_col_metadata") or self._col_metadata is None:
@@ -407,97 +379,126 @@ class LINCSDataset(Dataset):
         self,
         net: pd.DataFrame,
         methods: List[str] = ["ulm"],
-        consensus: bool = False,
+        consensus: bool = True,
         consensus_key: str = "consensus",
         source_col: str = "source",
         target_col: str = "target",
         weight_col: str = "weight",
         verbose: bool = True,
         use_raw: bool = False,
+        min_n: int = 1,
         **method_kwargs
     ):
         """
-        Runs one or multiple TF inference methods from decoupler on the dataset's
-        gene expression matrix, optionally computing a consensus score.
+        Runs one or multiple TF inference methods from decoupler on the dataset's gene expression matrix
+        and returns the inferred TF activity matrix (with metadata reattached) in a functional (stateless) manner.
+
+        It first filters the gene expression matrix to include only genes shared with the network (based on target_col),
+        filters the network accordingly, and attaches row metadata. Then, it runs the specified decoupler method(s)
+        on a local AnnData object. If multiple methods are provided and consensus is True, it returns only the consensus TF
+        activity matrix.
+
+        Returns:
+            pd.DataFrame: The inferred TF activity matrix (with row metadata attached).
+                        If no estimates are produced, an empty DataFrame is returned.
         """
         # Retrieve column metadata and gene IDs.
         col_meta = self.get_col_metadata().iloc[self._selected_gene_indices]
         col_ids = col_meta["id"].values
-
-        # Convert the expression matrix to a DataFrame and create an AnnData object.
+        # if verbose:
+        #     print("Selected gene IDs:", col_ids)
+        
+        # Create a DataFrame for the expression matrix.
         df_expr = pd.DataFrame(self.X, index=self.row_ids, columns=col_ids)
-        self._adata = sc.AnnData(
-            X=df_expr.values,
-            obs=pd.DataFrame(index=df_expr.index),
-            var=pd.DataFrame(index=df_expr.columns)
+        
+        # Retrieve row metadata.
+        row_meta = self.get_row_metadata()
+        
+        # Filter for shared genes: only keep genes that appear in the network's target column.
+        shared_genes = set(net[target_col]).intersection(df_expr.columns)
+        if not shared_genes:
+            raise ValueError("No shared genes found between the network and the expression matrix!")
+        # Preserve the order of genes as in df_expr.
+        filtered_columns = [col for col in df_expr.columns if col in shared_genes]
+        df_expr_filtered = df_expr[filtered_columns]
+        
+        # Filter the network to include only interactions for shared genes.
+        net_filtered = net[net[target_col].isin(shared_genes)]
+        if verbose:
+            print(f"Filtered network has {len(net_filtered)} interactions on {len(shared_genes)} shared genes.")
+        
+        print(df_expr_filtered.index)
+        print(df_expr_filtered.columns)
+        print(df_expr_filtered.values)
+        
+        # Create a local AnnData object that includes the filtered expression matrix and row metadata.
+        adata = sc.AnnData(
+            X=df_expr_filtered.values,
+            obs=pd.DataFrame(index=df_expr_filtered.index),
+            var=pd.DataFrame(index=df_expr_filtered.columns),
         )
-
-        # Run each decoupler method.
+        logging.info(f"AnnData object created with shape: {adata.shape}")
+        
+        # Run each specified decoupler method on the local AnnData object.
         for method in methods:
             if verbose:
                 print(f"Running TF inference method: {method}")
             method_fn = getattr(dc, f"run_{method}", None)
             if method_fn is None:
                 raise ValueError(f"Method '{method}' not found in decoupler. Check the decoupler docs for valid methods.")
+            # Build keyword arguments, adding min_n for 'ulm' if applicable.
+            kwargs = {"min_n": min_n, "use_raw": use_raw, "verbose": verbose}
+            kwargs.update(method_kwargs)
             method_fn(
-                mat=self._adata,
-                net=net,
+                mat=adata,
+                net=net_filtered,
                 source=source_col,
                 target=target_col,
                 weight=weight_col,
-                use_raw=use_raw,
-                verbose=verbose,
-                **method_kwargs
+                **kwargs
             )
-            if "ulm_estimate" in self._adata.obsm:
-                self._adata.obsm[f"{method}_estimate"] = self._adata.obsm["ulm_estimate"].copy()
-                del self._adata.obsm["ulm_estimate"]
-            if "ulm_pvals" in self._adata.obsm:
-                self._adata.obsm[f"{method}_pvals"] = self._adata.obsm["ulm_pvals"].copy()
-                del self._adata.obsm["ulm_pvals"]
-
-        # Compute consensus if requested.
-        if consensus and len(methods) > 1:
+            # Assume that for 'ulm', the expected output key is 'ulm_estimate'.
+            # (Adjust here if using different algorithms with different output keys.)
+            expected_key = f"{method.lower()}_estimate"
+            if expected_key not in adata.obsm:
+                if verbose:
+                    print(f"Warning: Method {method} did not produce an estimate under key '{expected_key}'.")
+        
+        # Determine the output.
+        if len(methods) > 1 and consensus:
             if verbose:
                 print("Computing consensus across methods...")
             resdict = {}
             for m in methods:
-                est_key = f"{m}_estimate"
-                if est_key in self._adata.obsm:
-                    resdict[m] = self._adata.obsm[est_key]
-            consensus_est, consensus_pvals = dc.cons(resdict)
-            self._adata.obsm[f"{consensus_key}_estimate"] = consensus_est
-            self._adata.obsm[f"{consensus_key}_pvals"] = consensus_pvals
+                key = f"{m.lower()}_estimate"
+                if key in adata.obsm:
+                    resdict[m] = adata.obsm[key]
+            if not resdict:
+                if verbose:
+                    print("Warning: No estimates produced by any method. Returning empty DataFrame.")
+                return pd.DataFrame()
+            consensus_est, _ = dc.cons(resdict)
+            final_estimate = consensus_est
+        else:
+            key = f"{methods[0].lower()}_estimate"
+            if key not in adata.obsm:
+                if verbose:
+                    print(f"Warning: TF inference method {methods[0]} did not produce an estimate. Returning empty DataFrame.")
+                return pd.DataFrame()
+            final_estimate = adata.obsm[key]
+        
+        # Convert the inferred TF activity matrix to a DataFrame.
+        tf_activity = pd.DataFrame(final_estimate, index=adata.obs.index)
+        tf_activity.fillna(0.0, inplace=True)
+        
+        # Optionally reattach the row metadata (if desired, you could select specific metadata columns).
+        tf_activity = tf_activity.join(row_meta)
+        
         if verbose:
-            print("TF interference complete. Results stored in self._adata.obsm.")
-
-    @property
-    def adata(self):
-        return self._adata if hasattr(self, "_adata") else None
-
-    def _normalize_sample(self, sample: np.ndarray) -> np.ndarray:
-        if self.normalize == "min-max":
-            rng = self.global_max - self.global_min
-            rng[rng == 0] = 1e-8
-            return (sample - self.global_min) / rng
-        elif self.normalize == "z-score":
-            return (sample - self.global_mean) / self.global_std
-        return sample
-
-    def __len__(self) -> int:
-        return self._nrows
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        sample = self.X[idx, :]
-        label = self.y[idx]
-        if self.normalize is not None:
-            sample = self._normalize_sample(sample)
-        if self.transform is not None:
-            sample = self.transform(sample)
-        return torch.tensor(sample), torch.tensor(label, dtype=torch.float32)
+            print("TF interference complete.")
+        return tf_activity
 
     def to_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
-        # Convenience function for scikit-learn usage.
         X_np = self.X.copy()
         if self.normalize is not None:
             X_np = self._normalize_sample(X_np)
@@ -514,6 +515,47 @@ class LINCSDataset(Dataset):
                 f"n_genes={self.X.shape[1]}, normalize={self.normalize}, "
                 f"feature_space={self.feature_space})")
 
+    def _normalize_sample(self, sample: np.ndarray) -> np.ndarray:
+        if self.normalize == "min-max":
+            rng = self.global_max - self.global_min
+            rng[rng == 0] = 1e-8
+            return (sample - self.global_min) / rng
+        elif self.normalize == "z-score":
+            return (sample - self.global_mean) / self.global_std
+        return sample
+    
+    @staticmethod
+    def _select_genes(geneinfo: pd.DataFrame, feature_space: Union[str, List[str]]) -> pd.DataFrame:
+        allowed_values = {"landmark", "best inferred", "inferred"}
+        if isinstance(feature_space, str):
+            fs = ["landmark", "best inferred", "inferred"] if feature_space.lower() == "all" else [feature_space]
+            if fs[0] not in allowed_values:
+                raise ValueError(f"Invalid feature_space: {feature_space}. Allowed: {allowed_values} or 'all'.")
+        elif isinstance(feature_space, list):
+            fs = ["landmark", "best inferred", "inferred"] if any(x.lower() == "all" for x in feature_space) else feature_space
+            for x in fs:
+                if x not in allowed_values:
+                    raise ValueError(f"Invalid feature_space value: {x}. Allowed: {allowed_values} or 'all'.")
+        else:
+            raise ValueError("feature_space must be a string or a list of strings.")
+        selected_genes = geneinfo[geneinfo.feature_space.isin(fs)]
+        if selected_genes.empty:
+            raise ValueError(f"No genes found for feature_space values: {fs}")
+        logging.debug(f"Selected {selected_genes.shape[0]} genes for feature_space {fs}.")
+        return selected_genes
+
+    def __len__(self) -> int:
+        return self._nrows
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        sample = self.X[idx, :]
+        label = self.y[idx]
+        if self.normalize is not None:
+            sample = self._normalize_sample(sample)
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return torch.tensor(sample), torch.tensor(label, dtype=torch.float32)
+
     def close(self) -> None:
         pass
 
@@ -525,6 +567,7 @@ class LINCSDataset(Dataset):
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
 
         
         

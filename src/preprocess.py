@@ -610,6 +610,7 @@ def run_tf_activity_inference(
     # Separate metadata from gene expression data
     metadata = X[list(metadata_cols)]
     gene_expression = X.drop(columns=metadata_cols)
+    
 
     # Determine shared genes between the network and gene expression data
     shared_genes = set(net["target"]).intersection(gene_expression.columns)
@@ -623,6 +624,9 @@ def run_tf_activity_inference(
     net_filtered = net[net["target"].isin(shared_genes)]
     logging.debug(f"Filtered network has {len(net_filtered)} interactions.")
     gene_expression = gene_expression[list(shared_genes)]
+    print(gene_expression.index)
+    print(gene_expression.columns)
+    print(gene_expression.values)
 
     # Create an AnnData object for the gene expression data
     adata = sc.AnnData(
