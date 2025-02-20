@@ -238,6 +238,9 @@ class PerturbationDataset(Dataset):
             "metadata": {"control_metadata": ctrl_meta, "pert_metadata": pert_meta},
         }
 
+# TODO: 1) Implement lazy loading for large datasets if RAM is a concern.
+# TODO: 2) Implement the loading of precomputed normalization parameters.
+
 class LINCSDataset(Dataset):
     """
     Unified dataset for LINCS data stored in a .gctx file with optional standardization,
@@ -413,18 +416,6 @@ class LINCSDataset(Dataset):
             obs=pd.DataFrame(index=obs_index),
             var=pd.DataFrame(index=df_expr_filtered.columns)
         )
-        
-        # dc.run_ulm(
-        #     mat=adata,
-        #     net=net,
-        #     source='source',
-        #     target='target',
-        #     weight='weight',
-        #     verbose=True,
-        #     use_raw=False,
-        #     min_n=1
-        # )
-        # tf_activity = adata.obsm['ulm_estimate']
                 
         # Run each specified decoupler method.
         for method in methods:

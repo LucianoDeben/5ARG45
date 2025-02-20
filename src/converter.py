@@ -15,7 +15,11 @@ output_h5_file = "../data/processed/LINCS.gctx"       # Output .gctx file
 
 # Load gene expression data from .bin
 logging.info("Loading gene expression data from binary file...")
-X_rna = np.memmap(bin_file, dtype=np.float64, mode="r").reshape(31567, 12328)
+try:
+    X_rna = np.memmap(bin_file, dtype=np.float64, mode="r").reshape(31567, 12328)
+except FileNotFoundError:
+    logging.error(f"File not found: {bin_file}")
+    exit(1)
 assert X_rna.shape == (31567, 12328), f"Expected shape (31567,12328), got {X_rna.shape}"
 logging.info(f"Gene expression data shape: {X_rna.shape}")
 
