@@ -7,7 +7,7 @@ import networkx.algorithms.components.connected as nxacc
 import networkx.algorithms.dag as nxadag
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, train_test_split
 from data_sets import LINCSDataset
 import torch
 import torch.nn as nn
@@ -258,59 +258,127 @@ def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
 
     return smiles_dict
 
-def nested_stratified_group_split_fixed(
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def sampled_split(
     dataset, 
-    n_folds: int = 5, 
-    random_state: int = 42
-) -> List[Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]]:
+    test_size: float = 0.5, 
+    random_state: int = 42, 
+    stratify: bool = False, 
+    stratify_col: Optional[str] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generates fixed nested stratified group splits.
+    Randomly splits the dataset indices into training and test sets using a specified test_size.
     
-    For a given n_folds, the entire dataset is assigned fold labels.
-    For each outer fold:
-      - Outer test set: samples with fold label == i.
-      - Outer training set: samples with fold label != i.
-      - Inner splits: Partition the outer training set into groups by their assigned fold labels.
-        Each inner split uses one group as validation and the union of the remaining groups as training.
-    
-    This guarantees that in a 5-fold split:
-      - Each fold is test once.
-      - For the remaining 4 folds, each fold is used as validation exactly once
-        (and the other 3 folds are used for training).
+    If stratify is True and stratify_col is provided, the split is stratified on that metadata column.
     
     Args:
-        dataset: An instance of LINCSDataset (or similar) that implements get_row_metadata().
-        n_folds (int): Number of folds (e.g., 5).
+        dataset: An instance that implements get_row_metadata() returning a pandas DataFrame.
+        test_size (float): Proportion of the dataset to include in the test split.
         random_state (int): Random seed.
+        stratify (bool): Whether to stratify the split.
+        stratify_col (str, optional): Column name in row metadata to use for stratification.
         
     Returns:
-        List of tuples: (outer_train_idx, outer_test_idx, inner_splits)
-        where inner_splits is a list of (inner_train_idx, inner_val_idx) tuples.
+        train_idx (np.ndarray): Array of training indices.
+        test_idx (np.ndarray): Array of test indices.
+    """
+    indices = np.arange(len(dataset))
+    row_metadata = dataset.get_row_metadata()
+    
+    if stratify:
+        if stratify_col is None or stratify_col not in row_metadata.columns:
+            raise ValueError("Stratification enabled but a valid stratify_col was not provided.")
+        stratify_values = row_metadata[stratify_col].values
+    else:
+        stratify_values = None
+        
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify_values
+    )
+    logging.info(f"Custom random split: {len(train_idx)} train samples, {len(test_idx)} test samples.")
+    return train_idx, test_idx
+
+def stratified_split(
+    dataset, 
+    stratify_col: str, 
+    test_size: float = 0.5, 
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Splits the dataset randomly into train and test sets while preserving the distribution
+    of the values in stratify_col.
+    
+    Args:
+        dataset: An object that implements get_row_metadata() returning a pandas DataFrame.
+        stratify_col (str): Column name in row metadata to use for stratification (e.g. "cell_mfc_name").
+        test_size (float): Fraction of the dataset to use as the test set.
+        random_state (int): Random seed for reproducibility.
+        
+    Returns:
+        train_idx (np.ndarray): Array of training indices.
+        test_idx (np.ndarray): Array of test indices.
     """
     row_metadata: pd.DataFrame = dataset.get_row_metadata()
-    if "cell_mfc_name" not in row_metadata.columns:
-        raise ValueError("Row metadata must include a 'cell_mfc_name' column for splitting.")
+    if stratify_col not in row_metadata.columns:
+        raise ValueError(f"Stratify column '{stratify_col}' not found in row metadata.")
     
-    groups = row_metadata["cell_mfc_name"].values
+    stratify_values = row_metadata[stratify_col].values
     indices = np.arange(len(dataset))
     
-    # Assign each sample a fold label.
-    fold_labels = -1 * np.ones(len(dataset), dtype=int)
-    outer_splitter = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-    for fold, (_, test_idx) in enumerate(outer_splitter.split(np.zeros(len(dataset)), groups, groups)):
-        fold_labels[test_idx] = fold
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify_values
+    )
+    
+    logging.info(f"Stratified split: {len(train_idx)} training samples and {len(test_idx)} test samples.")
+    return train_idx, test_idx
 
-    nested_splits = []
-    for fold in range(n_folds):
-        outer_test_idx = indices[fold_labels == fold]
-        outer_train_idx = indices[fold_labels != fold]
-        # For inner splits, group the outer training indices by their fold labels.
-        outer_train_fold_labels = fold_labels[outer_train_idx]
-        unique_inner_labels = np.unique(outer_train_fold_labels)
-        inner_splits = []
-        for label in unique_inner_labels:
-            inner_val_idx = outer_train_idx[outer_train_fold_labels == label]
-            inner_train_idx = np.setdiff1d(outer_train_idx, inner_val_idx)
-            inner_splits.append((inner_train_idx, inner_val_idx))
-        nested_splits.append((outer_train_idx, outer_test_idx, inner_splits))
-    return nested_splits
+def grouped_split(
+    dataset, 
+    group_col: str, 
+    test_size: float = 0.5, 
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Splits the dataset into train and test sets such that entire groups (defined by group_col)
+    are assigned exclusively to either train or test.
+    
+    Args:
+        dataset: An object that implements get_row_metadata() returning a pandas DataFrame.
+        group_col (str): Column name in row metadata representing groups (e.g. "cell_mfc_name").
+        test_size (float): Fraction of the unique groups to assign to the test set.
+        random_state (int): Random seed for reproducibility.
+        
+    Returns:
+        train_idx (np.ndarray): Array of indices for training.
+        test_idx (np.ndarray): Array of indices for testing.
+    """
+    row_metadata: pd.DataFrame = dataset.get_row_metadata()
+    if group_col not in row_metadata.columns:
+        raise ValueError(f"Group column '{group_col}' not found in row metadata.")
+    
+    # Identify unique groups
+    unique_groups = np.unique(row_metadata[group_col].values)
+    
+    # Split groups into train and test groups
+    train_groups, test_groups = train_test_split(
+        unique_groups,
+        test_size=test_size,
+        random_state=random_state
+    )
+    
+    # Get the indices corresponding to each set of groups.
+    indices = np.arange(len(dataset))
+    groups = row_metadata[group_col].values
+    
+    train_idx = indices[np.isin(groups, train_groups)]
+    test_idx = indices[np.isin(groups, test_groups)]
+    
+    logging.info(f"Grouped split: {len(train_idx)} training samples and {len(test_idx)} test samples from {len(unique_groups)} unique groups.")
+    return train_idx, test_idx

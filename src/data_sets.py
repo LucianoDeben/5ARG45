@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import scale, minmax_scale, robust_scale
+from tf_inference import TFInferenceRunner
 import torch
 from torch.utils.data import Dataset
 from typing import Optional, Union, List, Tuple, Callable
@@ -287,8 +288,12 @@ class LINCSDataset(Dataset):
         # 1) Load the data into self.X
         with h5py.File(self.gctx_path, "r") as f:
             self.X = f["0/DATA/0/matrix"][:].astype(np.float64)
+            if self.X.size == 0:
+                raise ValueError("No data found in the .gctx file at '0/DATA/0/matrix'.")
+            
             viability_data = f["0/META/ROW"]["viability"][:]
             self.y = self._decode_viability(viability_data)
+            self.smiles = f["0/META/ROW"]["canonical_smiles"][:self._nrows].astype(str)
             row_ids = f["0/META/ROW"]["id"][:]
             self._row_ids = self._decode_ids(row_ids)
 
@@ -298,9 +303,6 @@ class LINCSDataset(Dataset):
         self.X = self.X[:self._nrows, :]
         self.y = self.y[:self._nrows]
         self._row_ids = self._row_ids[:self._nrows]
-        
-        # vt = VarianceThreshold(threshold=1e-1)  # or some small threshold
-        # self.X = vt.fit_transform(self.X)
         
         # 3) Now apply scikit-learn normalization
         if self.normalize is not None:
@@ -339,7 +341,7 @@ class LINCSDataset(Dataset):
                 self._col_metadata = pd.DataFrame(col_dict)
                 self._col_metadata.index = np.arange(self._col_metadata.shape[0])
         return self._col_metadata
-
+    
     def get_row_metadata(self) -> pd.DataFrame:
         if not hasattr(self, "_row_metadata") or self._row_metadata is None:
             with h5py.File(self.gctx_path, "r") as f:
@@ -360,120 +362,14 @@ class LINCSDataset(Dataset):
     def get_expression_matrix(self) -> np.ndarray:
         return self.X
 
-    def run_tf_interference(
-        self,
-        net: pd.DataFrame,
-        methods: List[str] = ["ulm"],
-        consensus: bool = False,
-        consensus_key: str = "consensus",
-        source_col: str = "source",
-        target_col: str = "target",
-        weight_col: str = "weight",
-        verbose: bool = True,
-        use_raw: bool = False,
-        min_n: int = 1,
-        **method_kwargs
-    ):
-        """
-        Runs one or multiple TF inference methods from decoupler on the dataset's gene expression matrix
-        and returns the inferred TF activity matrix (with reattached row metadata) without modifying internal state.
-
-        It first filters the gene expression matrix to include only genes shared with the network (based on target_col),
-        filters the network accordingly, and then creates a local AnnData object with a RangeIndex for observations.
-        Then it runs the specified decoupler method(s). In the multiple-method case with consensus=True, it returns
-        only the consensus TF activity matrix.
-
-        Returns:
-            pd.DataFrame: Inferred TF activity matrix (with row metadata reattached). If no estimates are produced,
-                        returns an empty DataFrame.
-        """
-        # Retrieve column metadata and gene IDs.
-        col_meta = self.get_col_metadata().iloc[self._selected_gene_indices]
-        col_ids = col_meta["id"].values
-            
-        # Create a new RangeIndex for observations.
-        obs_index = pd.RangeIndex(start=0, stop=self.X.shape[0], step=1)
-        
-        # Create a DataFrame for the expression matrix.
-        df_expr = pd.DataFrame(self.X, index=self.row_ids, columns=col_ids)
-        
-        # Filter to shared genes: only keep genes that are in both df_expr and net[target_col]
-        shared_genes = set(net[target_col]).intersection(df_expr.columns)
-        if not shared_genes:
-            raise ValueError("No shared genes found between the network and the expression matrix!")
-        # Preserve the original order of genes in df_expr.
-        filtered_columns = [col for col in df_expr.columns if col in shared_genes]
-        df_expr_filtered = df_expr[filtered_columns]
-        
-        # Filter the network to include only interactions for shared genes.
-        net_filtered = net[net[target_col].isin(shared_genes)]
-        if verbose:
-            print(f"Filtered network has {len(net_filtered)} interactions on {len(shared_genes)} shared genes.")
-        
-        # Create a local AnnData object using the filtered expression matrix and a RangeIndex for obs.
-        adata = sc.AnnData(
-            X=df_expr_filtered.values,
-            obs=pd.DataFrame(index=obs_index),
-            var=pd.DataFrame(index=df_expr_filtered.columns)
-        )
-                
-        # Run each specified decoupler method.
-        for method in methods:
-            method_fn = getattr(dc, f"run_{method}", None)
-            if method_fn is None:
-                raise ValueError(f"Method '{method}' not found in decoupler. Check the decoupler docs for valid methods.")
-            kwargs = {"min_n": min_n, "use_raw": use_raw, "verbose": verbose}
-            kwargs.update(method_kwargs)
-            method_fn(
-                mat=adata,
-                net=net_filtered,
-                source=source_col,
-                target=target_col,
-                weight=weight_col,
-                **kwargs
-            )
-            # Rename default keys to unique ones.
-            obsm_key = f"{method.lower()}_estimate"  # e.g., "ulm_estimate"
-            if obsm_key not in adata.obsm:
-                if verbose:
-                    print(f"Warning: Method {method} did not produce an estimate under key '{obsm_key}'.")
-        
-        # Determine what to return.
-        if consensus and len(methods) > 1:
-            if verbose:
-                print("Computing consensus across methods...")
-            resdict = {}
-            for m in methods:
-                key = f"{m.lower()}_estimate"
-                if key in adata.obsm:
-                    resdict[m] = adata.obsm[key]
-            if not resdict:
-                if verbose:
-                    print("Warning: No estimates produced by any method. Returning empty DataFrame.")
-                result = pd.DataFrame()
-            else:
-                consensus_est, _ = dc.cons(resdict)
-                result = consensus_est
-        else:
-            key = f"{methods[0].lower()}_estimate"
-            if key not in adata.obsm:
-                if verbose:
-                    print(f"Warning: TF interference method {methods[0]} did not produce an estimate. Returning empty DataFrame.")
-                result = pd.DataFrame()
-            else:
-                result = adata.obsm[key]
-        
-        result.fillna(0.0, inplace=True)
-        
-        if verbose:
-            print("TF interference complete.")
-        return result
+    def infer_tf_activities(self, net: pd.DataFrame, runner: TFInferenceRunner):
+        X = self.get_expression_matrix()
+        row_ids = self.row_ids
+        gene_ids = self.get_col_metadata().iloc[self.selected_gene_indices]["id"].tolist()
+        return runner.run(X, net, row_ids, gene_ids)
 
     def to_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
-        X_np = self.X.copy()
-        if self.normalize is not None:
-            X_np = self._normalize_sample(X_np)
-        return X_np, self.y.copy()
+        return self.X.copy(), self.y.copy()
 
     def get_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """

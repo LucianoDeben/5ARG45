@@ -6,6 +6,12 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+"""
+Convert gene expression and metadata files into a .gctx file for LINCS data.
+Inputs: Binary expression data, TSV row metadata, CSV compound info, TSV gene info.
+Output: HDF5 file in .gctx format.
+"""
+
 # File paths
 bin_file = "../data/raw/X_RNA.bin"          # Gene expression data (31567 x 12328)
 y_tsv_file = "../data/raw/Y.tsv"              # Row metadata (experiments)
@@ -93,15 +99,29 @@ with h5py.File(output_h5_file, "w") as f_out:
         out_row += (end - start)
     logging.info("Gene expression data written.")
 
+    # Writing row metadata
     meta_row_grp = f_out.create_group("0/META/ROW")
     for col in row_metadata.columns:
-        meta_row_grp.create_dataset(col, data=row_metadata[col].astype(str).values.astype("S"))
+        data = row_metadata[col].values
+        if pd.api.types.is_numeric_dtype(row_metadata[col]):
+            # Store numeric data as-is (int, float)
+            meta_row_grp.create_dataset(col, data=data)
+        else:
+            # Store non-numeric data (strings, objects) as bytes
+            meta_row_grp.create_dataset(col, data=data.astype(str).astype("S"))
     meta_row_grp.create_dataset("id", data=np.array(row_ids, dtype="S"))
     logging.info("Row metadata written.")
 
+    # Writing column metadata
     meta_col_grp = f_out.create_group("0/META/COL")
     for col in col_metadata.columns:
-        meta_col_grp.create_dataset(col, data=col_metadata[col].astype(str).values.astype("S"))
+        data = col_metadata[col].values
+        if pd.api.types.is_numeric_dtype(col_metadata[col]):
+            # Store numeric data as-is (int, float)
+            meta_col_grp.create_dataset(col, data=data)
+        else:
+            # Store non-numeric data (strings, objects) as bytes
+            meta_col_grp.create_dataset(col, data=data.astype(str).astype("S"))
     meta_col_grp.create_dataset("id", data=np.array(col_symbols, dtype="S"))
     logging.info("Column metadata written.")
     
