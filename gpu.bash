@@ -1,5 +1,5 @@
 #!/bin/bash
-salloc --time=3:00:00 --partition=gpu_mig -N 1 --gres=gpu:1 --reservation=jhs_tue2022
+salloc --time=3:00:00 --partition=gpu_mig -N 1 --gres=gpu:1 --reservation=terv92681
 
 # Check if salloc was successful
 if [ $? -eq 0 ]; then

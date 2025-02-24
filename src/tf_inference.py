@@ -50,18 +50,18 @@ class TFInferenceRunner:
         expr_data: Union[np.ndarray, pd.DataFrame],
         net: pd.DataFrame,
         row_ids: Optional[List[str]] = None,
-        gene_ids: Optional[List[str]] = None
+        col_ids: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Infers TF activities from gene expression data and a TF network.
 
         Args:
             expr_data (Union[np.ndarray, pd.DataFrame]): Gene expression matrix (n_samples x n_genes).
-                If NumPy array, gene_ids must be provided to map columns to gene symbols.
+                If NumPy array, col_ids must be provided to map columns to gene symbols.
                 If DataFrame, column names are used as gene IDs.
             net (pd.DataFrame): TF network with source, target, and weight columns.
             row_ids (Optional[List[str]]): List of sample IDs to attach to the output. Default: None.
-            gene_ids (Optional[List[str]]): List of gene symbols corresponding to expr_data columns.
+            col_ids (Optional[List[str]]): List of gene symbols corresponding to expr_data columns.
                 Required if expr_data is a NumPy array. Default: None.
 
         Returns:
@@ -71,13 +71,13 @@ class TFInferenceRunner:
         """
         # Convert expr_data to DataFrame with appropriate column names
         if isinstance(expr_data, np.ndarray):
-            if gene_ids is None:
-                raise ValueError("gene_ids must be provided when expr_data is a NumPy array!")
-            if len(gene_ids) != expr_data.shape[1]:
-                raise ValueError(f"gene_ids length ({len(gene_ids)}) does not match expr_data columns ({expr_data.shape[1]})!")
+            if col_ids is None:
+                raise ValueError("col_ids must be provided when expr_data is a NumPy array!")
+            if len(col_ids) != expr_data.shape[1]:
+                raise ValueError(f"col_ids length ({len(col_ids)}) does not match expr_data columns ({expr_data.shape[1]})!")
             if row_ids is None:
                 row_ids = [f"sample_{i}" for i in range(expr_data.shape[0])]
-            expr_df = pd.DataFrame(expr_data, index=row_ids, columns=gene_ids)
+            expr_df = pd.DataFrame(expr_data, index=row_ids, columns=col_ids)
         else:
             expr_df = expr_data.copy()
             row_ids = expr_df.index.tolist() if row_ids is None else row_ids
@@ -100,7 +100,7 @@ class TFInferenceRunner:
             obs=pd.DataFrame(index=expr_df_filtered.index),
             var=pd.DataFrame(index=expr_df_filtered.columns)
         )
-
+        
         # Run each specified method
         results = {}
         for method in self.methods:
