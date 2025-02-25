@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.model_selection import GroupKFold, ShuffleSplit, StratifiedGroupKFold, train_test_split
+from sklearn.model_selection import GroupKFold, GroupShuffleSplit, ShuffleSplit, StratifiedGroupKFold, StratifiedShuffleSplit, train_test_split
 from data_sets import LINCSDataset
 from metrics import get_regression_metrics
 from results import CVResults
@@ -50,49 +50,6 @@ def load_config(config_path: str) -> Optional[Dict[str, Any]]:
                 )
 
     return config
-
-def train_val_test_split(X, y, 
-                         train_size=0.6, 
-                         val_size=0.2, 
-                         test_size=0.2, 
-                         random_state=None):
-    """
-    Splits X, y into train, val, test using two ShuffleSplit stages.
-    """
-    if not np.isclose(train_size + val_size + test_size, 1.0):
-        raise ValueError("train_size + val_size + test_size must sum to 1.0")
-
-    # Convert to arrays if needed
-    if isinstance(X, pd.DataFrame) or isinstance(X, pd.Series):
-        X = X.to_numpy()
-    if isinstance(y, pd.DataFrame) or isinstance(y, pd.Series):
-        y = y.to_numpy()
-    if X.shape[0] != y.shape[0]:
-        raise ValueError(f"X and y must have same number of samples: {X.shape[0]} vs {y.shape[0]}")
-    if X.shape[0] == 0:
-        raise ValueError("Input data is empty")
-
-    n_samples = X.shape[0]
-    
-    # Stage 1: train / temp
-    rs1 = ShuffleSplit(n_splits=1,
-                       train_size=train_size,
-                       test_size=val_size + test_size,
-                       random_state=random_state)
-    for train_index, temp_index in rs1.split(X):
-        X_train, y_train = X[train_index], y[train_index]
-        X_temp, y_temp = X[temp_index], y[temp_index]
-
-    # Stage 2: val / test
-    rs2 = ShuffleSplit(n_splits=1,
-                       train_size=val_size / (val_size + test_size),
-                       test_size=test_size / (val_size + test_size),
-                       random_state=random_state)
-    for val_index, test_index in rs2.split(X_temp):
-        X_val, y_val = X_temp[val_index], y_temp[val_index]
-        X_test, y_test = X_temp[test_index], y_temp[test_index]
-
-    return X_train, y_train, X_val, y_val, X_test, y_test
 
 def run_multiple_iterations_models(X, y, models, n_iterations=20,
                                    train_size=0.6, val_size=0.2, test_size=0.2,

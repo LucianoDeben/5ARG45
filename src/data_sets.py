@@ -324,6 +324,26 @@ class LINCSDataset(Dataset):
             elif self.normalize == "min-max":
                 self.X = minmax_scale(self.X, copy=True)
 
+    def run_tf_inference(self, net: pd.DataFrame, method: Union[str, List[str]] = "ulm") -> pd.DataFrame:
+            """
+            Run transcription factor inference on the expression matrix using the provided decoupler network.
+            
+            Parameters:
+                net (pd.DataFrame): A DataFrame containing the TF regulatory network (e.g., TF-gene interactions).
+                method (Union[str, List[str]]): Inference method(s), e.g., "ulm", "mlm", or a list like ["ulm", "mlm"].
+            
+            Returns:
+                pd.DataFrame: A DataFrame with TF activity scores (samples as rows, TFs as columns).
+            """
+            X_df = pd.DataFrame(self.X.copy(), columns=self._col_ids, index=self._row_ids)
+            # Ensure method is a list for dc.decouple
+            methods = [method] if isinstance(method, str) else method
+            res = dc.decouple(X_df, net, methods=methods, consensus=False, min_n=10, use_raw=False)
+            self.X_tf, _ = dc.cons(res)  # Store TF activity
+            # Update TF column metadata
+            self._col_metadata_tf = pd.DataFrame({'tf': self.X_tf.columns}, index=self.X_tf.columns)
+            return self.X_tf
+
     def _decode_viability(self, viability_data) -> np.ndarray:
         try:
             return np.array([float(x.decode("utf-8")) for x in viability_data])
@@ -335,14 +355,6 @@ class LINCSDataset(Dataset):
             return [x.decode("utf-8") for x in ids_data]
         except AttributeError:
             return ids_data.tolist()
-
-    def get_col_metadata(self) -> pd.DataFrame:
-            """Returns the cached column metadata as a pandas DataFrame."""
-            return self._col_metadata
-
-    def get_row_metadata(self) -> pd.DataFrame:
-        """Returns the cached row metadata as a pandas DataFrame."""
-        return self._row_metadata
 
     @property
     def row_ids(self) -> List[str]:
@@ -365,21 +377,87 @@ class LINCSDataset(Dataset):
         """
         return self.X.copy(), self.y.copy()
     
-    def get_pandas(self) -> Tuple[pd.DataFrame, pd.Series]:
+    def get_pandas(self, source = "gene") -> tuple[pd.DataFrame, pd.Series]:
         """
-        Returns the expression matrix and viability scores as pandas DataFrames.
+        Return the active data (gene expression or TF activity) and viability as pandas objects.
+        """
+        if source == 'gene':
+            X_data = self.X
+            X_df = pd.DataFrame(X_data.copy(), columns=self._col_ids, index=self._row_ids)
+        elif source == 'tf':
+            X_data = self.X_tf
+            X_df = X_data.copy() # Already a DataFrame
+        else:
+            raise ValueError(f"Invalid type: {source}. Choose from 'gene' or 'tf'.")
+
+        y_series = pd.Series(self.y.copy(), name="viability", index=self._row_ids)
+        return X_df, y_series
+    
+    def get_col_metadata(self, source = "gene", columns: Optional[Union[str, List[str]]] = None) -> Union[pd.DataFrame, pd.Series]:
+        """
+        Retrieve column metadata for the active data (gene or TF).
+
+        Args:
+            columns (Optional[Union[str, List[str]]]): Column name(s) to retrieve. If None, return all columns.
 
         Returns:
-            Tuple[pd.DataFrame, pd.Series]: Copies of the expression matrix (X) and viability scores (y).
-                                        Modifications to these DataFrames will not affect the internal data.
-        """
-        return pd.DataFrame(self.X.copy(), columns=self._col_ids, index=self._row_ids), pd.Series(self.y.copy(), name="viability")
+            Union[pd.DataFrame, pd.Series]: Column metadata as a DataFrame (for multiple columns) or Series (for a single column).
 
-    def get_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        Raises:
+            KeyError: If any specified column is not found in the column metadata.
+            TypeError: If columns is not None, a string, or a list of strings.
+            ValueError: If TF metadata is requested but not available.
         """
-        Returns a tuple of (row_metadata, col_metadata) as pandas DataFrames.
+        if source == 'gene':
+            metadata = self._col_metadata
+        elif source == 'tf':
+            if self._col_metadata_tf is None:
+                raise ValueError("TF column metadata is not available. Run TF inference first.")
+            metadata = self._col_metadata_tf
+        else:
+            raise ValueError(f"Invalid type: {source}. Choose from 'gene' or 'tf'.")
+
+        if columns is None:
+            return metadata.copy()
+        elif isinstance(columns, str):
+            if columns not in metadata.columns:
+                raise KeyError(f"Column '{columns}' not found in column metadata")
+            return metadata[columns].copy()
+        elif isinstance(columns, list):
+            missing_cols = [col for col in columns if col not in metadata.columns]
+            if missing_cols:
+                raise KeyError(f"Columns {missing_cols} not found in column metadata")
+            return metadata[columns].copy()
+        else:
+            raise TypeError("columns must be None, a string, or a list of strings")
+
+    def get_row_metadata(self, columns: Optional[Union[str, List[str]]] = None) -> Union[pd.DataFrame, pd.Series]:
         """
-        return self.get_row_metadata(), self.get_col_metadata()
+        Retrieve row metadata.
+
+        Args:
+            columns (Optional[Union[str, List[str]]]): Column name(s) to retrieve. If None, return all columns.
+
+        Returns:
+            Union[pd.DataFrame, pd.Series]: Row metadata as a DataFrame (for multiple columns) or Series (for a single column).
+
+        Raises:
+            KeyError: If any specified column is not found in the row metadata.
+            TypeError: If columns is not None, a string, or a list of strings.
+        """
+        if columns is None:
+            return self._row_metadata.copy()
+        elif isinstance(columns, str):
+            if columns not in self._row_metadata.columns:
+                raise KeyError(f"Column '{columns}' not found in row metadata")
+            return self._row_metadata[columns].copy()
+        elif isinstance(columns, list):
+            missing_cols = [col for col in columns if col not in self._row_metadata.columns]
+            if missing_cols:
+                raise KeyError(f"Columns {missing_cols} not found in row metadata")
+            return self._row_metadata[columns].copy()
+        else:
+            raise TypeError("columns must be None, a string, or a list of strings")
 
     def __repr__(self) -> str:
         return (f"{self.__class__.__name__}(n_samples={self._nrows}, "
