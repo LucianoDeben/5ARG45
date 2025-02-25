@@ -2,13 +2,13 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import networkx as nx
-import networkx.algorithms.components.connected as nxacc
-import networkx.algorithms.dag as nxadag
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold, StratifiedGroupKFold, train_test_split
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.model_selection import GroupKFold, ShuffleSplit, StratifiedGroupKFold, train_test_split
 from data_sets import LINCSDataset
+from metrics import get_regression_metrics
+from results import CVResults
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -51,118 +51,226 @@ def load_config(config_path: str) -> Optional[Dict[str, Any]]:
 
     return config
 
-
-def load_sampled_data(
-    file_path: str,
-    sample_size: Optional[int] = None,
-    use_chunks: bool = False,
-    chunk_size: Optional[int] = None,
-) -> pd.DataFrame:
+def train_val_test_split(X, y, 
+                         train_size=0.6, 
+                         val_size=0.2, 
+                         test_size=0.2, 
+                         random_state=None):
     """
-    Load a dataset from a CSV file with optional sampling and chunked loading.
+    Splits X, y into train, val, test using two ShuffleSplit stages.
+    """
+    if not np.isclose(train_size + val_size + test_size, 1.0):
+        raise ValueError("train_size + val_size + test_size must sum to 1.0")
 
+    # Convert to arrays if needed
+    if isinstance(X, pd.DataFrame) or isinstance(X, pd.Series):
+        X = X.to_numpy()
+    if isinstance(y, pd.DataFrame) or isinstance(y, pd.Series):
+        y = y.to_numpy()
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(f"X and y must have same number of samples: {X.shape[0]} vs {y.shape[0]}")
+    if X.shape[0] == 0:
+        raise ValueError("Input data is empty")
+
+    n_samples = X.shape[0]
+    
+    # Stage 1: train / temp
+    rs1 = ShuffleSplit(n_splits=1,
+                       train_size=train_size,
+                       test_size=val_size + test_size,
+                       random_state=random_state)
+    for train_index, temp_index in rs1.split(X):
+        X_train, y_train = X[train_index], y[train_index]
+        X_temp, y_temp = X[temp_index], y[temp_index]
+
+    # Stage 2: val / test
+    rs2 = ShuffleSplit(n_splits=1,
+                       train_size=val_size / (val_size + test_size),
+                       test_size=test_size / (val_size + test_size),
+                       random_state=random_state)
+    for val_index, test_index in rs2.split(X_temp):
+        X_val, y_val = X_temp[val_index], y_temp[val_index]
+        X_test, y_test = X_temp[test_index], y_temp[test_index]
+
+    return X_train, y_train, X_val, y_val, X_test, y_test
+
+def run_multiple_iterations_models(X, y, models, n_iterations=20,
+                                   train_size=0.6, val_size=0.2, test_size=0.2,
+                                   random_state=42, metric_fn=get_regression_metrics):
+    """
+    Runs multiple random splits and trains each model.
+    
     Parameters:
-        file_path (str): Path to the CSV file.
-        sample_size (Optional[int]): Number of rows to sample. If None, loads the entire file.
-        use_chunks (bool): Whether to use chunked loading for large files.
-        chunk_size (Optional[int]): Size of chunks when using chunked loading.
-
+        X, y : array-like (features and targets)
+        models : dict of {model_name: model_factory}
+                 model_factory is a callable that returns a fresh model instance.
+        n_iterations : number of random subsampling iterations.
+        train_size, val_size, test_size : fractions that sum to 1.0.
+        random_state : seed for reproducibility.
+        metric_fn : function to compute regression metrics.
+    
     Returns:
-        pd.DataFrame: The loaded dataset, potentially sampled, with reset indices if sampled.
-
-    Note:
-        - When using chunked loading, `chunk_size` must be provided.
-        - In the non-chunked branch, if `sample_size` is provided, a random sample of `sample_size`
-          rows is taken from the entire file.
+        A CVResults object aggregating the mean and std of each metric for each model.
     """
-    if use_chunks:
-        if chunk_size is None:
-            raise ValueError("chunk_size must be provided when use_chunks is True")
+    # Initialize an empty dictionary to collect metric lists per model.
+    metrics_collection = {model_name: {} for model_name in models.keys()}
+    
+    for i in range(n_iterations):
+        seed = random_state + i if random_state is not None else None
+        X_train, y_train, X_val, y_val, X_test, y_test = train_val_test_split(
+            X, y, train_size, val_size, test_size, random_state=seed
+        )
+        # For simple ML models, combine train and validation
+        X_train_combined = np.concatenate([X_train, X_val], axis=0)
+        y_train_combined = np.concatenate([y_train, y_val], axis=0)
+        
+        for model_name, model_factory in models.items():
+            # Instantiate a fresh model instance using the factory callable.
+            current_model = model_factory()
+            current_model.fit(X_train_combined, y_train_combined)
+            y_pred = current_model.predict(X_test)
+            metrics = metric_fn(y_test, y_pred)
+            
+            # Update metrics_collection dynamically based on the keys returned by metric_fn.
+            for metric_name, value in metrics.items():
+                if metric_name not in metrics_collection[model_name]:
+                    metrics_collection[model_name][metric_name] = []
+                metrics_collection[model_name][metric_name].append(value)
+    
+    # Compute mean and std for each metric per model.
+    results_summary = {}
+    for model_name, metric_lists in metrics_collection.items():
+        mean_metrics = {m: np.mean(vals) for m, vals in metric_lists.items()}
+        std_metrics = {m: np.std(vals) for m, vals in metric_lists.items()}
+        results_summary[model_name] = {"mean": mean_metrics, "std": std_metrics}
+    
+    return CVResults(results_summary)
 
-        chunks = []
-        num_samples_collected = 0
-        # Iterate through the file in chunks
-        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            # If a sample size is defined, check if we have already collected enough rows.
-            if sample_size is not None and num_samples_collected >= sample_size:
-                break
-
-            if sample_size is not None:
-                # Determine how many rows to sample from this chunk
-                n_to_sample = min(sample_size - num_samples_collected, len(chunk))
-                sampled_chunk = chunk.sample(n=n_to_sample, random_state=42)
-            else:
-                sampled_chunk = chunk
-
-            chunks.append(sampled_chunk)
-            num_samples_collected += len(sampled_chunk)
-
-        sampled_data = pd.concat(chunks, axis=0, ignore_index=True)
-
-    else:
-        # Load the entire dataset at once
-        full_data = pd.read_csv(file_path)
-        if sample_size is not None:
-            sampled_data = full_data.sample(n=sample_size, random_state=42).reset_index(
-                drop=True
-            )
-        else:
-            sampled_data = full_data
-
-    return sampled_data
-
-
-def sanity_check(
-    model: nn.Module,
-    loader: torch.utils.data.DataLoader,
-    device: Union[str, torch.device],
-    max_iters: int = 100,
-    lr: float = 1e-3,
-    loss_threshold: float = 0.1,
-) -> bool:
+def train_deep_model_simple(X_train, y_train, X_val, y_val, X_test, 
+                            model_factory, training_params, device="cpu"):
     """
-    Perform a sanity check by training the model for a few iterations and checking if the loss decreases.
-
+    Trains a PyTorch deep learning model using a simple training loop.
+    Converts input arrays into DataLoaders, trains for a fixed number of epochs,
+    and returns predictions on X_test.
+    
     Args:
-        model (nn.Module): The PyTorch model to check.
-        loader (torch.utils.data.DataLoader): DataLoader for loading a batch of data.
-        device (Union[str, torch.device]): The device to run the model on.
-        max_iters (int): Number of training iterations for the sanity check.
-        lr (float): Learning rate for the optimizer.
-        loss_threshold (float): Fraction of initial loss to compare final loss against.
-
+        X_train, y_train, X_val, y_val, X_test: NumPy arrays.
+        model_factory: Callable that returns a new PyTorch model instance.
+        training_params: Dict with keys: epochs, batch_size, learning_rate.
+        device: 'cpu' or 'cuda'.
+    
     Returns:
-        bool: True if the loss reduces significantly, False otherwise.
+        y_pred: Numpy array of predictions on X_test.
     """
-    model.train()
-    X, y = next(iter(loader))
-    X, y = X.to(device), y.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # Create TensorDatasets and DataLoaders for training and validation
+    batch_size = training_params.get("batch_size", 32)
+    epochs = training_params.get("epochs", 20)
+    learning_rate = training_params.get("learning_rate", 1e-3)
+    
+    train_dataset = TensorDataset(torch.from_numpy(X_train).float(),
+                                  torch.from_numpy(y_train).float())
+    val_dataset = TensorDataset(torch.from_numpy(X_val).float(),
+                                torch.from_numpy(y_val).float())
+    test_dataset = TensorDataset(torch.from_numpy(X_test).float())
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    # Instantiate the model
+    model = model_factory().to(device)
+    
+    # Define loss and optimizer
     criterion = nn.MSELoss()
-
-    initial_loss = None
-    for i in range(max_iters):
-        optimizer.zero_grad()
-        outputs = model(X).squeeze()
-        loss = criterion(outputs, y)
-
-        if any(param.requires_grad for param in model.parameters()):
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Simple training loop (no early stopping implemented for simplicity)
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device).unsqueeze(1)
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
             loss.backward()
-        else:
-            logging.warning("Model parameters are frozen. Skipping backpropagation.")
+            optimizer.step()
+            running_loss += loss.item() * X_batch.size(0)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        
+        # Optionally evaluate on validation set
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device).unsqueeze(1)
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                val_loss += loss.item() * X_batch.size(0)
+        val_loss /= len(val_loader.dataset)
+        logging.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+    
+    # After training, evaluate on test set
+    model.eval()
+    predictions = []
+    with torch.no_grad():
+        for X_batch in test_loader:
+            X_batch = X_batch[0].to(device)
+            outputs = model(X_batch)
+            predictions.append(outputs.cpu().numpy())
+    y_pred = np.concatenate(predictions, axis=0).flatten()
+    return y_pred
 
-        optimizer.step()
-
-        if initial_loss is None:
-            initial_loss = loss.item()
-
-        if loss.item() < loss_threshold * initial_loss:
-            logging.info("Sanity check passed.")
-            return True
-
-    logging.info("Sanity check failed.")
-    return False
-
+# -----------------------------
+# Iterative Deep Model Evaluation Function
+# -----------------------------
+def run_multiple_iterations_deep(X, y, model_factory, n_iterations=20,
+                                 train_size=0.6, val_size=0.2, test_size=0.2,
+                                 random_state=42, metric_fn=get_regression_metrics,
+                                 training_params=None, device="cpu"):
+    """
+    Runs multiple random splits and trains a PyTorch deep learning model.
+    
+    Parameters:
+        X, y : array-like (features and targets)
+        model_factory : Callable that returns a new PyTorch model instance.
+        n_iterations : number of iterations.
+        train_size, val_size, test_size : fractions summing to 1.0.
+        random_state : seed for reproducibility.
+        metric_fn : function to compute regression metrics.
+        training_params : dict with training parameters (epochs, batch_size, learning_rate).
+        device : 'cpu' or 'cuda'.
+    
+    Returns:
+        A CVResults object aggregating the metrics.
+    """
+    if training_params is None:
+        training_params = {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3}
+    
+    metrics_collection = {"DeepModel": {}}
+    
+    for i in range(n_iterations):
+        seed = random_state + i if random_state is not None else None
+        X_train, y_train, X_val, y_val, X_test, y_test = train_val_test_split(
+            X, y, train_size, val_size, test_size, random_state=seed
+        )
+        # For deep models, we use train and validation separately.
+        y_pred = train_deep_model_simple(X_train, y_train, X_val, y_val, X_test,
+                                         model_factory, training_params, device=device)
+        metrics = metric_fn(y_test, y_pred)
+        for metric_name, value in metrics.items():
+            if metric_name not in metrics_collection["DeepModel"]:
+                metrics_collection["DeepModel"][metric_name] = []
+            metrics_collection["DeepModel"][metric_name].append(value)
+    
+    # Compute mean and std for each metric.
+    results_summary = {}
+    for model_name, metric_lists in metrics_collection.items():
+        mean_metrics = {m: np.mean(vals) for m, vals in metric_lists.items()}
+        std_metrics = {m: np.std(vals) for m, vals in metric_lists.items()}
+        results_summary[model_name] = {"mean": mean_metrics, "std": std_metrics}
+    
+    return CVResults(results_summary)
 
 def create_dataset(X: pd.DataFrame, y: pd.Series) -> TensorDataset:
     if X.empty or y.empty:
@@ -184,30 +292,6 @@ def create_dataloader(
 ) -> DataLoader:
     dataset = create_dataset(X, y)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-
-def filter_dataset_columns(df, gene_mapping):
-    """
-    Filter the DataFrame columns so that only gene expression columns present
-    in the gene_mapping are retained, along with the last three columns which
-    are assumed to be 'viability', 'cell_mfc_name', and 'pert_dose'.
-
-    Args:
-        df (pd.DataFrame): The input DataFrame containing gene expression data and extra columns.
-        gene_mapping (dict): A dictionary mapping gene symbols to IDs.
-
-    Returns:
-        pd.DataFrame: The filtered DataFrame.
-    """
-    if df.shape[1] < 3:
-        raise ValueError(
-            "DataFrame does not have at least three extra columns to preserve."
-        )
-    gene_cols = df.columns[:-3]  # All except the last three columns
-    extra_cols = df.columns[-3:]  # The last three columns
-    filtered_gene_cols = [col for col in gene_cols if col in gene_mapping]
-    new_columns = filtered_gene_cols + list(extra_cols)
-    filtered_df = df[new_columns].copy()
-    return filtered_df
 
 def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
     """

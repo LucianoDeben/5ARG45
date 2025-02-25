@@ -1,11 +1,12 @@
+from collections import defaultdict
 import os
 import logging
+import random
 import h5py
 import numpy as np
 import pandas as pd
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import scale, minmax_scale, robust_scale
-from tf_inference import TFInferenceRunner
 import torch
 from torch.utils.data import Dataset
 from typing import Dict, Optional, Union, List, Tuple, Callable
@@ -55,8 +56,6 @@ class PerturbationDataset(Dataset):
             )
         )
         
-        
-
         # Load all perturbation data + metadata
         self.pert_data, self.pert_metadata, self.pert_ids, _ = self._load_h5(
             perturbations_file,
@@ -266,8 +265,6 @@ class LINCSDataset(Dataset):
         normalize (str or None): "min-max", "z-score", or None.
         feature_space (Union[str, List[str]]): Allowed values are "landmark", "best inferred", "inferred". 
                                               Use "all" (or ["all"]) for all genes.
-        transform (Callable, optional): Optional function to apply sample-level transformations.
-        precomputed_params (dict, optional): Precomputed normalization parameters.
         nrows (int, optional): If specified, only the first nrows rows are loaded from the dataset.
     """
     def __init__(
@@ -275,69 +272,57 @@ class LINCSDataset(Dataset):
         gctx_path: str, 
         normalize: Optional[str] = None,
         feature_space: Union[str, List[str]] = "landmark",
-        transform: Optional[Callable] = None,
-        precomputed_params: Optional[Dict] = None,
         nrows: Optional[int] = None
     ):
         self.gctx_path = gctx_path
         self.normalize = normalize
         self.feature_space = feature_space
-        self.transform = transform
-        self.precomputed_params = precomputed_params
         self._nrows = nrows
 
-        # Load data from the HDF5 file
         with h5py.File(self.gctx_path, "r") as f:
-            # Get the total number of rows in the dataset
-            full_nrows = f["0/DATA/0/matrix"].shape[0]
-            # Determine how many rows to load (nrows if specified, otherwise full dataset)
+            # 1. Load row IDs and infer nrows
+            row_ids = f["0/META/ROW"]["id"][:]
+            full_nrows = row_ids.shape[0]
             load_nrows = min(self._nrows, full_nrows) if self._nrows is not None else full_nrows
-
-            # Load only the specified rows for expression data
-            self.X = f["0/DATA/0/matrix"][:load_nrows, :].astype(np.float64)
-            if self.X.size == 0:
-                raise ValueError("No data found in the .gctx file at '0/DATA/0/matrix'.")
-
-            # Load only the specified rows for viability and row IDs
-            viability_data = f["0/META/ROW"]["viability"][:load_nrows]
-            self.y = self._decode_viability(viability_data)
-            row_ids = f["0/META/ROW"]["id"][:load_nrows]
-            self._row_ids = self._decode_ids(row_ids)
-
-            # Load only the specified rows for SMILES strings
-            self.smiles = f["0/META/ROW"]["canonical_smiles"][:load_nrows].astype(str)
-
-            # Load row metadata for the specified rows
-            meta_row_grp = f["0/META/ROW"]
-            row_dict = {key: meta_row_grp[key][:load_nrows].astype(str) for key in meta_row_grp.keys()}
-            self._row_metadata = pd.DataFrame(row_dict)
-            self._row_metadata.index = np.arange(load_nrows)
-
-            # Load full column metadata (not affected by nrows)
+            self._row_ids = self._decode_ids(row_ids[:load_nrows])
+                        
+            # Load full column metadata
             meta_col_grp = f["0/META/COL"]
             col_dict = {key: meta_col_grp[key][:].astype(str) for key in meta_col_grp.keys()}
             self._col_metadata = pd.DataFrame(col_dict)
-            self._col_metadata.index = np.arange(self._col_metadata.shape[0])
+            
+            # Load only the needed rows of the metadata
+            meta_row_grp = f["0/META/ROW"]
+            row_dict = {key: meta_row_grp[key][:load_nrows].astype(str) for key in meta_row_grp.keys()}
+            self._row_metadata = pd.DataFrame(row_dict, index=self._row_ids)
+            
+            # Select genes based on feature_space
+            selected_genes = self._select_genes(self._col_metadata, self.feature_space)
+            self._selected_gene_indices = selected_genes.index.to_numpy()
+            logging.info(f"Selected {len(self._selected_gene_indices)} genes using feature_space '{self.feature_space}'.")
+            
+            # 2. Load column IDs
+            col_ids = f["0/META/COL"]["id"][:]
+            final_col_ids = [col_ids[i].decode("utf-8") for i in self._selected_gene_indices]
+            self._col_ids = final_col_ids
+                        
+            # Now load expression data for only load_nrows rows
+            self.X = f["0/DATA/0/matrix"][:load_nrows, self._selected_gene_indices].astype(np.float64)
+            if self.X.size == 0:
+                raise ValueError("No data found in the .gctx file at '0/DATA/0/matrix'.")
+            
+            # Load viability and row ids using load_nrows
+            viability_data = f["0/META/ROW"]["viability"][:load_nrows]
+            self.y = self._decode_viability(viability_data)
 
-        # Set the actual number of rows loaded
         self._nrows = load_nrows
-
+        
         # Apply normalization if specified
         if self.normalize is not None:
             if self.normalize == "z-score":
                 self.X = scale(self.X, copy=True)
             elif self.normalize == "min-max":
                 self.X = minmax_scale(self.X, copy=True)
-
-        # Select genes based on feature_space
-        selected_genes = self._select_genes(self._col_metadata, self.feature_space)
-        self._selected_gene_indices = selected_genes.index.to_numpy()
-        logging.info(f"Selected {len(self._selected_gene_indices)} genes using feature_space '{self.feature_space}'.")
-        total_genes = self.X.shape[1]
-        if total_genes < len(self._selected_gene_indices):
-            raise ValueError("Mismatch: Expression matrix has fewer columns than selected genes.")
-        self.X = self.X[:, self._selected_gene_indices]
-        self._col_ids = self._col_metadata.iloc[self._selected_gene_indices]["id"].tolist()
 
     def _decode_viability(self, viability_data) -> np.ndarray:
         try:
@@ -370,23 +355,7 @@ class LINCSDataset(Dataset):
     def get_expression_matrix(self) -> np.ndarray:
         return self.X
 
-    def infer_tf_activities(self, net: pd.DataFrame, runner: TFInferenceRunner):
-        """
-        Infers transcription factor activities using the provided runner.
-
-        Parameters:
-            net (pd.DataFrame): Network data for TF inference.
-            runner (TFInferenceRunner): Runner object that implements the TF inference logic.
-                                        Must have a `run` method that accepts (X, net, row_ids, col_ids)
-                                        and returns the inferred activities.
-
-        Returns:
-            The output of the runner's `run` method.
-        """
-        X = self.get_expression_matrix()
-        return runner.run(X, net, self._row_ids, self._col_ids)
-
-    def to_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
+    def get_numpy(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Returns the expression matrix and viability scores as NumPy arrays.
 
@@ -395,6 +364,16 @@ class LINCSDataset(Dataset):
                                         Modifications to these arrays will not affect the internal data.
         """
         return self.X.copy(), self.y.copy()
+    
+    def get_pandas(self) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Returns the expression matrix and viability scores as pandas DataFrames.
+
+        Returns:
+            Tuple[pd.DataFrame, pd.Series]: Copies of the expression matrix (X) and viability scores (y).
+                                        Modifications to these DataFrames will not affect the internal data.
+        """
+        return pd.DataFrame(self.X.copy(), columns=self._col_ids, index=self._row_ids), pd.Series(self.y.copy(), name="viability")
 
     def get_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -433,21 +412,7 @@ class LINCSDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         sample = self.X[idx, :]
         label = self.y[idx]
-        if self.transform is not None:
-            sample = self.transform(sample)
         return torch.tensor(sample), torch.tensor(label, dtype=torch.float32)
-
-    def close(self) -> None:
-        pass
-
-    def __del__(self) -> None:
-        self.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
 
 
         
