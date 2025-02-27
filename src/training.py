@@ -1,6 +1,6 @@
 import logging
-import torch
 from torch.cuda.amp import GradScaler, autocast
+import torch
 from tqdm import tqdm
 
 # Configure logging

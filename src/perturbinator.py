@@ -526,7 +526,7 @@ if __name__ == "__main__":
     from deepchem.feat.smiles_tokenizer import SmilesTokenizer
     from torch.utils.data import DataLoader, random_split
 
-    from config import init_wandb
+    from configs.config_data_sets import init_wandb
     from data_sets import PerturbationDataset
     from evaluation import evaluate_multimodal_model
     from perturbinator import Perturbinator

@@ -1,11 +1,14 @@
 import logging
 import os
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import networkx as nx
-import networkx.algorithms.components.connected as nxacc
-import networkx.algorithms.dag as nxadag
+import numpy as np
 import pandas as pd
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.model_selection import GroupKFold, GroupShuffleSplit, ShuffleSplit, StratifiedGroupKFold, StratifiedShuffleSplit, train_test_split
+from data_sets import LINCSDataset
+from metrics import get_regression_metrics
+from results import CVResults
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -48,118 +51,183 @@ def load_config(config_path: str) -> Optional[Dict[str, Any]]:
 
     return config
 
-
-def load_sampled_data(
-    file_path: str,
-    sample_size: Optional[int] = None,
-    use_chunks: bool = False,
-    chunk_size: Optional[int] = None,
-) -> pd.DataFrame:
+def run_multiple_iterations_models(X, y, models, n_iterations=20,
+                                   train_size=0.6, val_size=0.2, test_size=0.2,
+                                   random_state=42, metric_fn=get_regression_metrics):
     """
-    Load a dataset from a CSV file with optional sampling and chunked loading.
-
+    Runs multiple random splits and trains each model.
+    
     Parameters:
-        file_path (str): Path to the CSV file.
-        sample_size (Optional[int]): Number of rows to sample. If None, loads the entire file.
-        use_chunks (bool): Whether to use chunked loading for large files.
-        chunk_size (Optional[int]): Size of chunks when using chunked loading.
-
+        X, y : array-like (features and targets)
+        models : dict of {model_name: model_factory}
+                 model_factory is a callable that returns a fresh model instance.
+        n_iterations : number of random subsampling iterations.
+        train_size, val_size, test_size : fractions that sum to 1.0.
+        random_state : seed for reproducibility.
+        metric_fn : function to compute regression metrics.
+    
     Returns:
-        pd.DataFrame: The loaded dataset, potentially sampled, with reset indices if sampled.
-
-    Note:
-        - When using chunked loading, `chunk_size` must be provided.
-        - In the non-chunked branch, if `sample_size` is provided, a random sample of `sample_size`
-          rows is taken from the entire file.
+        A CVResults object aggregating the mean and std of each metric for each model.
     """
-    if use_chunks:
-        if chunk_size is None:
-            raise ValueError("chunk_size must be provided when use_chunks is True")
+    # Initialize an empty dictionary to collect metric lists per model.
+    metrics_collection = {model_name: {} for model_name in models.keys()}
+    
+    for i in range(n_iterations):
+        seed = random_state + i if random_state is not None else None
+        X_train, y_train, X_val, y_val, X_test, y_test = train_val_test_split(
+            X, y, train_size, val_size, test_size, random_state=seed
+        )
+        # For simple ML models, combine train and validation
+        X_train_combined = np.concatenate([X_train, X_val], axis=0)
+        y_train_combined = np.concatenate([y_train, y_val], axis=0)
+        
+        for model_name, model_factory in models.items():
+            # Instantiate a fresh model instance using the factory callable.
+            current_model = model_factory()
+            current_model.fit(X_train_combined, y_train_combined)
+            y_pred = current_model.predict(X_test)
+            metrics = metric_fn(y_test, y_pred)
+            
+            # Update metrics_collection dynamically based on the keys returned by metric_fn.
+            for metric_name, value in metrics.items():
+                if metric_name not in metrics_collection[model_name]:
+                    metrics_collection[model_name][metric_name] = []
+                metrics_collection[model_name][metric_name].append(value)
+    
+    # Compute mean and std for each metric per model.
+    results_summary = {}
+    for model_name, metric_lists in metrics_collection.items():
+        mean_metrics = {m: np.mean(vals) for m, vals in metric_lists.items()}
+        std_metrics = {m: np.std(vals) for m, vals in metric_lists.items()}
+        results_summary[model_name] = {"mean": mean_metrics, "std": std_metrics}
+    
+    return CVResults(results_summary)
 
-        chunks = []
-        num_samples_collected = 0
-        # Iterate through the file in chunks
-        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            # If a sample size is defined, check if we have already collected enough rows.
-            if sample_size is not None and num_samples_collected >= sample_size:
-                break
-
-            if sample_size is not None:
-                # Determine how many rows to sample from this chunk
-                n_to_sample = min(sample_size - num_samples_collected, len(chunk))
-                sampled_chunk = chunk.sample(n=n_to_sample, random_state=42)
-            else:
-                sampled_chunk = chunk
-
-            chunks.append(sampled_chunk)
-            num_samples_collected += len(sampled_chunk)
-
-        sampled_data = pd.concat(chunks, axis=0, ignore_index=True)
-
-    else:
-        # Load the entire dataset at once
-        full_data = pd.read_csv(file_path)
-        if sample_size is not None:
-            sampled_data = full_data.sample(n=sample_size, random_state=42).reset_index(
-                drop=True
-            )
-        else:
-            sampled_data = full_data
-
-    return sampled_data
-
-
-def sanity_check(
-    model: nn.Module,
-    loader: torch.utils.data.DataLoader,
-    device: Union[str, torch.device],
-    max_iters: int = 100,
-    lr: float = 1e-3,
-    loss_threshold: float = 0.1,
-) -> bool:
+def train_deep_model_simple(X_train, y_train, X_val, y_val, X_test, 
+                            model_factory, training_params, device="cpu"):
     """
-    Perform a sanity check by training the model for a few iterations and checking if the loss decreases.
-
+    Trains a PyTorch deep learning model using a simple training loop.
+    Converts input arrays into DataLoaders, trains for a fixed number of epochs,
+    and returns predictions on X_test.
+    
     Args:
-        model (nn.Module): The PyTorch model to check.
-        loader (torch.utils.data.DataLoader): DataLoader for loading a batch of data.
-        device (Union[str, torch.device]): The device to run the model on.
-        max_iters (int): Number of training iterations for the sanity check.
-        lr (float): Learning rate for the optimizer.
-        loss_threshold (float): Fraction of initial loss to compare final loss against.
-
+        X_train, y_train, X_val, y_val, X_test: NumPy arrays.
+        model_factory: Callable that returns a new PyTorch model instance.
+        training_params: Dict with keys: epochs, batch_size, learning_rate.
+        device: 'cpu' or 'cuda'.
+    
     Returns:
-        bool: True if the loss reduces significantly, False otherwise.
+        y_pred: Numpy array of predictions on X_test.
     """
-    model.train()
-    X, y = next(iter(loader))
-    X, y = X.to(device), y.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # Create TensorDatasets and DataLoaders for training and validation
+    batch_size = training_params.get("batch_size", 32)
+    epochs = training_params.get("epochs", 20)
+    learning_rate = training_params.get("learning_rate", 1e-3)
+    
+    train_dataset = TensorDataset(torch.from_numpy(X_train).float(),
+                                  torch.from_numpy(y_train).float())
+    val_dataset = TensorDataset(torch.from_numpy(X_val).float(),
+                                torch.from_numpy(y_val).float())
+    test_dataset = TensorDataset(torch.from_numpy(X_test).float())
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    # Instantiate the model
+    model = model_factory().to(device)
+    
+    # Define loss and optimizer
     criterion = nn.MSELoss()
-
-    initial_loss = None
-    for i in range(max_iters):
-        optimizer.zero_grad()
-        outputs = model(X).squeeze()
-        loss = criterion(outputs, y)
-
-        if any(param.requires_grad for param in model.parameters()):
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Simple training loop (no early stopping implemented for simplicity)
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device).unsqueeze(1)
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
             loss.backward()
-        else:
-            logging.warning("Model parameters are frozen. Skipping backpropagation.")
+            optimizer.step()
+            running_loss += loss.item() * X_batch.size(0)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        
+        # Optionally evaluate on validation set
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device).unsqueeze(1)
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                val_loss += loss.item() * X_batch.size(0)
+        val_loss /= len(val_loader.dataset)
+        logging.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+    
+    # After training, evaluate on test set
+    model.eval()
+    predictions = []
+    with torch.no_grad():
+        for X_batch in test_loader:
+            X_batch = X_batch[0].to(device)
+            outputs = model(X_batch)
+            predictions.append(outputs.cpu().numpy())
+    y_pred = np.concatenate(predictions, axis=0).flatten()
+    return y_pred
 
-        optimizer.step()
-
-        if initial_loss is None:
-            initial_loss = loss.item()
-
-        if loss.item() < loss_threshold * initial_loss:
-            logging.info("Sanity check passed.")
-            return True
-
-    logging.info("Sanity check failed.")
-    return False
-
+# -----------------------------
+# Iterative Deep Model Evaluation Function
+# -----------------------------
+def run_multiple_iterations_deep(X, y, model_factory, n_iterations=20,
+                                 train_size=0.6, val_size=0.2, test_size=0.2,
+                                 random_state=42, metric_fn=get_regression_metrics,
+                                 training_params=None, device="cpu"):
+    """
+    Runs multiple random splits and trains a PyTorch deep learning model.
+    
+    Parameters:
+        X, y : array-like (features and targets)
+        model_factory : Callable that returns a new PyTorch model instance.
+        n_iterations : number of iterations.
+        train_size, val_size, test_size : fractions summing to 1.0.
+        random_state : seed for reproducibility.
+        metric_fn : function to compute regression metrics.
+        training_params : dict with training parameters (epochs, batch_size, learning_rate).
+        device : 'cpu' or 'cuda'.
+    
+    Returns:
+        A CVResults object aggregating the metrics.
+    """
+    if training_params is None:
+        training_params = {"epochs": 20, "batch_size": 32, "learning_rate": 1e-3}
+    
+    metrics_collection = {"DeepModel": {}}
+    
+    for i in range(n_iterations):
+        seed = random_state + i if random_state is not None else None
+        X_train, y_train, X_val, y_val, X_test, y_test = train_val_test_split(
+            X, y, train_size, val_size, test_size, random_state=seed
+        )
+        # For deep models, we use train and validation separately.
+        y_pred = train_deep_model_simple(X_train, y_train, X_val, y_val, X_test,
+                                         model_factory, training_params, device=device)
+        metrics = metric_fn(y_test, y_pred)
+        for metric_name, value in metrics.items():
+            if metric_name not in metrics_collection["DeepModel"]:
+                metrics_collection["DeepModel"][metric_name] = []
+            metrics_collection["DeepModel"][metric_name].append(value)
+    
+    # Compute mean and std for each metric.
+    results_summary = {}
+    for model_name, metric_lists in metrics_collection.items():
+        mean_metrics = {m: np.mean(vals) for m, vals in metric_lists.items()}
+        std_metrics = {m: np.std(vals) for m, vals in metric_lists.items()}
+        results_summary[model_name] = {"mean": mean_metrics, "std": std_metrics}
+    
+    return CVResults(results_summary)
 
 def create_dataset(X: pd.DataFrame, y: pd.Series) -> TensorDataset:
     if X.empty or y.empty:
@@ -182,258 +250,176 @@ def create_dataloader(
     dataset = create_dataset(X, y)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
-
-def load_ontology(file_name, gene2id_mapping):
+def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
     """
-    Load the ontology from a file and construct a directed graph with gene annotations.
-
-    The file is expected to have lines formatted with three tokens. If the third token is "default",
-    then the line defines an edge (parent->child) in the ontology graph. Otherwise, the line defines
-    a gene annotation: the first token is the GO term and the second token is the gene symbol.
-    Only genes present in `gene2id_mapping` will be considered.
-
-    For each term in the ontology, this function computes the total number of genes that are either
-    directly annotated to that term or inherited from its descendant terms. Terms with no genes are
-    logged and skipped.
-
-    Additionally, the function checks that the ontology has a single root and that the graph is
-    connected.
+    Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
 
     Args:
-        file_name (str): Path to the ontology file.
-        gene2id_mapping (dict): Mapping from gene symbols to gene IDs.
+        smiles_df (pd.DataFrame): DataFrame containing 'pert_id' and 'canonical_smiles' columns.
 
     Returns:
-        tuple: A tuple (dG, root, term_size_map, term_direct_gene_map) where:
-            - dG is the filtered directed graph (nx.DiGraph) representing the ontology.
-            - root is the single root node of the ontology.
-            - term_size_map is a dict mapping each term to the number of genes (after propagation)
-              associated with it.
-            - term_direct_gene_map is a dict mapping each term to the set of gene IDs directly annotated.
-
-    Raises:
-        ValueError: If the ontology has more than one root or is not connected.
+        Dict[str, str]: Dictionary mapping pert_id to canonical SMILES strings.
     """
-    dG = nx.DiGraph()
-    term_direct_gene_map = {}
-    term_size_map = {}
-    gene_set = set()
-
-    # Read and parse the ontology file
-    with open(file_name, "r") as file_handle:
-        for line in file_handle:
-            tokens = line.rstrip().split()
-            if len(tokens) < 3:
-                continue  # Skip malformed lines
-            # If token[2] is "default", this is an edge definition
-            if tokens[2] == "default":
-                dG.add_edge(tokens[0], tokens[1])
-            else:
-                # Otherwise, this is a gene annotation
-                gene_symbol = tokens[1]
-                if gene_symbol not in gene2id_mapping:
-                    continue
-                term = tokens[0]
-                if term not in term_direct_gene_map:
-                    term_direct_gene_map[term] = set()
-                term_direct_gene_map[term].add(gene2id_mapping[gene_symbol])
-                gene_set.add(gene_symbol)
-
-    logging.info("There are %d genes in the ontology annotations.", len(gene_set))
-
-    # Create a list to store terms that will be removed due to having no gene annotations.
-    terms_to_remove = []
-
-    # Evaluate each term in the graph
-    for term in list(dG.nodes()):
-        # Start with genes directly annotated to the term (if any)
-        term_gene_set = set()
-        if term in term_direct_gene_map:
-            term_gene_set = term_direct_gene_map[term].copy()
-
-        # Propagate genes from descendant terms
-        descendants = nxadag.descendants(dG, term)
-        for child in descendants:
-            if child in term_direct_gene_map:
-                term_gene_set |= term_direct_gene_map[child]
-
-        if len(term_gene_set) == 0:
-            logging.warning("Term %s has no genes and will be removed.", term)
-            terms_to_remove.append(term)
-        else:
-            term_size_map[term] = len(term_gene_set)
-
-    # Remove empty terms from the graph and mappings
-    for term in terms_to_remove:
-        if term in dG:
-            dG.remove_node(term)
-        if term in term_direct_gene_map:
-            del term_direct_gene_map[term]
-        if term in term_size_map:
-            del term_size_map[term]
-
-    # Identify roots (nodes with in_degree==0)
-    leaves = [n for n in dG.nodes() if dG.in_degree(n) == 0]
-    if not leaves:
-        raise ValueError("No root found in the ontology.")
-    logging.info("There are %d roots.", len(leaves))
-    if len(leaves) > 1:
+    # Check if needed columns exist otherwise raise error
+    if (
+        "pert_id" not in smiles_df.columns
+        or "canonical_smiles" not in smiles_df.columns
+    ):
         raise ValueError(
-            "Multiple roots detected in ontology. Please ensure only one root exists."
+            "The DataFrame must contain 'pert_id' and 'canonical_smiles' columns."
         )
 
-    root = leaves[0]
+    # Ensure no leading/trailing spaces
+    smiles_df["pert_id"] = smiles_df["pert_id"].str.strip()
+    smiles_df["canonical_smiles"] = smiles_df["canonical_smiles"].str.strip()
 
-    # Check connectivity
-    undirected_G = dG.to_undirected()
-    connected_components = list(nxacc.connected_components(undirected_G))
-    logging.info(
-        "There are %d connected components in the ontology.", len(connected_components)
+    # Remove duplicates, keeping the first occurrence
+    smiles_df = smiles_df.drop_duplicates(subset="pert_id", keep="first")
+
+    # Check for missing values and handle them
+    if smiles_df["canonical_smiles"].isnull().any():
+        smiles_df.loc[smiles_df["canonical_smiles"].isnull(), "canonical_smiles"] = (
+            "UNKNOWN"
+        )
+
+    # Create the mapping dictionary
+    smiles_dict = dict(zip(smiles_df["pert_id"], smiles_df["canonical_smiles"]))
+
+    # Validate the dictionary
+    if not smiles_dict:
+        raise ValueError(
+            "The DataFrame must contain non-empty 'pert_id' and 'canonical_smiles' columns."
+        )
+
+    for pert_id, smiles in smiles_dict.items():
+        if not isinstance(pert_id, str) or not isinstance(smiles, str):
+            raise TypeError("The pert_id and canonical_smiles must be strings.")
+        if pd.isna(smiles):
+            raise ValueError("The canonical_smiles cannot be NaN.")
+
+    return smiles_dict
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def sampled_split(
+    dataset, 
+    test_size: float = 0.5, 
+    random_state: int = 42, 
+    stratify: bool = False, 
+    stratify_col: Optional[str] = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Randomly splits the dataset indices into training and test sets using a specified test_size.
+    
+    If stratify is True and stratify_col is provided, the split is stratified on that metadata column.
+    
+    Args:
+        dataset: An instance that implements get_row_metadata() returning a pandas DataFrame.
+        test_size (float): Proportion of the dataset to include in the test split.
+        random_state (int): Random seed.
+        stratify (bool): Whether to stratify the split.
+        stratify_col (str, optional): Column name in row metadata to use for stratification.
+        
+    Returns:
+        train_idx (np.ndarray): Array of training indices.
+        test_idx (np.ndarray): Array of test indices.
+    """
+    indices = np.arange(len(dataset))
+    row_metadata = dataset.get_row_metadata()
+    
+    if stratify:
+        if stratify_col is None or stratify_col not in row_metadata.columns:
+            raise ValueError("Stratification enabled but a valid stratify_col was not provided.")
+        stratify_values = row_metadata[stratify_col].values
+    else:
+        stratify_values = None
+        
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify_values
     )
-    if len(connected_components) > 1:
-        raise ValueError(
-            "Ontology graph is not connected. Please connect the components."
-        )
+    logging.info(f"Custom random split: {len(train_idx)} train samples, {len(test_idx)} test samples.")
+    return train_idx, test_idx
 
-    logging.info("Ontology loaded successfully with %d terms.", len(dG.nodes()))
-    return dG, root, term_size_map, term_direct_gene_map
-
-
-def load_mapping(mapping_file):
-
-    mapping = {}
-
-    file_handle = open(mapping_file)
-
-    for line in file_handle:
-        line = line.rstrip().split()
-        mapping[line[1]] = int(line[0])
-
-    file_handle.close()
-
-    return mapping
-
-
-def filter_dataset_columns(df, gene_mapping):
+def stratified_split(
+    dataset, 
+    stratify_col: str, 
+    test_size: float = 0.5, 
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Filter the DataFrame columns so that only gene expression columns present
-    in the gene_mapping are retained, along with the last three columns which
-    are assumed to be 'viability', 'cell_mfc_name', and 'pert_dose'.
-
+    Splits the dataset randomly into train and test sets while preserving the distribution
+    of the values in stratify_col.
+    
     Args:
-        df (pd.DataFrame): The input DataFrame containing gene expression data and extra columns.
-        gene_mapping (dict): A dictionary mapping gene symbols to IDs.
-
+        dataset: An object that implements get_row_metadata() returning a pandas DataFrame.
+        stratify_col (str): Column name in row metadata to use for stratification (e.g. "cell_mfc_name").
+        test_size (float): Fraction of the dataset to use as the test set.
+        random_state (int): Random seed for reproducibility.
+        
     Returns:
-        pd.DataFrame: The filtered DataFrame.
+        train_idx (np.ndarray): Array of training indices.
+        test_idx (np.ndarray): Array of test indices.
     """
-    if df.shape[1] < 3:
-        raise ValueError(
-            "DataFrame does not have at least three extra columns to preserve."
-        )
-    gene_cols = df.columns[:-3]  # All except the last three columns
-    extra_cols = df.columns[-3:]  # The last three columns
-    filtered_gene_cols = [col for col in gene_cols if col in gene_mapping]
-    new_columns = filtered_gene_cols + list(extra_cols)
-    filtered_df = df[new_columns].copy()
-    return filtered_df
+    row_metadata: pd.DataFrame = dataset.get_row_metadata()
+    if stratify_col not in row_metadata.columns:
+        raise ValueError(f"Stratify column '{stratify_col}' not found in row metadata.")
+    
+    stratify_values = row_metadata[stratify_col].values
+    indices = np.arange(len(dataset))
+    
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify_values
+    )
+    
+    logging.info(f"Stratified split: {len(train_idx)} training samples and {len(test_idx)} test samples.")
+    return train_idx, test_idx
 
-
-def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
+def grouped_split(
+    dataset, 
+    group_col: str, 
+    test_size: float = 0.5, 
+    random_state: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
-
+    Splits the dataset into train and test sets such that entire groups (defined by group_col)
+    are assigned exclusively to either train or test.
+    
     Args:
-        smiles_df (pd.DataFrame): DataFrame containing 'pert_id' and 'canonical_smiles' columns.
-
+        dataset: An object that implements get_row_metadata() returning a pandas DataFrame.
+        group_col (str): Column name in row metadata representing groups (e.g. "cell_mfc_name").
+        test_size (float): Fraction of the unique groups to assign to the test set.
+        random_state (int): Random seed for reproducibility.
+        
     Returns:
-        Dict[str, str]: Dictionary mapping pert_id to canonical SMILES strings.
+        train_idx (np.ndarray): Array of indices for training.
+        test_idx (np.ndarray): Array of indices for testing.
     """
-    # Check if needed columns exist otherwise raise error
-    if (
-        "pert_id" not in smiles_df.columns
-        or "canonical_smiles" not in smiles_df.columns
-    ):
-        raise ValueError(
-            "The DataFrame must contain 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    # Ensure no leading/trailing spaces
-    smiles_df["pert_id"] = smiles_df["pert_id"].str.strip()
-    smiles_df["canonical_smiles"] = smiles_df["canonical_smiles"].str.strip()
-
-    # Remove duplicates, keeping the first occurrence
-    smiles_df = smiles_df.drop_duplicates(subset="pert_id", keep="first")
-
-    # Check for missing values and handle them
-    if smiles_df["canonical_smiles"].isnull().any():
-        smiles_df.loc[smiles_df["canonical_smiles"].isnull(), "canonical_smiles"] = (
-            "UNKNOWN"
-        )
-
-    # Create the mapping dictionary
-    smiles_dict = dict(zip(smiles_df["pert_id"], smiles_df["canonical_smiles"]))
-
-    # Validate the dictionary
-    if not smiles_dict:
-        raise ValueError(
-            "The DataFrame must contain non-empty 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    for pert_id, smiles in smiles_dict.items():
-        if not isinstance(pert_id, str) or not isinstance(smiles, str):
-            raise TypeError("The pert_id and canonical_smiles must be strings.")
-        if pd.isna(smiles):
-            raise ValueError("The canonical_smiles cannot be NaN.")
-
-    return smiles_dict
-
-
-def create_smiles_dict(smiles_df: pd.DataFrame) -> Dict[str, str]:
-    """
-    Creates and validates a dictionary mapping pert_id to canonical SMILES strings from a DataFrame.
-
-    Args:
-        smiles_df (pd.DataFrame): DataFrame containing 'pert_id' and 'canonical_smiles' columns.
-
-    Returns:
-        Dict[str, str]: Dictionary mapping pert_id to canonical SMILES strings.
-    """
-    # Check if needed columns exist otherwise raise error
-    if (
-        "pert_id" not in smiles_df.columns
-        or "canonical_smiles" not in smiles_df.columns
-    ):
-        raise ValueError(
-            "The DataFrame must contain 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    # Ensure no leading/trailing spaces
-    smiles_df["pert_id"] = smiles_df["pert_id"].str.strip()
-    smiles_df["canonical_smiles"] = smiles_df["canonical_smiles"].str.strip()
-
-    # Remove duplicates, keeping the first occurrence
-    smiles_df = smiles_df.drop_duplicates(subset="pert_id", keep="first")
-
-    # Check for missing values and handle them
-    if smiles_df["canonical_smiles"].isnull().any():
-        smiles_df.loc[smiles_df["canonical_smiles"].isnull(), "canonical_smiles"] = (
-            "UNKNOWN"
-        )
-
-    # Create the mapping dictionary
-    smiles_dict = dict(zip(smiles_df["pert_id"], smiles_df["canonical_smiles"]))
-
-    # Validate the dictionary
-    if not smiles_dict:
-        raise ValueError(
-            "The DataFrame must contain non-empty 'pert_id' and 'canonical_smiles' columns."
-        )
-
-    for pert_id, smiles in smiles_dict.items():
-        if not isinstance(pert_id, str) or not isinstance(smiles, str):
-            raise TypeError("The pert_id and canonical_smiles must be strings.")
-        if pd.isna(smiles):
-            raise ValueError("The canonical_smiles cannot be NaN.")
-
-    return smiles_dict
+    row_metadata: pd.DataFrame = dataset.get_row_metadata()
+    if group_col not in row_metadata.columns:
+        raise ValueError(f"Group column '{group_col}' not found in row metadata.")
+    
+    # Identify unique groups
+    unique_groups = np.unique(row_metadata[group_col].values)
+    
+    # Split groups into train and test groups
+    train_groups, test_groups = train_test_split(
+        unique_groups,
+        test_size=test_size,
+        random_state=random_state
+    )
+    
+    # Get the indices corresponding to each set of groups.
+    indices = np.arange(len(dataset))
+    groups = row_metadata[group_col].values
+    
+    train_idx = indices[np.isin(groups, train_groups)]
+    test_idx = indices[np.isin(groups, test_groups)]
+    
+    logging.info(f"Grouped split: {len(train_idx)} training samples and {len(test_idx)} test samples from {len(unique_groups)} unique groups.")
+    return train_idx, test_idx
