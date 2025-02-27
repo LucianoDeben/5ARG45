@@ -67,12 +67,6 @@ class LINCSCTRPDataProcessor:
                 if col not in row_metadata.columns:
                     raise ValueError(f"Missing required column in row metadata: {col}")
 
-            if self.normalize == "zscore":
-                transcriptomics = (transcriptomics - transcriptomics.mean()) / (
-                    transcriptomics.std() + 1e-8
-                )
-                logger.debug("Applied z-score normalization to transcriptomics data")
-
             transcriptomics.index = row_metadata.index
 
             if self.group_by:
@@ -158,7 +152,7 @@ class LINCSCTRPDataProcessor:
             smiles_column="canonical_smiles",
             target_column="viability",
             metadata_columns=[self.group_by] if self.group_by else None,
-            transforms=None,  # Add transforms if needed
+            transforms=None,
         )
 
     def get_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
