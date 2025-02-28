@@ -1,10 +1,11 @@
+# config/config_utils.py
 import logging
 import uuid
 from typing import Any, Dict, Optional
 
-import wandb
 import yaml
 
+import wandb
 from config.default_config import get_default_config
 
 logger = logging.getLogger(__name__)
@@ -15,10 +16,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
     Load configuration from a YAML file.
 
     Args:
-        config_path: Path to the YAML config file.
+        config_path: Path to the YAML configuration file.
 
     Returns:
-        Dictionary containing the loaded configuration.
+        Dict containing the loaded configuration.
+
+    Raises:
+        FileNotFoundError: If the config file is not found.
+        yaml.YAMLError: If the YAML file is invalid.
     """
     try:
         with open(config_path, "r") as f:
@@ -35,15 +40,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 def validate_config(config: Dict[str, Any]) -> None:
     """
-    Validate the configuration dictionary.
+    Validate the configuration dictionary for required sections and parameters.
 
     Args:
         config: Configuration dictionary to validate.
 
     Raises:
-        ValueError: If validation fails.
+        ValueError: If required sections or parameters are missing or invalid.
     """
-    # Required top-level keys
     required_keys = ["data", "model", "training", "chemical", "experiment"]
     for key in required_keys:
         if key not in config:
@@ -54,13 +58,26 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("Missing 'gctx_file' in data section")
     if config["data"].get("nrows") is not None and config["data"]["nrows"] <= 0:
         raise ValueError("'nrows' must be positive")
-    if config["data"].get("feature_space") not in [
-        None,
-        "landmark",
-        "best inferred",
-        "inferred",
-    ] and not isinstance(config["data"].get("feature_space"), list):
-        raise ValueError("Invalid 'feature_space' value")
+    fs = config["data"].get("feature_space")
+    allowed_fs = {"landmark", "best inferred", "inferred", None}
+    if isinstance(fs, str) and fs not in allowed_fs:
+        raise ValueError(f"Invalid 'feature_space': {fs}. Allowed: {allowed_fs}")
+    elif isinstance(fs, list) and not all(x in allowed_fs - {None} for x in fs):
+        raise ValueError(
+            f"Invalid 'feature_space' list: {fs}. Allowed: {allowed_fs - {None}}"
+        )
+    if config["data"].get("normalize") not in [None, "zscore"]:
+        raise ValueError("Invalid 'normalize' value; must be None or 'zscore'")
+
+    # Model section
+    model_required = ["transcriptomics_input_dim", "chemical_input_dim"]
+    for key in model_required:
+        if key not in config["model"]:
+            raise ValueError(f"Missing required model parameter: {key}")
+    if config["model"]["transcriptomics_input_dim"] <= 0:
+        raise ValueError("'transcriptomics_input_dim' must be positive")
+    if config["model"]["chemical_input_dim"] <= 0:
+        raise ValueError("'chemical_input_dim' must be positive")
 
     # Training section
     if config["training"]["batch_size"] <= 0:
@@ -85,33 +102,40 @@ def validate_config(config: Dict[str, Any]) -> None:
 
 def generate_config_id(config: Dict[str, Any]) -> str:
     """
-    Generate a unique configuration ID and update the config.
+    Generate a unique configuration ID and update the config with a run name.
 
     Args:
-        config: Configuration dictionary to update.
+        config: Configuration dictionary.
 
     Returns:
-        Unique configuration ID.
+        str: Unique configuration ID.
     """
-    config_id = str(uuid.uuid4())[:8]  # Shortened UUID
+    config_id = str(uuid.uuid4())[:8]
     config["experiment"]["run_name"] = config_id
     return config_id
 
 
 def init_wandb(config: Dict[str, Any]) -> None:
     """
-    Initialize Weights & Biases with the configuration.
+    Initialize Weights & Biases (W&B) for experiment tracking if enabled.
 
     Args:
-        config: Configuration dictionary to log.
+        config: Configuration dictionary containing experiment settings.
+
+    Raises:
+        Exception: If W&B initialization fails.
     """
     if config["experiment"]["track"]:
-        wandb.init(
-            project=config["experiment"]["project_name"],
-            name=config["experiment"]["run_name"],
-            config=config,
-        )
-        logger.info(f"Initialized W&B run: {config['experiment']['run_name']}")
+        try:
+            wandb.init(
+                project=config["experiment"]["project_name"],
+                name=config["experiment"]["run_name"],
+                config=config,
+            )
+            logger.info(f"Initialized W&B run: {config['experiment']['run_name']}")
+        except Exception as e:
+            logger.error(f"Failed to initialize W&B: {e}")
+            raise
     else:
         logger.info("W&B tracking disabled")
 
@@ -120,14 +144,14 @@ def merge_configs(
     default_config: Dict[str, Any], custom_config: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Merge a custom configuration with the default configuration.
+    Merge default and custom configurations, preserving nested structures.
 
     Args:
         default_config: Default configuration dictionary.
         custom_config: Custom configuration dictionary to override defaults.
 
     Returns:
-        Merged configuration dictionary.
+        Dict: Merged configuration dictionary.
     """
 
     def deep_merge(d1: Dict, d2: Dict) -> Dict:

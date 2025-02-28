@@ -1,0 +1,249 @@
+# Multimodal Drug Response Prediction Framework
+
+A deep learning framework for predicting cancer cell viability in response to drug treatments by integrating gene expression data (transcriptomics) with chemical drug descriptors.
+
+## Overview
+
+This project implements a multimodal deep learning approach for precision cancer medicine by predicting how cancer cells respond to specific drug treatments. The framework combines:
+
+1. **Transcriptomics Data Processing**: Neural networks to extract biological features from gene expression profiles
+2. **Chemical Structure Processing**: Modules to process drug molecular structures and extract relevant chemical features
+3. **Multimodal Integration**: Methods to fuse biological and chemical data for accurate prediction
+4. **Interpretable Predictions**: Techniques to identify important genes and chemical features driving drug response
+
+## Project Structure
+
+```
+multimodal_drug_response/
+├── data/                  # Data handling modules
+│   ├── adapters.py        # Data format adapters (e.g., GCTX format)
+│   ├── loaders.py         # Dataset/DataLoader implementations
+│   └── preprocessing.py   # Data preprocessing utilities
+├── models/                # Model components
+│   ├── architecture.py    # Model architecture definitions
+│   ├── transcriptomics/   # Transcriptomics processing models
+│   ├── chemical/          # Chemical processing models
+│   ├── integration/       # Feature integration models
+│   └── prediction/        # Prediction models
+├── config/                # Configuration handling
+│   ├── config.py          # Configuration classes and utilities
+│   └── default_config.yaml # Default configuration
+├── training/              # Training pipeline
+│   ├── trainer.py         # Training loop implementation
+│   └── evaluation.py      # Evaluation utilities
+├── utils/                 # Utility functions
+│   ├── logging.py         # Logging utilities
+│   └── visualization.py   # Visualization utilities
+├── main.py                # Main entry point
+├── tests/                 # Unit and integration tests
+├── notebooks/             # Jupyter notebooks for exploration
+├── scripts/               # Utility scripts
+├── requirements.txt       # Dependencies
+├── setup.py               # Package setup
+└── README.md              # This file
+```
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8 or higher
+- CUDA-compatible GPU (recommended for training)
+
+### Setting up the environment
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/multimodal-drug-response.git
+cd multimodal-drug-response
+
+# Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install the package in development mode
+pip install -e .
+```
+
+## Data Preparation
+
+The framework uses two main datasets:
+
+1. **LINCS L1000**: Transcriptomics data showing gene expression changes in response to drug treatments
+2. **CTRP**: Cancer Therapeutics Response Portal containing cell viability measurements
+
+### Data Conversion
+
+We provide a data adapter to convert the raw datasets into the optimized .gctx format:
+
+```bash
+# Convert raw data to GCTX format
+python -m scripts.convert_to_gctx \
+    --expression_file data/raw/X_RNA.bin \
+    --row_metadata_file data/raw/Y.tsv \
+    --compound_info_file data/raw/compoundinfo.csv \
+    --gene_info_file data/raw/geneinfo_beta.txt \
+    --output_file data/processed/LINCS.gctx
+```
+
+## Model Configuration
+
+The framework is highly configurable using YAML configuration files. Example:
+
+```yaml
+# config/my_experiment.yaml
+transcriptomics:
+  input_dim: 12328
+  hidden_dims: [1024, 512, 256]
+  dropout_rate: 0.3
+
+chemical:
+  input_type: fingerprints
+  hidden_dims: [128, 64]
+  dropout_rate: 0.3
+
+fusion:
+  fusion_type: attention
+  hidden_dims: [256, 128]
+
+optimizer:
+  type: adamw
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+training:
+  experiment_name: attention_fusion_experiment
+  num_epochs: 100
+  early_stopping_patience: 10
+  mixed_precision: true
+```
+
+## Training a Model
+
+To train a model with a specific configuration:
+
+```bash
+python -m multimodal_drug_response.main train --config config/my_experiment.yaml
+```
+
+This will:
+
+1. Process the data according to configuration
+2. Create the model architecture
+3. Train for the specified number of epochs
+4. Save checkpoints and training logs
+5. Evaluate on the test set
+
+## Evaluating a Trained Model
+
+To evaluate a previously trained model:
+
+```bash
+python -m multimodal_drug_response.main evaluate \
+    --model checkpoints/my_experiment/best_model.pt \
+    --data data/processed/test_data.csv \
+    --output results/evaluation_results.csv
+```
+
+## Extending the Framework
+
+The modular architecture makes it easy to extend the framework:
+
+### Adding a New Transcriptomics Encoder
+
+Create a new encoder in `models/transcriptomics/` that inherits from `BaseEncoder`:
+
+```python
+from multimodal_drug_response.models.architecture import BaseEncoder
+
+class YourCustomEncoder(BaseEncoder):
+    def __init__(self, input_dim, **kwargs):
+        super().__init__()
+        # Initialize your encoder
+
+    def forward(self, x):
+        # Implement forward pass
+        return encoded_features
+
+    @property
+    def output_dim(self):
+        return your_output_dimension
+```
+
+### Adding a New Fusion Method
+
+Create a new fusion method in `models/integration/` by extending the `FusionModule`:
+
+```python
+from multimodal_drug_response.models.architecture import FusionModule
+
+class YourCustomFusion(FusionModule):
+    def __init__(self, transcriptomics_dim, chemical_dim, **kwargs):
+        super().__init__(transcriptomics_dim, chemical_dim, **kwargs)
+        # Add custom initialization
+
+    def _your_custom_fusion(self, transcriptomics_features, chemical_features):
+        # Implement your fusion logic
+        return fused_features
+```
+
+## API Reference
+
+### ModelFactory
+
+```python
+from multimodal_drug_response.models.architecture import ModelFactory
+
+# Create a model from configuration
+model = ModelFactory.create_model(config)
+```
+
+### Data Processing
+
+```python
+from multimodal_drug_response.data.loaders import LINCSCTRPDataProcessor, create_data_loaders
+
+# Process data
+processor = LINCSCTRPDataProcessor(
+    lincs_file="data/processed/LINCS.gctx",
+    ctrp_file="data/raw/CTRP_viability.csv"
+)
+train_dataset, val_dataset, test_dataset = processor.process()
+
+# Create data loaders
+train_loader, val_loader, test_loader = create_data_loaders(
+    train_dataset, val_dataset, test_dataset, batch_size=32
+)
+```
+
+### Training
+
+```python
+from multimodal_drug_response.training.trainer import TrainerFactory
+
+# Create trainer
+trainer = TrainerFactory.create_trainer(
+    training_config, model, train_loader, val_loader
+)
+
+# Train model
+trained_model = trainer.train(num_epochs=100)
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- The LINCS L1000 dataset provided by the Connectivity Map (CMap) at the Broad Institute
+- The Cancer Therapeutics Response Portal (CTRP) for cancer cell viability data
+- [RDKit](https://www.rdkit.org/) for cheminformatics functionality
+- [PyTorch](https://pytorch.org/) for deep learning implementation

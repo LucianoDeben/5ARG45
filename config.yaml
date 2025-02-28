@@ -1,10 +1,33 @@
+# config.yaml
 data:
   gctx_file: "../data/processed/LINCS2.gctx"
   feature_space: "landmark"
   nrows: 100
 training:
-  epochs: 20
-  batch_size: 64
+  epochs: 10
+  lr: 0.001
+  test_size: 0.2
+  val_size: 0.1
+  random_state: 42
+  batch_size: 32
 experiment:
   project_name: "lincs_ctrp_debug"
-  track: true
+  track: false
+chemical:
+  representation: "fingerprint"
+  fingerprint_size: 1024
+  radius: 2
+model:
+  transcriptomics_input_dim: 978
+  transcriptomics_hidden_dims: [512, 256]
+  transcriptomics_output_dim: 128
+  chemical_input_dim: 1025
+  chemical_hidden_dims: [256, 128]
+  chemical_output_dim: 128
+  fusion_output_dim: 256
+  fusion_strategy: "concat"
+  predictor_hidden_dims: [64, 32]
+  normalize: true
+  dropout: 0.3
+  activation: "relu"
+  use_batch_norm: true
