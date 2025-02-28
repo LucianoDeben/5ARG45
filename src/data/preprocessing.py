@@ -215,6 +215,14 @@ class LINCSCTRPDataProcessor:
         Returns:
             Tuple of (train_data, val_data, test_data), where each is a tuple of (transcriptomics, metadata)
         """
+        # Ensure minimum number of groups in each split
+        unique_groups = row_metadata[self.group_by].unique()
+        if len(unique_groups) < 3:
+            logger.warning(
+                f"Only {len(unique_groups)} unique groups, using random split instead"
+            )
+            return self._random_split(transcriptomics, row_metadata)
+
         indices = np.arange(len(transcriptomics))
 
         # Split into train+val and test, respecting groups

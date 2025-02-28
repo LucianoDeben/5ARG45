@@ -293,6 +293,8 @@ class MultimodalDataset(Dataset):
             transform_transcriptomics=self.transform_transcriptomics,
             transform_molecular=self.transform_molecular,
             mode="pytorch",
+            unimodal_type=self.unimodal_type,  # Add this line
+            sklearn_return_X_y=self.sklearn_return_X_y,
             additional_features=self.additional_features,
         )
 
@@ -306,6 +308,7 @@ class MultimodalDataset(Dataset):
             transform_transcriptomics=self.transform_transcriptomics,
             transform_molecular=self.transform_molecular,
             mode="sklearn",
+            unimodal_type=self.unimodal_type,  # Add this line to preserve unimodal_type
             sklearn_return_X_y=return_X_y,
             additional_features=self.additional_features,
         )

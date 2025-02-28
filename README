@@ -14,33 +14,71 @@ This project implements a multimodal deep learning approach for precision cancer
 ## Project Structure
 
 ```
-multimodal_drug_response/
+src/
 ├── data/                  # Data handling modules
-│   ├── adapters.py        # Data format adapters (e.g., GCTX format)
-│   ├── loaders.py         # Dataset/DataLoader implementations
-│   └── preprocessing.py   # Data preprocessing utilities
+│   ├── init.py        # Initialize the data module
+│   ├── adapters.py        # Data adapters (e.g., LINCSAdapter, LINCSDatasetFactory)
+│   ├── datasets.py        # Dataset classes (e.g., MultimodalDataset, DatasetFactory)
+│   ├── loaders.py         # Data loaders (e.g., GCTXDataLoader)
+│   └── preprocessing.py   # Data preprocessing (e.g., LINCSCTRPDataProcessor)
 ├── models/                # Model components
-│   ├── architecture.py    # Model architecture definitions
+│   ├── init.py        # Initialize the models module
 │   ├── transcriptomics/   # Transcriptomics processing models
+│   │   ├── init.py
+│   │   └── encoder.py     # Transcriptomics encoder architectures (e.g., NNs, CNNs)
 │   ├── chemical/          # Chemical processing models
+│   │   ├── init.py
+│   │   └── encoder.py     # Chemical encoder architectures (e.g., GNNs, SMILES processing)
 │   ├── integration/       # Feature integration models
+│   │   ├── init.py
+│   │   └── fusion.py      # Feature fusion and attention mechanisms
 │   └── prediction/        # Prediction models
+│       ├── init.py
+│       └── predictor.py   # Cell viability prediction models
 ├── config/                # Configuration handling
-│   ├── config.py          # Configuration classes and utilities
-│   └── default_config.yaml # Default configuration
-├── training/              # Training pipeline
-│   ├── trainer.py         # Training loop implementation
-│   └── evaluation.py      # Evaluation utilities
-├── utils/                 # Utility functions
+│   ├── init.py        # Initialize the config module
+│   ├── config_utils.py    # Configuration loading, validation, and merging
+│   └── default_config.py  # Default configuration settings
+├── utils/                 # Utility functions and classes
+│   ├── init.py        # Initialize the utils module
 │   ├── logging.py         # Logging utilities
-│   └── visualization.py   # Visualization utilities
-├── main.py                # Main entry point
+│   └── visualization.py   # Visualization utilities (e.g., for monitoring)
+├── training/              # Training pipeline
+│   ├── init.py        # Initialize the training module
+│   ├── trainer.py         # Training loop implementation
+│   ├── optimization.py    # Optimization strategies
+│   └── callbacks.py       # Training callbacks (e.g., early stopping)
+├── inference/             # Inference pipeline
+│   ├── init.py        # Initialize the inference module
+│   ├── predictor.py       # Inference implementation
+│   └── deployment.py      # Model deployment utilities
+├── evaluation/            # Evaluation utilities
+│   ├── init.py        # Initialize the evaluation module
+│   ├── evaluator.py       # Evaluation implementation
+│   └── validation.py      # Validation utilities
+├── storage/               # Storage module (new addition)
+│   ├── init.py        # Initialize the storage module
+│   └── manager.py         # Storage operations (e.g., StorageManager)
 ├── tests/                 # Unit and integration tests
+│   ├── init.py        # Initialize tests
+│   ├── test_data/         # Tests for data module
+│   ├── test_config/       # Tests for config module
+│   ├── test_models/       # Tests for models module
+│   ├── test_training/     # Tests for training module
+│   ├── test_inference/    # Tests for inference module
+│   ├── test_evaluation/   # Tests for evaluation module
+│   ├── test_storage/      # Tests for storage module
+│   └── test_utils/        # Tests for utils module
 ├── notebooks/             # Jupyter notebooks for exploration
+│   ├── init.py        # Optional: for package-like behavior
+│   └── exploration.ipynb  # Example notebook for data/model exploration
 ├── scripts/               # Utility scripts
-├── requirements.txt       # Dependencies
-├── setup.py               # Package setup
-└── README.md              # This file
+│   ├── init.py        # Optional: for package-like behavior
+│   ├── run_training.py    # Script to run training pipeline
+│   └── evaluate_model.py  # Script to evaluate models
+├── requirements.txt       # Dependencies (e.g., torch, pandas, rdkit, wandb)
+├── setup.py               # Package setup for installation
+└── README.md              # Project documentation (installation, usage, architecture)
 ```
 
 ## Installation
