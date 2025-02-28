@@ -371,24 +371,52 @@ def create_transformations(
             def fingerprint_transform(mol_input):
                 if isinstance(mol_input, dict):
                     smiles_list = mol_input["smiles"]
-                    dosage = mol_input["dosage"].reshape(-1, 1)
+                    dosage = np.array(mol_input["dosage"]).reshape(-1, 1)
+
+                    # Initialize Morgan fingerprint generator
+                    fpgen = AllChem.GetMorganGenerator(
+                        radius=fingerprint_radius,  # radius=2 is equivalent to ECFP4
+                        fpSize=fingerprint_size,
+                    )
 
                     fingerprints = np.zeros((len(smiles_list), fingerprint_size))
                     for i, smiles in enumerate(smiles_list):
                         try:
+                            if not isinstance(smiles, str):
+                                logger.warning(f"Invalid SMILES input: {type(smiles)}")
+                                continue
                             mol = Chem.MolFromSmiles(smiles)
-                            if mol:
-                                fp = AllChem.GetMorganFingerprintAsBitVect(
-                                    mol, fingerprint_radius, nBits=fingerprint_size
+                            if mol is not None:
+                                # Get fingerprint as bit vector
+                                fp = fpgen.GetFingerprint(mol)
+                                # Convert to numpy array
+                                fingerprints[i] = np.frombuffer(
+                                    fp.ToByteArray(), dtype=np.uint8
                                 )
-                                fingerprints[i] = np.array(fp)
+                            else:
+                                logger.warning(f"Could not parse SMILES: {smiles}")
                         except Exception as e:
                             logger.warning(
                                 f"Error generating fingerprint for {smiles}: {e}"
                             )
+                            continue
 
-                    # Combine fingerprints with dosage
-                    return np.hstack([fingerprints, dosage])
+                    # Ensure fingerprints is 2D and dosage is properly shaped
+                    fingerprints = fingerprints.reshape(len(smiles_list), -1)
+                    dosage = dosage.reshape(len(smiles_list), -1)
+
+                    # Combine and ensure output is 2D numpy array
+                    try:
+                        combined = np.hstack([fingerprints, dosage]).astype(np.float32)
+                        if not combined.shape[1] == fingerprint_size + 1:
+                            logger.warning(
+                                f"Unexpected feature dimension: {combined.shape}, "
+                                f"expected ({len(smiles_list)}, {fingerprint_size + 1})"
+                            )
+                        return combined
+                    except Exception as e:
+                        logger.error(f"Error combining features: {e}")
+                        return np.zeros((len(smiles_list), fingerprint_size + 1))
                 else:
                     return mol_input
 
