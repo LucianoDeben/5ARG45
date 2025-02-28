@@ -5,8 +5,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Update the path to your generated .gctx file.
-h5_file = "../data/processed/LINCS2.gctx"
+# Update the path to generated .gctx file.
+h5_file = "../data/processed/LINCS.gctx"
 
 with h5py.File(h5_file, "r") as f:
     # 1. Check that expected groups exist.

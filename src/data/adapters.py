@@ -57,6 +57,7 @@ class LINCSAdapter(DataAdapter):
     def __init__(
         self,
         expression_file: str,
+        matrix_shape: Tuple[int, int],
         row_metadata_file: str,
         compound_info_file: str,
         gene_info_file: str,
@@ -73,6 +74,7 @@ class LINCSAdapter(DataAdapter):
             metadata: Dataset metadata information
         """
         self.expression_file = expression_file
+        self.matrix_shape = matrix_shape
         self.row_metadata_file = row_metadata_file
         self.compound_info_file = compound_info_file
         self.gene_info_file = gene_info_file
@@ -100,7 +102,7 @@ class LINCSAdapter(DataAdapter):
                 self.expression_file, 
                 dtype=np.float64, 
                 mode="r"
-            ).reshape(31567, 12328)
+            ).reshape(self.matrix_shape)
             
             logger.info(f"Gene expression data shape: {self.expression_data.shape}")
             
@@ -139,10 +141,10 @@ class LINCSAdapter(DataAdapter):
         logger.info("Processing data...")
         
         # Validate shapes
-        assert self.expression_data.shape == (31567, 12328), (
-            f"Expected expression data shape (31567, 12328), got {self.expression_data.shape}"
+        assert self.expression_data.shape == self.matrix_shape, (
+            f"Expected expression data shape {self.matrix_shape}, got {self.expression_data.shape}"
         )
-        assert self.row_metadata.shape[0] == 31567, (
+        assert self.row_metadata.shape[0] == self.matrix_shape[0], (
             f"Expected 31567 rows in row metadata, got {self.row_metadata.shape[0]}"
         )
         assert self.expression_data.shape[1] == self.col_metadata.shape[0], (
@@ -150,7 +152,7 @@ class LINCSAdapter(DataAdapter):
             f"{self.col_metadata.shape[0]} (column metadata)"
         )
         
-        # Merge row metadata with compound info
+        # Merge row metadata with compound info on pert_mfc_id
         self.row_metadata = pd.merge(
             self.row_metadata,
             self.compound_info,
@@ -164,7 +166,7 @@ class LINCSAdapter(DataAdapter):
         mask_expr = ~np.any(np.isnan(self.expression_data), axis=1)
         final_mask = mask_metadata & mask_expr
         num_dropped = np.sum(~final_mask)
-        logger.info(f"Dropping {num_dropped} rows due to NaN values.")
+        logger.info(f"Dropping {num_dropped} rows due to NaN values in data or metadata.")
         
         self.row_metadata = self.row_metadata.loc[final_mask].copy()
         self.expression_data = self.expression_data[final_mask, :]
@@ -243,6 +245,7 @@ class LINCSAdapter(DataAdapter):
             f_out.attrs["description"] = self.metadata.description
             f_out.attrs["data_source"] = self.metadata.data_source
             f_out.attrs["creation_date"] = self.metadata.creation_date
+            f_out.attrs["platform"] = self.metadata.platform
             
             if self.metadata.additional_info:
                 for key, value in self.metadata.additional_info.items():
@@ -284,10 +287,11 @@ class LINCSDatasetFactory:
         )
         
         return LINCSAdapter(
-            expression_file=config["expression_file"],
-            row_metadata_file=config["row_metadata_file"],
-            compound_info_file=config["compound_info_file"],
-            gene_info_file=config["gene_info_file"],
+            expression_file=config.get("expression_file", None),
+            matrix_shape= config.get("matrix_shape", (31567, 12328)),
+            row_metadata_file=config.get("row_metadata_file", None),
+            compound_info_file=config.get("compound_info_file", None),
+            gene_info_file=config.get("gene_info_file", None),
             metadata=metadata
         )
     
@@ -310,6 +314,7 @@ if __name__ == "__main__":
     # Configuration
     config = {
         "expression_file": "../data/raw/X_RNA.bin",
+        "matrix_shape": (31567, 12328),
         "row_metadata_file": "../data/processed/Y.tsv",
         "compound_info_file": "../data/raw/compoundinfo.csv",
         "gene_info_file": "../data/raw/LINCS/geneinfo_beta.txt",
