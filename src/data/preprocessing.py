@@ -1,5 +1,4 @@
-"""Data preprocessing utilities for drug response prediction."""
-
+# data/preprocessing.py
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -10,8 +9,9 @@ import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch.utils.data import DataLoader
 
-from data.datasets import MultimodalDrugDataset, TranscriptomicsDataset
+from data.datasets import ChemicalDataset, MultimodalDrugDataset, TranscriptomicsDataset
 from data.loaders import GCTXDataLoader
+from data.transformers import create_transformations
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +28,27 @@ class LINCSCTRPDataProcessor:
         val_size: float = 0.1,
         random_state: int = 42,
         group_by: Optional[str] = None,
+        stratify_by: Optional[str] = None,
         batch_size: int = 32,
         transform_transcriptomics: Optional[Callable] = None,
         transform_molecular: Optional[Callable] = None,
     ):
-        """Initialize data processor."""
+        """
+        Initialize data processor.
+
+        Args:
+            gctx_file: Path to the GCTX file
+            feature_space: Gene feature space to use ('landmark', 'best inferred', etc.)
+            nrows: Number of rows to load (None for all)
+            test_size: Fraction of data to use for testing
+            val_size: Fraction of data to use for validation
+            random_state: Random seed for reproducibility
+            group_by: Column name to use for group-based splitting (e.g., 'cell_id')
+            stratify_by: Column name to use for stratified splitting (e.g., 'viability_bin')
+            batch_size: Batch size for dataloaders
+            transform_transcriptomics: Transformation function for transcriptomics data
+            transform_molecular: Transformation function for molecular data
+        """
         self.gctx_file = gctx_file
         self.feature_space = feature_space
         self.nrows = nrows
@@ -40,6 +56,7 @@ class LINCSCTRPDataProcessor:
         self.val_size = val_size
         self.random_state = random_state
         self.group_by = group_by
+        self.stratify_by = stratify_by
         self.batch_size = batch_size
         self.transform_transcriptomics = transform_transcriptomics
         self.transform_molecular = transform_molecular
@@ -47,6 +64,12 @@ class LINCSCTRPDataProcessor:
         # Set random seed
         np.random.seed(random_state)
         torch.manual_seed(random_state)
+
+        # Validate that group_by and stratify_by are not both specified
+        if self.group_by and self.stratify_by:
+            raise ValueError(
+                "Cannot specify both group_by and stratify_by simultaneously"
+            )
 
     def _load_data(self) -> Tuple[np.ndarray, pd.DataFrame]:
         """Load data from GCTX file."""
@@ -61,6 +84,9 @@ class LINCSCTRPDataProcessor:
             required_cols = ["canonical_smiles", "pert_dose", "viability"]
             if self.group_by:
                 required_cols.append(self.group_by)
+            if self.stratify_by:
+                required_cols.append(self.stratify_by)
+
             missing = [col for col in required_cols if col not in metadata.columns]
             if missing:
                 raise ValueError(f"Missing required columns: {missing}")
@@ -84,18 +110,35 @@ class LINCSCTRPDataProcessor:
         Tuple[np.ndarray, pd.DataFrame],
         Tuple[np.ndarray, pd.DataFrame],
     ]:
-        """Random splitting strategy."""
+        """Random splitting strategy with optional stratification."""
         indices = np.arange(len(transcriptomics))
+
+        # Use stratification if specified
+        stratify = None
+        if self.stratify_by and self.stratify_by in metadata.columns:
+            stratify = metadata[self.stratify_by]
+            logger.info(f"Using stratified splitting based on '{self.stratify_by}'")
 
         # First split into train+val and test
         train_val_idx, test_idx = train_test_split(
-            indices, test_size=self.test_size, random_state=self.random_state
+            indices,
+            test_size=self.test_size,
+            random_state=self.random_state,
+            stratify=stratify,
         )
+
+        # Adjusted stratification for val split
+        stratify_val = None
+        if stratify is not None:
+            stratify_val = stratify.iloc[train_val_idx]
 
         # Then split train+val into train and val
         val_size_adjusted = self.val_size / (1 - self.test_size)
         train_idx, val_idx = train_test_split(
-            train_val_idx, test_size=val_size_adjusted, random_state=self.random_state
+            train_val_idx,
+            test_size=val_size_adjusted,
+            random_state=self.random_state,
+            stratify=stratify_val,
         )
 
         # Create splits
@@ -115,6 +158,10 @@ class LINCSCTRPDataProcessor:
     ]:
         """Group-based splitting strategy."""
         indices = np.arange(len(transcriptomics))
+
+        logger.info(f"Using group-based splitting based on '{self.group_by}'")
+        unique_groups = metadata[self.group_by].unique()
+        logger.info(f"Found {len(unique_groups)} unique groups")
 
         # Split into train+val and test
         gss = GroupShuffleSplit(
@@ -182,7 +229,7 @@ class LINCSCTRPDataProcessor:
     def get_transcriptomics_data(
         self,
     ) -> Tuple[TranscriptomicsDataset, TranscriptomicsDataset, TranscriptomicsDataset]:
-        """Get datasets for traditional ML models."""
+        """Get datasets for traditional ML models using only transcriptomics data."""
         logger.info("Preparing transcriptomics datasets...")
 
         # Load and split data
@@ -204,6 +251,42 @@ class LINCSCTRPDataProcessor:
             test_data[0],
             test_data[1]["viability"].values,
             transform=self.transform_transcriptomics,
+        )
+
+        logger.info(
+            f"Created datasets - Train: {len(train_ds)}, "
+            f"Val: {len(val_ds)}, Test: {len(test_ds)}"
+        )
+        return train_ds, val_ds, test_ds
+
+    def get_chemical_data(
+        self,
+    ) -> Tuple[ChemicalDataset, ChemicalDataset, ChemicalDataset]:
+        """Get datasets for traditional ML models using only chemical/molecular data."""
+        logger.info("Preparing chemical datasets...")
+
+        # Load and split data
+        transcriptomics, metadata = self._load_data()
+        train_data, val_data, test_data = self._split_data(transcriptomics, metadata)
+
+        # Create datasets
+        train_ds = ChemicalDataset(
+            smiles=train_data[1]["canonical_smiles"].values,
+            dosage=train_data[1]["pert_dose"].values,
+            viability=train_data[1]["viability"].values,
+            transform=self.transform_molecular,
+        )
+        val_ds = ChemicalDataset(
+            smiles=val_data[1]["canonical_smiles"].values,
+            dosage=val_data[1]["pert_dose"].values,
+            viability=val_data[1]["viability"].values,
+            transform=self.transform_molecular,
+        )
+        test_ds = ChemicalDataset(
+            smiles=test_data[1]["canonical_smiles"].values,
+            dosage=test_data[1]["pert_dose"].values,
+            viability=test_data[1]["viability"].values,
+            transform=self.transform_molecular,
         )
 
         logger.info(
@@ -243,89 +326,3 @@ class LINCSCTRPDataProcessor:
                 pin_memory=True,
             ),
         )
-
-
-class Normalizer:
-    """Normalizes data using L2 norm."""
-
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        from sklearn.preprocessing import Normalizer as SklearnNormalizer
-
-        normalizer = SklearnNormalizer()
-        return normalizer.fit_transform(x)
-
-
-class StandardScaler:
-    """Standardizes data to zero mean and unit variance."""
-
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        from sklearn.preprocessing import StandardScaler as SklearnScaler
-
-        scaler = SklearnScaler()
-        return scaler.fit_transform(x)
-
-
-class MorganFingerprintTransform:
-    """Generate Morgan fingerprints from SMILES."""
-
-    def __init__(self, radius: int, size: int):
-        self.radius = radius
-        self.size = size
-
-    def __call__(self, mol_input: Union[Dict, np.ndarray]) -> np.ndarray:
-        from rdkit import Chem
-        from rdkit.Chem import AllChem
-
-        if isinstance(mol_input, dict):
-            smiles_list = mol_input["smiles"]
-            dosage = np.array(mol_input["dosage"]).reshape(-1, 1)
-
-            # Initialize Morgan fingerprint generator
-            fpgen = AllChem.GetMorganGenerator(radius=self.radius, fpSize=self.size)
-
-            fingerprints = np.zeros((len(smiles_list), self.size))
-            for i, smiles in enumerate(smiles_list):
-                try:
-                    if not isinstance(smiles, str):
-                        logger.warning(f"Invalid SMILES: {type(smiles)}")
-                        continue
-                    mol = Chem.MolFromSmiles(smiles)
-                    if mol is not None:
-                        fp = fpgen.GetFingerprint(mol)
-                        # Convert bit vector to array
-                        fingerprints[i] = np.array([int(x) for x in fp.ToBitString()])
-                    else:
-                        logger.warning(f"Failed to parse SMILES: {smiles}")
-                except Exception as e:
-                    logger.warning(f"Error with SMILES {smiles}: {e}")
-
-            return np.hstack([fingerprints, dosage]).astype(np.float32)
-        return mol_input
-
-
-def create_transformations(
-    transcriptomics_transform_type: Optional[str] = None,
-    molecular_transform_type: Optional[str] = None,
-    fingerprint_size: int = 2048,
-    fingerprint_radius: int = 2,  # ECFP4
-    **kwargs,
-) -> Tuple[Optional[Callable], Optional[Callable]]:
-    """Create data transformations."""
-    # Create transcriptomics transformation
-    transcriptomics_transform = None
-    if transcriptomics_transform_type == "normalize":
-        transcriptomics_transform = Normalizer()
-    elif transcriptomics_transform_type == "scale":
-        transcriptomics_transform = StandardScaler()
-
-    # Create molecular transformation
-    molecular_transform = None
-    if molecular_transform_type == "fingerprint":
-        try:
-            molecular_transform = MorganFingerprintTransform(
-                radius=fingerprint_radius, size=fingerprint_size
-            )
-        except ImportError:
-            logger.warning("RDKit not available")
-
-    return transcriptomics_transform, molecular_transform

@@ -1,5 +1,4 @@
-"""Default configuration for the LINCS/CTRP drug response prediction project."""
-
+# config/default_config.py
 from typing import Any, Dict
 
 

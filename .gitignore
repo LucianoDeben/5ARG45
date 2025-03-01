@@ -183,3 +183,5 @@ assets/
 # Models
 models/
 !src/models
+
+/logs

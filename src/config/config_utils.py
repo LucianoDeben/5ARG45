@@ -3,7 +3,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 from pydantic import ValidationError
@@ -21,20 +21,70 @@ def setup_logging():
     logging.basicConfig(**LOGGING_CONFIG)
 
 
-def load_config(config_path: Union[str, Path]) -> Dict[str, Any]:
+def resolve_path_variables(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve environment variables in configuration paths.
+
+    Supports format: ${ENV_VAR} or ${ENV_VAR:-default_value}
+
+    Args:
+        config: Configuration dictionary with path references
+
+    Returns:
+        Configuration with resolved paths
+    """
+    import os
+    import re
+
+    # Pattern matches ${VAR_NAME} or ${VAR_NAME:-default}
+    pattern = re.compile(r"\${([A-Za-z0-9_]+)(?::-([^}]+))?}")
+
+    def _resolve(value):
+        if isinstance(value, str):
+            # Find all matches in the string
+            matches = list(pattern.finditer(value))
+            if not matches:
+                return value
+
+            # Process each match
+            result = value
+            for match in matches:
+                var_name = match.group(1)
+                default = match.group(2)
+
+                # Get value from environment or use default
+                env_value = os.environ.get(var_name)
+                if env_value is None and default is not None:
+                    env_value = default
+                elif env_value is None:
+                    env_value = ""
+
+                # Replace in the string
+                placeholder = match.group(0)  # The entire ${...} expression
+                result = result.replace(placeholder, env_value)
+
+            return result
+        elif isinstance(value, dict):
+            return {k: _resolve(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [_resolve(item) for item in value]
+        return value
+
+    return _resolve(config)
+
+
+def load_config(
+    config_path: Union[str, Path], resolve_paths: bool = True
+) -> Dict[str, Any]:
     """
     Load configuration from a YAML file with validation.
 
     Args:
         config_path: Path to the YAML configuration file
+        resolve_paths: Whether to resolve path variables
 
     Returns:
         Dict containing the validated configuration
-
-    Raises:
-        FileNotFoundError: If config file doesn't exist
-        yaml.YAMLError: If YAML parsing fails
-        ValidationError: If configuration is invalid
     """
     config_path = Path(config_path)
 
@@ -48,6 +98,10 @@ def load_config(config_path: Union[str, Path]) -> Dict[str, Any]:
         # Merge with defaults
         merged_config = merge_configs(get_default_config(), config)
 
+        # Resolve path variables if requested
+        if resolve_paths:
+            merged_config = resolve_path_variables(merged_config)
+
         # Validate against schema
         validated_config = validate_config(merged_config)
 
@@ -60,6 +114,55 @@ def load_config(config_path: Union[str, Path]) -> Dict[str, Any]:
     except ValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
+
+
+def load_secrets() -> Dict[str, Any]:
+    """Load secrets from environment variables or secrets file."""
+    secrets = {}
+
+    # Try loading from secrets file
+    secrets_path = Path("config/secrets.yaml")
+    if secrets_path.exists():
+        try:
+            with open(secrets_path) as f:
+                file_secrets = yaml.safe_load(f) or {}
+                secrets.update(file_secrets)
+        except Exception as e:
+            logger.warning(f"Failed to load secrets file: {e}")
+
+    # Environment variables override file
+    # Look for variables with FORMAT: CONFIG_SECTION_KEY
+    import re
+
+    pattern = re.compile(r"CONFIG_([A-Z0-9_]+)")
+
+    for env_var, value in os.environ.items():
+        match = pattern.match(env_var)
+        if match:
+            # Convert format: CONFIG_SECTION_KEY to section.key
+            path = match.group(1).lower().replace("_", ".")
+
+            # Build nested dict from path
+            keys = path.split(".")
+            current = secrets
+            for key in keys[:-1]:
+                current = current.setdefault(key, {})
+            current[keys[-1]] = value
+
+    return secrets
+
+
+def load_env_config() -> Dict[str, Any]:
+    """Load environment-specific configuration based on ENV variable."""
+    env = os.environ.get("APP_ENV", "development")
+    env_config_path = Path(f"config/environments/{env}.yaml")
+
+    if env_config_path.exists():
+        with open(env_config_path) as f:
+            return yaml.safe_load(f) or {}
+    else:
+        logger.warning(f"No configuration found for environment: {env}")
+        return {}
 
 
 def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -292,3 +395,40 @@ def upgrade_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info(f"Configuration upgraded to version {CURRENT_SCHEMA_VERSION}")
     return upgraded_config
+
+
+def parse_cli_overrides(args: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Parse command-line arguments for configuration overrides."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Override configuration values")
+    parser.add_argument(
+        "--config-override",
+        action="append",
+        help="Override config value (e.g., 'training.batch_size=64')",
+    )
+
+    args = parser.parse_args(args)
+    overrides = {}
+
+    if args.config_override:
+        for override in args.config_override:
+            if "=" not in override:
+                logger.warning(f"Invalid override format: {override}")
+                continue
+
+            path, value = override.split("=", 1)
+            # Convert value string to appropriate type
+            try:
+                value = yaml.safe_load(value)
+            except Exception:
+                pass  # Keep as string if conversion fails
+
+            # Build nested dict from path
+            keys = path.split(".")
+            current = overrides
+            for key in keys[:-1]:
+                current = current.setdefault(key, {})
+            current[keys[-1]] = value
+
+    return overrides

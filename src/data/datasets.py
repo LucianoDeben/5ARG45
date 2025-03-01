@@ -1,6 +1,4 @@
-# src/data/datasets.py
-"""Dataset implementations for drug response prediction."""
-
+# data/datasets.py
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -22,7 +20,15 @@ class MultimodalDrugDataset(Dataset):
         transform_transcriptomics: Optional[Callable] = None,
         transform_molecular: Optional[Callable] = None,
     ):
-        """Initialize multimodal dataset for deep learning."""
+        """
+        Initialize multimodal dataset for deep learning.
+
+        Args:
+            transcriptomics_data: Gene expression data
+            metadata: DataFrame with SMILES, dosage, and viability data
+            transform_transcriptomics: Transformation function for transcriptomics data
+            transform_molecular: Transformation function for molecular data
+        """
         self.transcriptomics_data = transcriptomics_data
         self.metadata = metadata
         self.transform_transcriptomics = transform_transcriptomics
@@ -74,34 +80,26 @@ class MultimodalDrugDataset(Dataset):
         if self.transform_molecular is not None:
             molecular = self.transform_molecular({"smiles": smiles, "dosage": dosage})
         else:
-            molecular = np.hstack([self._default_smiles_encoding(smiles), dosage])
+            # Use default basic encoding if no transformer provided
+            from data.transformers import BasicSmilesDescriptorTransform
+
+            default_transform = BasicSmilesDescriptorTransform()
+            molecular = default_transform({"smiles": smiles, "dosage": dosage})
 
         # Convert to tensors
-        return {
+        result = {
             "transcriptomics": torch.tensor(transcriptomics, dtype=torch.float32),
             "molecular": torch.tensor(molecular, dtype=torch.float32),
             "viability": torch.tensor(viability, dtype=torch.float32),
         }
 
-    def _default_smiles_encoding(self, smiles_list: List[str]) -> np.ndarray:
-        """Simple SMILES encoding when no transformation is provided."""
-        features = np.zeros((len(smiles_list), 10))
-        for i, smiles in enumerate(smiles_list):
-            if not isinstance(smiles, str):
-                continue
-            features[i, 0] = smiles.count("C")  # Carbon count
-            features[i, 1] = smiles.count("N")  # Nitrogen count
-            features[i, 2] = smiles.count("O")  # Oxygen count
-            features[i, 3] = sum(
-                smiles.count(x) for x in ["F", "Cl", "Br", "I"]
-            )  # Halogens
-            features[i, 4] = smiles.count("=")  # Double bonds
-            features[i, 5] = smiles.count("#")  # Triple bonds
-            features[i, 6] = smiles.count("(") + smiles.count(")")  # Branches
-            features[i, 7] = smiles.count("[") + smiles.count("]")  # Special atoms
-            features[i, 8] = len(smiles)  # Length
-            features[i, 9] = sum(smiles.count(x) for x in ["c", "n", "o"])  # Aromatic
-        return features
+        # Ensure batch dimension for single items
+        if isinstance(idx, int):
+            for key in result:
+                if not result[key].dim() or result[key].dim() == 1:
+                    result[key] = result[key].unsqueeze(0)
+
+        return result
 
 
 class TranscriptomicsDataset:
@@ -113,7 +111,14 @@ class TranscriptomicsDataset:
         viability: np.ndarray,
         transform: Optional[Callable] = None,
     ):
-        """Initialize transcriptomics dataset."""
+        """
+        Initialize transcriptomics dataset.
+
+        Args:
+            transcriptomics_data: Gene expression data
+            viability: Target cell viability values
+            transform: Transformation function for gene expression data
+        """
         self.transcriptomics = transcriptomics_data
         self.viability = viability
         self.transform = transform
@@ -140,6 +145,65 @@ class TranscriptomicsDataset:
         """Create transcriptomics dataset from multimodal dataset."""
         return cls(
             transcriptomics_data=dataset.transcriptomics_data,
+            viability=dataset.metadata["viability"].values,
+            transform=transform,
+        )
+
+
+class ChemicalDataset:
+    """Dataset for traditional ML models using only chemical/molecular data."""
+
+    def __init__(
+        self,
+        smiles: List[str],
+        dosage: np.ndarray,
+        viability: np.ndarray,
+        transform: Optional[Callable] = None,
+    ):
+        """
+        Initialize chemical dataset.
+
+        Args:
+            smiles: List of SMILES strings representing compounds
+            dosage: Dosage values for each compound
+            viability: Target cell viability values
+            transform: Transformation function for molecular data
+        """
+        self.smiles = np.array(smiles)
+        self.dosage = dosage.reshape(-1, 1) if len(dosage.shape) == 1 else dosage
+        self.viability = viability
+        self.transform = transform
+
+        # Validate dimensions
+        if len(smiles) != len(viability) or len(dosage) != len(viability):
+            raise ValueError("Length mismatch between features and labels")
+
+        logger.info(f"Initialized ChemicalDataset with {len(self)} samples")
+
+    def __len__(self) -> int:
+        return len(self.smiles)
+
+    def get_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get features and labels as numpy arrays."""
+        if self.transform is not None:
+            features = self.transform({"smiles": self.smiles, "dosage": self.dosage})
+        else:
+            # Use default fingerprint transform if no transformer provided
+            from data.transformers import MorganFingerprintTransform
+
+            default_transform = MorganFingerprintTransform(radius=2, size=1024)
+            features = default_transform({"smiles": self.smiles, "dosage": self.dosage})
+
+        return features, self.viability
+
+    @classmethod
+    def from_multimodal(
+        cls, dataset: MultimodalDrugDataset, transform: Optional[Callable] = None
+    ) -> "ChemicalDataset":
+        """Create chemical dataset from multimodal dataset."""
+        return cls(
+            smiles=dataset.metadata["canonical_smiles"].values,
+            dosage=dataset.metadata["pert_dose"].values,
             viability=dataset.metadata["viability"].values,
             transform=transform,
         )
@@ -197,4 +261,28 @@ class DatasetFactory:
 
         return TranscriptomicsDataset(
             transcriptomics_data=expr_data, viability=viability, transform=transform
+        )
+
+    @staticmethod
+    def create_chemical_dataset(
+        gctx_loader,
+        row_slice: Union[slice, list, None] = None,
+        transform: Optional[Callable] = None,
+    ) -> ChemicalDataset:
+        """Create chemical dataset for traditional ML."""
+        # Get data
+        _, metadata, _ = gctx_loader.get_data_with_metadata(
+            row_slice=row_slice,
+            row_columns=None,
+        )
+
+        # Convert metadata if needed
+        if not isinstance(metadata, pd.DataFrame):
+            metadata = pd.DataFrame(metadata)
+
+        return ChemicalDataset(
+            smiles=metadata["canonical_smiles"].values,
+            dosage=metadata["pert_dose"].values,
+            viability=metadata["viability"].values,
+            transform=transform,
         )
