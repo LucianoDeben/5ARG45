@@ -1,7 +1,6 @@
-# config/default_config.py
-from typing import Any, Dict
+"""Default configuration for the LINCS/CTRP drug response prediction project."""
 
-from config.constants import CURRENT_SCHEMA_VERSION, DEFAULT_PATHS, LOGGING_CONFIG
+from typing import Any, Dict
 
 
 def get_default_config() -> Dict[str, Any]:
@@ -25,22 +24,18 @@ def get_default_config() -> Dict[str, Any]:
         },
         # Model architecture
         "model": {
-            # Transcriptomics encoder
+            # Transcriptomics encoder (978 landmark genes)
             "transcriptomics_input_dim": 978,
             "transcriptomics_hidden_dims": [512, 256],
             "transcriptomics_output_dim": 128,
-            # Chemical encoder
+            # Chemical encoder (1024 bit fingerprint + 1 dosage feature)
             "chemical_input_dim": 1025,
             "chemical_hidden_dims": [256, 128],
             "chemical_output_dim": 128,
             # Fusion module
             "fusion_output_dim": 256,
-            "fusion_strategy": "cross_attention",
-            "fusion_num_heads": 4,
-            "fusion_dropout": 0.1,
-            # Prediction head
+            "fusion_strategy": "concat",
             "predictor_hidden_dims": [128, 64],
-            "predictor_dropout": 0.3,
             # General settings
             "normalize": True,
             "dropout": 0.3,
@@ -51,17 +46,15 @@ def get_default_config() -> Dict[str, Any]:
         },
         # Training settings
         "training": {
-            # Basic training parameters
             "batch_size": 32,
             "epochs": 100,
             "learning_rate": 0.001,
             "optimizer": "adamw",
-            "loss": "huber",
+            "loss": "mse",
             # Data splitting
             "test_size": 0.2,
             "val_size": 0.1,
             "random_state": 42,
-            "group_by": "cell_mfc_name",
             # Learning rate scheduling
             "lr_scheduler": "cosine",
             "warmup_epochs": 5,
@@ -82,8 +75,8 @@ def get_default_config() -> Dict[str, Any]:
         # Chemical representation
         "chemical": {
             "representation": "fingerprint",
-            "fingerprint_size": 1024,
-            "radius": 2,
+            "fingerprint_size": 1024,  # Standard ECFP size
+            "radius": 2,  # ECFP4
             "use_chirality": True,
             "use_features": True,
             "sanitize": True,
@@ -94,22 +87,10 @@ def get_default_config() -> Dict[str, Any]:
             "run_name": None,
             "track": True,
             "tags": ["multimodal", "drug-response"],
-            "version": CURRENT_SCHEMA_VERSION,
+            "version": "1.0.0",
             "save_checkpoints": True,
             "checkpoint_freq": 5,
             "keep_n_checkpoints": 3,
-        },
-        # Paths
-        "paths": DEFAULT_PATHS,
-        # Logging
-        "logging": LOGGING_CONFIG,
-        # Hardware
-        "hardware": {
-            "device": "cuda",
-            "precision": "mixed",
-            "num_workers": 4,
-            "pin_memory": True,
-            "benchmark_cudnn": True,
         },
     }
 

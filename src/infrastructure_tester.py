@@ -1,21 +1,16 @@
-"""Infrastructure layer testing script."""
+"""Infrastructure testing script."""
 
 import logging
 from pathlib import Path
-from typing import Dict, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score
-from torch.utils.data import DataLoader
 
 from config.config_utils import load_config, validate_config
 from config.default_config import get_default_config
-from data.adapters import DatasetMetadata, LINCSAdapter
-from data.datasets import MultimodalDataset
-from data.loaders import GCTXDataLoader
 from data.preprocessing import LINCSCTRPDataProcessor, create_transformations
 from utils.logging import ExperimentLogger
 from utils.storage import CacheManager, CheckpointManager, DatasetStorage
@@ -24,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class SimpleNN(nn.Module):
-    """Simple feedforward neural network."""
+    """Simple feedforward neural network with separate processing of modalities."""
 
     def __init__(
         self,
@@ -34,82 +29,62 @@ class SimpleNN(nn.Module):
     ):
         super().__init__()
 
-        # Input dimensions
-        total_input_dim = transcriptomics_dim + chemical_dim
+        # Calculate intermediate dimensions
+        trans_hidden = hidden_dims[0] // 2
+        chem_hidden = hidden_dims[0] // 2
 
-        # Build layers
-        layers = []
-        in_dim = total_input_dim
+        # Process transcriptomics data
+        self.transcriptomics_net = nn.Sequential(
+            nn.Linear(transcriptomics_dim, trans_hidden),
+            nn.ReLU(),
+            nn.BatchNorm1d(trans_hidden),  # Specify number of features
+            nn.Dropout(0.2),
+        )
 
-        for hidden_dim in hidden_dims:
-            layers.extend(
+        # Process chemical data
+        self.chemical_net = nn.Sequential(
+            nn.Linear(chemical_dim, chem_hidden),
+            nn.ReLU(),
+            nn.BatchNorm1d(chem_hidden),  # Specify number of features
+            nn.Dropout(0.2),
+        )
+
+        # Joint processing after concatenation
+        joint_layers = []
+        in_dim = trans_hidden + chem_hidden  # Size after concatenation
+
+        for hidden_dim in hidden_dims[1:]:
+            joint_layers.extend(
                 [
                     nn.Linear(in_dim, hidden_dim),
                     nn.ReLU(),
-                    nn.BatchNorm1d(hidden_dim),
+                    nn.BatchNorm1d(hidden_dim),  # Specify number of features
                     nn.Dropout(0.2),
                 ]
             )
             in_dim = hidden_dim
 
-        # Output layer
-        layers.append(nn.Linear(in_dim, 1))
-
-        self.model = nn.Sequential(*layers)
+        joint_layers.append(nn.Linear(in_dim, 1))
+        self.joint_net = nn.Sequential(*joint_layers)
 
     def forward(
         self, x_transcriptomics: torch.Tensor, x_chemical: torch.Tensor
     ) -> torch.Tensor:
-        # Concatenate inputs
-        x = torch.cat([x_transcriptomics, x_chemical], dim=1)
-        return self.model(x)
+        # Process each modality separately
+        h_trans = self.transcriptomics_net(x_transcriptomics)
+        h_chem = self.chemical_net(x_chemical)
 
+        # Concatenate the processed features
+        h_joint = torch.cat([h_trans, h_chem], dim=1)
 
-def prepare_data(
-    config: Dict,
-) -> Tuple[MultimodalDataset, MultimodalDataset, MultimodalDataset]:
-    """Prepare datasets using our data infrastructure."""
-
-    # Initialize data processor
-    processor = LINCSCTRPDataProcessor(
-        gctx_file=config["data"]["gctx_file"],
-        feature_space=config["data"]["feature_space"],
-        test_size=config["training"]["test_size"],
-        val_size=config["training"]["val_size"],
-        random_state=config["training"]["random_state"],
-        group_by=config["training"]["group_by"],
-        batch_size=config["training"]["batch_size"],
-    )
-
-    # Create transformations
-    transform_transcriptomics, transform_molecular = create_transformations(
-        transcriptomics_transform_type="normalize",
-        molecular_transform_type="fingerprint",
-        fingerprint_size=config["chemical"]["fingerprint_size"],
-        fingerprint_radius=config["chemical"]["radius"],
-    )
-
-    # Get datasets
-    train_dataset, val_dataset, test_dataset = processor.process()
-
-    # Apply transformations
-    train_dataset = train_dataset.with_transforms(
-        transform_transcriptomics, transform_molecular
-    )
-    val_dataset = val_dataset.with_transforms(
-        transform_transcriptomics, transform_molecular
-    )
-    test_dataset = test_dataset.with_transforms(
-        transform_transcriptomics, transform_molecular
-    )
-
-    return train_dataset, val_dataset, test_dataset
+        # Joint processing
+        return self.joint_net(h_joint)
 
 
 def train_sklearn_model(
-    train_dataset: MultimodalDataset,
-    val_dataset: MultimodalDataset,
-    test_dataset: MultimodalDataset,
+    train_dataset,
+    val_dataset,
+    test_dataset,
     exp_logger: ExperimentLogger,
     storage: DatasetStorage,
 ) -> Ridge:
@@ -117,17 +92,21 @@ def train_sklearn_model(
 
     logger.info("Training sklearn Ridge regression model...")
 
-    # Convert datasets to sklearn format
-    train_data = train_dataset.to_sklearn()
-    val_data = val_dataset.to_sklearn()
-    test_data = test_dataset.to_sklearn()
+    # Get numpy arrays from transcriptomics datasets
+    X_train, y_train = train_dataset.get_data()
+    X_val, y_val = val_dataset.get_data()
+    X_test, y_test = test_dataset.get_data()
 
     # Initialize and train model
     model = Ridge(alpha=1.0)
-    model.fit(train_data[0], train_data[1])
+    model.fit(X_train, y_train)
 
     # Evaluate
-    for name, (X, y) in [("train", train_data), ("val", val_data), ("test", test_data)]:
+    for name, (X, y) in [
+        ("train", (X_train, y_train)),
+        ("val", (X_val, y_val)),
+        ("test", (X_test, y_test)),
+    ]:
         y_pred = model.predict(X)
         mse = mean_squared_error(y, y_pred)
         r2 = r2_score(y, y_pred)
@@ -144,29 +123,16 @@ def train_sklearn_model(
 
 
 def train_pytorch_model(
-    train_dataset: MultimodalDataset,
-    val_dataset: MultimodalDataset,
-    test_dataset: MultimodalDataset,
-    config: Dict,
+    train_loader,
+    val_loader,
+    test_loader,
+    config: dict,
     exp_logger: ExperimentLogger,
     checkpoint_manager: CheckpointManager,
 ) -> SimpleNN:
     """Train and evaluate a PyTorch neural network."""
 
     logger.info("Training PyTorch neural network...")
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset.to_pytorch(),
-        batch_size=config["training"]["batch_size"],
-        shuffle=True,
-    )
-    val_loader = DataLoader(
-        val_dataset.to_pytorch(), batch_size=config["training"]["batch_size"]
-    )
-    test_loader = DataLoader(
-        test_dataset.to_pytorch(), batch_size=config["training"]["batch_size"]
-    )
 
     # Initialize model
     model = SimpleNN(
@@ -226,7 +192,7 @@ def train_pytorch_model(
         metrics = {"loss": train_loss, "val_loss": val_loss}
         exp_logger.log_metrics(metrics, step=epoch)
 
-        # Save checkpoint if best validation loss
+        # Save checkpoint if best
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             checkpoint_manager.save(
@@ -264,15 +230,18 @@ def main():
         experiment_name="infrastructure_test", use_tensorboard=True, use_wandb=False
     )
 
-    # Initialize storage
+    # Initialize storage systems
     base_dir = Path("data")
+
+    dataset_storage = DatasetStorage(
+        base_dir=base_dir, compress=True  # Enable compression for stored data
+    )
+
     cache_manager = CacheManager(
         cache_dir=base_dir / "cache",
         max_memory_size=2.0,  # GB
         max_disk_size=20.0,  # GB
     )
-
-    dataset_storage = DatasetStorage(base_dir=base_dir, cache_manager=cache_manager)
 
     checkpoint_manager = CheckpointManager(
         dirpath=base_dir / "checkpoints",
@@ -285,19 +254,47 @@ def main():
     exp_logger.log_config(config)
 
     try:
-        # Prepare data
-        train_dataset, val_dataset, test_dataset = prepare_data(config)
+        # Create transformations
+        trans_transform, mol_transform = create_transformations(
+            transcriptomics_transform_type="scale",
+            molecular_transform_type="fingerprint",
+            fingerprint_size=config["chemical"]["fingerprint_size"],
+            fingerprint_radius=config["chemical"]["radius"],
+        )
+
+        # Initialize data processor
+        data_processor = LINCSCTRPDataProcessor(
+            gctx_file=config["data"]["gctx_file"],
+            feature_space=config["data"]["feature_space"],
+            test_size=config["training"]["test_size"],
+            val_size=config["training"]["val_size"],
+            batch_size=config["training"]["batch_size"],
+            transform_transcriptomics=trans_transform,
+            transform_molecular=mol_transform,
+        )
+
+        # Get datasets for sklearn model
+        logger.info("Preparing transcriptomics data for sklearn model...")
+        train_dataset, val_dataset, test_dataset = (
+            data_processor.get_transcriptomics_data()
+        )
 
         # Train sklearn model
         sklearn_model = train_sklearn_model(
             train_dataset, val_dataset, test_dataset, exp_logger, dataset_storage
         )
 
+        # Get dataloaders for PyTorch model
+        logger.info("Preparing multimodal data for PyTorch model...")
+        train_loader, val_loader, test_loader = (
+            data_processor.get_multimodal_dataloaders()
+        )
+
         # Train PyTorch model
         pytorch_model = train_pytorch_model(
-            train_dataset,
-            val_dataset,
-            test_dataset,
+            train_loader,
+            val_loader,
+            test_loader,
             config,
             exp_logger,
             checkpoint_manager,
