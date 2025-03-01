@@ -18,7 +18,6 @@ with h5py.File(h5_file, "r") as f:
     for grp in expected_groups:
         assert grp in f, f"Expected group '{grp}' not found in file."
         logging.info(f"Group '{grp}' found.")
-
     # 2. Check gene expression data dimensions and type.
     data_dset = f["/0/DATA/0/matrix"]
     data_shape = data_dset.shape
@@ -28,7 +27,6 @@ with h5py.File(h5_file, "r") as f:
     # Optionally, check a subset of rows (if you have expected values):
     sample_data = data_dset[0:5, :]
     logging.info(f"Sample data (first 5 rows):\n{sample_data}")
-
     # 3. Check row metadata.
     # Row metadata (experiments) is now stored in /0/META/ROW
     meta_row_grp = f["/0/META/ROW"]
