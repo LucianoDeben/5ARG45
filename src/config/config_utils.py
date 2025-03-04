@@ -9,9 +9,10 @@ import yaml
 from pydantic import ValidationError
 
 import wandb
-from config.constants import CURRENT_SCHEMA_VERSION, DEFAULT_PATHS, LOGGING_CONFIG
-from config.default_config import get_default_config
-from config.schema import CompleteConfig
+
+from ..config.constants import CURRENT_SCHEMA_VERSION, DEFAULT_PATHS, LOGGING_CONFIG
+from ..config.default_config import get_default_config
+from ..config.schema import CompleteConfig
 
 logger = logging.getLogger(__name__)
 

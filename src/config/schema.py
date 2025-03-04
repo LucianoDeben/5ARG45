@@ -1,9 +1,9 @@
+# config/schema.py
 from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing_extensions import Literal
 
-from config.constants import (
+from ..config.constants import (
     VALID_ACTIVATIONS,
     VALID_CHEMICAL_REPRESENTATIONS,
     VALID_FEATURE_SPACES,
@@ -35,29 +35,29 @@ class PathsConfig(BaseModel):
 class DataConfig(BaseModel):
     """Data configuration settings."""
 
-    gctx_file: str = Field(
-        ..., description="Path to GCTX data file containing gene expression data"
-    )
+    # LINCS files
+    gctx_file: str = Field(..., description="Path to GCTX data file")
     geneinfo_file: str = Field(..., description="Path to gene information file")
     siginfo_file: str = Field(..., description="Path to signature information file")
-    feature_space: Union[str, List[str]] = Field(
-        "landmark",
-        description="Gene feature space(s) to use (landmark, best inferred, or inferred)",
-    )
-    nrows: Optional[int] = Field(
-        None, description="Number of rows to load (None for all)"
-    )
-    normalize: Optional[str] = Field(
-        None, description="Normalization strategy (zscore, minmax, robust)"
-    )
+
+    # CTRP files
+    curves_post_qc: str = Field(..., description="Path to curves post QC file")
+    per_cpd_post_qc: str = Field(..., description="Path to per compound post QC file")
+    per_experiment: str = Field(..., description="Path to per experiment file")
+    per_compound: str = Field(..., description="Path to per compound file")
+    per_cell_line: str = Field(..., description="Path to per cell line file")
+
+    # Output configuration
+    output_path: Optional[str] = Field(None, description="Path for output dataset")
+
+    # Processing options
+    feature_space: str = Field("landmark", description="Gene feature space")
+    nrows: Optional[int] = Field(None, description="Number of rows to load")
+    normalize: Optional[str] = Field(None, description="Normalization strategy")
     random_seed: int = Field(42, description="Random seed for reproducibility")
     cache_data: bool = Field(True, description="Whether to cache preprocessed data")
-    use_multiprocessing: bool = Field(
-        True, description="Whether to use multiprocessing for data loading"
-    )
-    num_workers: int = Field(
-        4, description="Number of worker processes for data loading"
-    )
+    use_multiprocessing: bool = Field(True, description="Use multiprocessing")
+    num_workers: int = Field(4, description="Number of worker processes")
 
     @field_validator("feature_space")
     def validate_feature_space(cls, v):

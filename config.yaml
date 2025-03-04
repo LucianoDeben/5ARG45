@@ -13,6 +13,9 @@ data:
   gctx_file: "${DATA_DIR:-data}/raw/LINCS/level5_beta_trt_cp_n720216x12328.gctx"
   geneinfo_file: "${DATA_DIR:-data}/raw/LINCS/geneinfo_beta.txt"
   siginfo_file: "${DATA_DIR:-data}/raw/LINCS/siginfo_beta.txt"
+  matching_strategy: "parallel" # Could be 'serial' or 'parallel'
+  max_workers: null # null uses (cpu_count() * 2)
+  chunk_size: 10000 # Adjust based on your system's memory
 
   # CTRP files
   curves_post_qc: "${DATA_DIR:-data}/raw/CTRP/v20.data.curves_post_qc.txt"

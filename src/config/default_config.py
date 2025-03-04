@@ -12,9 +12,21 @@ def get_default_config() -> Dict[str, Any]:
     config = {
         # Data settings
         "data": {
-            "gctx_file": "../data/processed/LINCS.gctx",
+            # LINCS files
+            "gctx_file": "data/raw/LINCS/level5_beta_trt_cp_n720216x12328.gctx",
+            "geneinfo_file": "data/raw/LINCS/geneinfo_beta.txt",
+            "siginfo_file": "data/raw/LINCS/siginfo_beta.txt",
+            # CTRP files
+            "curves_post_qc": "data/raw/CTRP/v20.data.curves_post_qc.txt",
+            "per_cpd_post_qc": "data/raw/CTRP/v20.data.per_cpd_post_qc.txt",
+            "per_experiment": "data/raw/CTRP/v20.meta.per_experiment.txt",
+            "per_compound": "data/raw/CTRP/v20.meta.per_compound.txt",
+            "per_cell_line": "data/raw/CTRP/v20.meta.per_cell_line.txt",
+            # Output configuration
+            "output_path": "data/processed/LINCS_CTRP_matched.gctx",
+            # Processing options
             "feature_space": "landmark",
-            "nrows": None,
+            "nrows": 2000,
             "normalize": "zscore",
             "random_seed": 42,
             "cache_data": True,

@@ -11,7 +11,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from utils.logging import ExperimentLogger
-from utils.storage import ModelCheckpoint
+from utils.storage import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ class ModelCheckpointCallback(TrainingCallback):
             period: Save checkpoint every this many epochs
             verbose: Whether to print checkpoint information
         """
-        self.checkpoint_handler = ModelCheckpoint(
+        self.checkpoint_handler = CheckpointManager(
             dirpath=dirpath,
             filename=filename,
             monitor=monitor,

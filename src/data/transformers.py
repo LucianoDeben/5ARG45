@@ -1,7 +1,8 @@
-# data/transform
+# data/transformers.py
 import logging
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+import networkx as nx
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,94 @@ class MorganFingerprintTransform:
         return mol_input
 
 
+class MolecularGraphTransform:
+    """
+    Generate NetworkX graph representations from SMILES strings.
+
+    Supports conversion of SMILES to graph representation with
+    configurable node and edge features.
+    """
+
+    def __init__(
+        self,
+        node_features: List[str] = ["atomic_num", "element"],
+        edge_features: List[str] = ["order"],
+    ):
+        """
+        Initialize MolecularGraphTransform.
+
+        Args:
+            node_features: List of node features to extract
+            edge_features: List of edge features to extract
+        """
+        self.node_features = node_features
+        self.edge_features = edge_features
+
+    def __call__(self, mol_input: Union[Dict, List[str]]) -> List[nx.Graph]:
+        """
+        Convert SMILES to NetworkX graphs.
+
+        Args:
+            mol_input: Dictionary with 'smiles' key or list of SMILES strings
+
+        Returns:
+            List of NetworkX graph representations
+        """
+        import networkx as nx
+        from rdkit import Chem
+
+        # Handle different input types
+        if isinstance(mol_input, dict):
+            smiles_list = mol_input.get("smiles", [])
+        elif isinstance(mol_input, list):
+            smiles_list = mol_input
+        else:
+            raise ValueError(
+                "Input must be a dictionary with 'smiles' key or a list of SMILES"
+            )
+
+        graphs = []
+        for smiles in smiles_list:
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    logger.warning(f"Could not parse SMILES: {smiles}")
+                    graphs.append(None)
+                    continue
+
+                # Create graph
+                graph = nx.Graph()
+
+                # Add nodes with features
+                for atom in mol.GetAtoms():
+                    node_data = {}
+                    if "atomic_num" in self.node_features:
+                        node_data["atomic_num"] = atom.GetAtomicNum()
+                    if "element" in self.node_features:
+                        node_data["element"] = atom.GetSymbol()
+
+                    graph.add_node(atom.GetIdx(), **node_data)
+
+                # Add edges with features
+                for bond in mol.GetBonds():
+                    start = bond.GetBeginAtomIdx()
+                    end = bond.GetEndAtomIdx()
+
+                    edge_data = {}
+                    if "order" in self.edge_features:
+                        edge_data["order"] = bond.GetBondTypeAsDouble()
+
+                    graph.add_edge(start, end, **edge_data)
+
+                graphs.append(graph)
+
+            except Exception as e:
+                logger.warning(f"Error processing SMILES {smiles}: {e}")
+                graphs.append(None)
+
+        return graphs
+
+
 def create_transformations(
     transcriptomics_transform_type: Optional[str] = None,
     molecular_transform_type: Optional[str] = None,
@@ -106,7 +195,7 @@ def create_transformations(
         transcriptomics_transform_type: Type of transformation for gene expression data
             ('normalize', 'scale', or None)
         molecular_transform_type: Type of transformation for molecular data
-            ('fingerprint', 'descriptors', or None)
+            ('fingerprint', 'descriptors', 'graph', or None)
         fingerprint_size: Number of bits for Morgan fingerprints
         fingerprint_radius: Radius for Morgan fingerprints
 
@@ -132,5 +221,7 @@ def create_transformations(
             molecular_transform = BasicSmilesDescriptorTransform()
     elif molecular_transform_type == "descriptors":
         molecular_transform = BasicSmilesDescriptorTransform()
+    elif molecular_transform_type == "graph":
+        molecular_transform = MolecularGraphTransform()
 
     return transcriptomics_transform, molecular_transform
