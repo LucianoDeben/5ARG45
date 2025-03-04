@@ -203,68 +203,15 @@ def save_config(config: Dict[str, Any], save_path: Union[str, Path]) -> None:
         raise
 
 
-def resolve_path(path: str, base_dir: Path = None) -> Path:
-    """
-    Resolve path with environment variables and default values.
-
-    Args:
-        path: Path string potentially containing environment variable placeholders
-        base_dir: Base directory to use if no absolute path is provided
-
-    Returns:
-        Resolved absolute path
-    """
-    # First, expand environment variables
-    resolved_path = os.path.expandvars(path)
-
-    # If the path still contains unresolved variables, use the default part
-    if "${" in resolved_path:
-        # Extract the default value after the ':-'
-        default_path = path.split(":-")[-1].rstrip("}")
-        resolved_path = default_path
-
-    # If base_dir is provided and the path is not absolute, join with base_dir
-    if base_dir and not os.path.isabs(resolved_path):
-        resolved_path = str(base_dir / resolved_path)
-
-    # Convert to absolute path
-    return Path(resolved_path).resolve()
-
-
 def get_paths(config: Dict[str, Any]) -> Dict[str, Path]:
     """Get dictionary of paths for data, models, logs, etc."""
-    # Get the project root directory
-    project_root = Path(__file__).parent.parent.parent.absolute()
-
     paths = {}
-    default_paths = {
-        "data_dir": "data",
-        "model_dir": "models/saved",
-        "log_dir": "logs",
-        "results_dir": "results",
-    }
-
-    for key, default_path in default_paths.items():
-        # Get path from config or use default
-        raw_path = config.get("paths", {}).get(key, default_path)
-
-        # Resolve the path
-        try:
-            resolved_path = resolve_path(raw_path, project_root)
-
-            # Create directory
-            resolved_path.mkdir(parents=True, exist_ok=True)
-
-            paths[key] = resolved_path
-            logger.info(f"Created directory for {key}: {resolved_path}")
-        except Exception as e:
-            logger.error(f"Failed to create directory for {key}: {e}")
-            # Fallback to project root + default path
-            fallback_path = project_root / default_path
-            fallback_path.mkdir(parents=True, exist_ok=True)
-            paths[key] = fallback_path
-            logger.warning(f"Used fallback directory for {key}: {fallback_path}")
-
+    for key, default_path in DEFAULT_PATHS.items():
+        path = config.get("paths", {}).get(key, default_path)
+        paths[key] = Path(path)
+        if not paths[key].exists():
+            paths[key].mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Created directory: {paths[key]}")
     return paths
 
 

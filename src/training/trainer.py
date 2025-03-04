@@ -177,7 +177,7 @@ class ModelCheckpointCallback(TrainingCallback):
         save_last: bool = True,
         save_weights_only: bool = False,
         period: int = 1,
-        verbose: bool = True,
+        **kwargs,
     ):
         """
         Initialize checkpoint callback.
@@ -191,7 +191,6 @@ class ModelCheckpointCallback(TrainingCallback):
             save_last: Whether to save the last epoch’s checkpoint.
             save_weights_only: Save only model weights (excludes optimizer/scheduler).
             period: Save every this many epochs.
-            verbose: Whether to log checkpoint events.
         """
         self.checkpoint_handler = CheckpointManager(
             dirpath=dirpath,
@@ -200,7 +199,6 @@ class ModelCheckpointCallback(TrainingCallback):
             mode=mode,
             save_top_k=save_top_k,
             save_last=save_last,
-            verbose=verbose,
         )
         self.save_weights_only = save_weights_only
         self.period = period
@@ -360,17 +358,30 @@ class Trainer:
             for callback in self.callbacks:
                 callback.on_batch_begin(self, batch_idx)
 
-            if not isinstance(batch, dict):
-                raise ValueError(
-                    "Batch must be a dict with 'transcriptomics', 'molecular', 'viability' keys"
-                )
+            # Handle different batch input types
+            if isinstance(batch, list):
+                # Assume the list contains [inputs, targets]
+                if len(batch) != 2:
+                    raise ValueError(
+                        f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
+                    )
+                inputs, targets = batch
+            elif isinstance(batch, dict):
+                inputs = {k: v for k, v in batch.items() if k != "viability"}
+                targets = batch["viability"]
+            else:
+                raise ValueError(f"Unexpected batch type: {type(batch)}")
 
-            inputs = {
-                k: v.to(self.device) for k, v in batch.items() if k != "viability"
-            }
-            targets = batch["viability"].to(self.device)
+            # Move inputs and targets to device
+            if isinstance(inputs, dict):
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            else:
+                inputs = inputs.to(self.device)
+
+            targets = targets.to(self.device)
 
             self.optimizer.zero_grad()
+
             if self.scaler:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(inputs)
@@ -407,15 +418,26 @@ class Trainer:
 
         with torch.no_grad():
             for batch in self.val_loader:
-                if not isinstance(batch, dict):
-                    raise ValueError(
-                        "Batch must be a dict with 'transcriptomics', 'molecular', 'viability' keys"
-                    )
+                # Handle different batch input types
+                if isinstance(batch, list):
+                    if len(batch) != 2:
+                        raise ValueError(
+                            f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
+                        )
+                    inputs, targets = batch
+                elif isinstance(batch, dict):
+                    inputs = {k: v for k, v in batch.items() if k != "viability"}
+                    targets = batch["viability"]
+                else:
+                    raise ValueError(f"Unexpected batch type: {type(batch)}")
 
-                inputs = {
-                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
-                }
-                targets = batch["viability"].to(self.device)
+                # Move inputs and targets to device
+                if isinstance(inputs, dict):
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                else:
+                    inputs = inputs.to(self.device)
+
+                targets = targets.to(self.device)
 
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, targets)
@@ -423,10 +445,6 @@ class Trainer:
 
                 all_targets.append(targets.cpu().numpy())
                 all_outputs.append(outputs.cpu().numpy())
-
-        val_loss /= num_samples
-        all_targets = np.concatenate(all_targets)
-        all_outputs = np.concatenate(all_outputs)
 
         from scipy.stats import pearsonr
         from sklearn.metrics import mean_squared_error, r2_score
@@ -506,15 +524,31 @@ class Trainer:
 
         with torch.no_grad():
             for batch in test_loader:
-                if not isinstance(batch, dict):
-                    raise ValueError(
-                        "Batch must be a dict with 'transcriptomics', 'molecular', 'viability' keys"
-                    )
+                # Handle different batch input types
+                if isinstance(batch, list):
+                    # Assume the list contains [inputs, targets]
+                    if len(batch) != 2:
+                        raise ValueError(
+                            f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
+                        )
+                    inputs, targets = batch
+                elif isinstance(batch, dict):
+                    inputs = {k: v for k, v in batch.items() if k != "viability"}
+                    targets = batch["viability"]
+                else:
+                    raise ValueError(f"Unexpected batch type: {type(batch)}")
 
-                inputs = {
-                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
-                }
-                targets = batch["viability"].to(self.device)
+                # Move inputs and targets to device
+                if isinstance(inputs, dict):
+                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                else:
+                    inputs = inputs.to(self.device)
+
+                targets = targets.to(self.device)
+
+                # Ensure targets are float
+                if targets.dtype != torch.float32:
+                    targets = targets.float()
 
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, targets)
@@ -736,7 +770,17 @@ class MultiRunTrainer:
         run_logger = None
         if self.exp_logger:
             run_name = f"run_{run_id}"
-            run_logger = self.exp_logger.clone_with_run_name(run_name)
+
+            # Check if clone_with_run_name exists, if not, use the existing logger
+            if hasattr(self.exp_logger, "clone_with_run_name"):
+                run_logger = self.exp_logger.clone_with_run_name(run_name)
+            else:
+                # If no clone method, just use the existing logger
+                # You might want to modify this based on your ExperimentLogger implementation
+                run_logger = self.exp_logger
+                logger.warning(
+                    "ExperimentLogger does not support run-specific cloning. Using default logger."
+                )
 
         # Return configured trainer
         return Trainer(

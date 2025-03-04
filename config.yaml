@@ -1,32 +1,32 @@
 # config.yaml
 paths:
-  data_dir: "${DATA_DIR:-data}"
-  model_dir: "${MODEL_DIR:-models/saved}"
-  log_dir: "${LOG_DIR:-logs}"
-  results_dir: "${RESULTS_DIR:-results}"
-  checkpoint_dir: "${CHECKPOINT_DIR:-${MODEL_DIR:-models/saved}/checkpoints}"
+  data_dir: "data"
+  model_dir: "models/saved"
+  log_dir: "logs"
+  results_dir: "results"
+  checkpoint_dir: "models/saved/checkpoints"
 
 data:
-  gctx_file: "${DATA_DIR:-data}/raw/LINCS/level5_beta_trt_cp_n720216x12328.gctx"
-  geneinfo_file: "${DATA_DIR:-data}/raw/LINCS/geneinfo_beta.txt"
-  siginfo_file: "${DATA_DIR:-data}/raw/LINCS/siginfo_beta.txt"
-  curves_post_qc: "${DATA_DIR:-data}/raw/CTRP/v20.data.curves_post_qc.txt"
-  per_cpd_post_qc: "${DATA_DIR:-data}/raw/CTRP/v20.data.per_cpd_post_qc.txt"
-  per_experiment: "${DATA_DIR:-data}/raw/CTRP/v20.meta.per_experiment.txt"
-  per_compound: "${DATA_DIR:-data}/raw/CTRP/v20.meta.per_compound.txt"
-  per_cell_line: "${DATA_DIR:-data}/raw/CTRP/v20.meta.per_cell_line.txt"
-  output_path: "${DATA_DIR:-data}/processed/LINCS_CTRP_matched.gctx"
+  gctx_file: "data/processed/LINCS.gctx"
+  geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
+  siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
+  curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
+  per_cpd_post_qc: "data/raw/CTRP/v20.data.per_cpd_post_qc.txt"
+  per_experiment: "data/raw/CTRP/v20.meta.per_experiment.txt"
+  per_compound: "data/raw/CTRP/v20.meta.per_compound.txt"
+  per_cell_line: "data/raw/CTRP/v20.meta.per_cell_line.txt"
+  output_path: "data/processed/LINCS_CTRP_matched.gctx"
   matching_strategy: "parallel"
   max_workers: null
   chunk_size: 10000
   feature_space: "landmark"
-  nrows: 1000 # Updated for 1000 rows of data
+  nrows: 1000
   normalize: "zscore"
   random_seed: 42
   cache_data: true
   use_multiprocessing: true
   num_workers: 4
-  batch_size: 32 # Added for DataLoader consistency
+  batch_size: 32
 
 training:
   batch_size: 32

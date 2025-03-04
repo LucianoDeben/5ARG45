@@ -141,9 +141,16 @@ class ExperimentLogger:
         log_level: int = logging.INFO,
         monitor_system: bool = True,
         metric_window_size: int = 100,
+        project_name: Optional[str] = None,
+        run_name: Optional[str] = None,
+        tracking: bool = True,
     ):
         # Set up deterministic timestamp to match previous implementation
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        self.project_name = project_name
+        self.run_name = run_name
+        self.tracking = tracking
 
         # Create experiment directory with robust path handling
         log_dir = Path(log_dir)
@@ -234,7 +241,7 @@ class ExperimentLogger:
         wandb.init(
             project=project,
             entity=entity,
-            name=f"{self.experiment_name}_{self.timestamp}",
+            name=f"{self.experiment_name}_{getattr(self, 'timestamp', datetime.now().strftime('%Y%m%d_%H%M%S'))}",
             dir=str(self.experiment_dir),
             config=wandb_config,
             settings=wandb.Settings(start_method="thread"),
@@ -712,6 +719,23 @@ class ExperimentLogger:
         except Exception as e:
             self.logger.error(f"Error in plot_comparison: {e}")
             return None
+
+    def clone_with_run_name(self, run_name: str) -> "ExperimentLogger":
+        """Create a clone of the logger with a new run name."""
+        clone = ExperimentLogger(
+            experiment_name=f"{self.experiment_name}_{run_name}",
+            config=self.config,
+            log_dir=str(self.experiment_dir.parent),
+            use_tensorboard=self.use_tensorboard,
+            use_wandb=self.use_wandb,
+            wandb_project=self.project_name,  # Use existing project_name
+            wandb_entity=None,  # Preserve entity if needed
+            log_to_file=False,  # Avoid duplicate file logging
+            log_level=self.logger.level,
+            monitor_system=self.system_monitor is not None,
+            metric_window_size=self.metric_aggregator.window_size,
+        )
+        return clone
 
     def close(self) -> None:
         """Clean up resources and generate final outputs."""

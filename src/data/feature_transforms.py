@@ -48,39 +48,185 @@ class BasicSmilesDescriptorTransform:
         return np.hstack([features, dosage])
 
 
+class RobustSmilesDescriptorTransform:
+    """
+    Generate simple descriptors from SMILES strings without requiring RDKit parsing.
+    This is a fallback for when RDKit fingerprinting fails.
+    """
+
+    def __init__(self, output_dim: int = 64):
+        """
+        Initialize the robust SMILES descriptor transform.
+
+        Args:
+            output_dim: Dimension of the output representation
+        """
+        self.output_dim = output_dim
+        self.logger = logging.getLogger(__name__)
+
+    def validate_smiles(self, smiles: str) -> bool:
+        """
+        Perform basic validation on SMILES strings without using RDKit.
+
+        Args:
+            smiles: SMILES string to validate
+
+        Returns:
+            True if the SMILES string passes basic validation
+        """
+        if not isinstance(smiles, str):
+            return False
+
+        if len(smiles) < 2:  # Too short to be valid
+            return False
+
+        # Check for basic balancing of brackets
+        if smiles.count("(") != smiles.count(")"):
+            return False
+
+        if smiles.count("[") != smiles.count("]"):
+            return False
+
+        # Check for common problematic patterns
+        if "1PS" in smiles:  # From your error message
+            return False
+
+        return True
+
+    def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
+        """
+        Convert SMILES to simple numerical descriptors without RDKit parsing.
+
+        Args:
+            mol_input: Dictionary with 'smiles' key or list of SMILES strings
+
+        Returns:
+            Array of numerical descriptors
+        """
+        smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
+        dosage = (
+            np.array(mol_input["dosage"]).reshape(-1, 1)
+            if isinstance(mol_input, dict) and "dosage" in mol_input
+            else np.zeros((len(smiles_list), 1))
+        )
+
+        # Initialize output features
+        features = np.zeros((len(smiles_list), self.output_dim - 1), dtype=np.float32)
+        valid_mask = np.zeros(len(smiles_list), dtype=bool)
+
+        for i, smiles in enumerate(smiles_list):
+            # Basic validation
+            if not self.validate_smiles(smiles):
+                self.logger.warning(f"Invalid SMILES at index {i}: {smiles}")
+                continue
+
+            # Extract simple character-based features
+            valid_mask[i] = True
+
+            # Only compute features for valid SMILES
+            try:
+                # These are basic statistical features that don't require parsing
+                features[i, 0] = len(smiles)  # Length
+                features[i, 1] = smiles.count("C")  # Carbon count
+                features[i, 2] = smiles.count("N")  # Nitrogen count
+                features[i, 3] = smiles.count("O")  # Oxygen count
+                features[i, 4] = (
+                    smiles.count("F")
+                    + smiles.count("Cl")
+                    + smiles.count("Br")
+                    + smiles.count("I")
+                )  # Halogens
+                features[i, 5] = smiles.count("S") + smiles.count("P")  # S and P count
+                features[i, 6] = smiles.count("[")  # Special atoms
+                features[i, 7] = smiles.count("(")  # Branching
+                features[i, 8] = smiles.count("=")  # Double bonds
+                features[i, 9] = smiles.count("#")  # Triple bonds
+                features[i, 10] = smiles.count("@")  # Chirality
+
+                # Ring counts
+                for j in range(1, 10):
+                    idx = 10 + j
+                    if idx < self.output_dim - 1:
+                        features[i, idx] = smiles.count(str(j))
+
+                # Aromatic characters
+                aromatic_count = sum(smiles.count(c) for c in ["c", "n", "o", "s", "p"])
+                if 10 + 10 < self.output_dim - 1:
+                    features[i, 10 + 10] = aromatic_count
+
+                # Fill the rest with additional features or zeros
+                for j in range(10 + 11, self.output_dim - 1):
+                    if j < self.output_dim - 1:
+                        features[i, j] = 0.0
+
+            except Exception as e:
+                self.logger.warning(
+                    f"Error extracting features for SMILES {smiles}: {e}"
+                )
+                valid_mask[i] = False
+
+        # Return only valid data
+        if np.any(valid_mask):
+            result = np.hstack([features[valid_mask], dosage[valid_mask]])
+            self.logger.info(
+                f"Processed {np.sum(valid_mask)}/{len(smiles_list)} valid SMILES strings"
+            )
+            return result
+        else:
+            self.logger.error("No valid SMILES found in batch")
+            # Return at least one row of zeros to prevent shape errors
+            return np.zeros((1, self.output_dim), dtype=np.float32)
+
+
 class MorganFingerprintTransform:
     """Generate Morgan fingerprints from SMILES."""
 
     def __init__(self, radius: int = 2, size: int = 1024):
-        """Initialize with fingerprint parameters."""
         self.radius = radius
         self.size = size
 
     def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
-        """Convert SMILES to Morgan fingerprints."""
         smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
         dosage = (
             np.array(mol_input["dosage"]).reshape(-1, 1)
-            if isinstance(mol_input, dict)
+            if isinstance(mol_input, dict) and "dosage" in mol_input
             else np.zeros((len(smiles_list), 1))
         )
 
         fingerprints = np.zeros((len(smiles_list), self.size), dtype=np.float32)
-        mols = [Chem.MolFromSmiles(smiles) for smiles in smiles_list]
-        valid_mask = np.array([mol is not None for mol in mols])
-        if not valid_mask.all():
-            logger.warning(
-                f"Invalid SMILES found: {len(smiles_list) - valid_mask.sum()} skipped"
-            )
+        valid_indices = []
 
-        for i, mol in enumerate(mols):
-            if mol:
+        for i, smiles in enumerate(smiles_list):
+            # Skip invalid SMILES strings
+            if not isinstance(smiles, str) or not smiles.strip():
+                logger.warning(f"Invalid SMILES at index {i}: {smiles}")
+                continue
+
+            try:
+                # Try to parse the SMILES
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is None:
+                    logger.warning(f"Failed to parse SMILES at index {i}: {smiles}")
+                    continue
+
+                # Generate fingerprint
                 fp = AllChem.GetMorganFingerprintAsBitVect(
                     mol, self.radius, nBits=self.size
                 )
                 fingerprints[i] = np.array(fp)
+                valid_indices.append(i)
+            except Exception as e:
+                logger.warning(
+                    f"Error processing SMILES at index {i} ({smiles}): {str(e)}"
+                )
+                continue
 
-        return np.hstack([fingerprints[valid_mask], dosage[valid_mask]])
+        if not valid_indices:
+            logger.error("No valid SMILES found in batch, returning empty arrays")
+            return np.zeros((0, self.size + 1), dtype=np.float32)
+
+        valid_indices = np.array(valid_indices)
+        return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
 
 
 class MolecularGraphTransform:

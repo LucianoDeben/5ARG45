@@ -20,53 +20,115 @@ class GCTXDataLoader:
         self._col_metadata = None
         self._row_metadata_cache = None
         self._metadata_attrs = None
+
+        # Preload metadata during initialization
         if preload_metadata:
             try:
-                self._col_metadata = self._load_column_metadata()
-                logger.debug(
-                    f"Loaded column metadata with {len(self._col_metadata)} genes."
-                )
+                with h5py.File(self.gctx_file, "r") as f:
+                    self._n_rows, self._n_cols = f["0/DATA/0/matrix"].shape
+                    self._col_metadata = self._load_column_metadata(f)
+                    logger.debug(
+                        f"Preloaded column metadata with {len(self._col_metadata)} genes."
+                    )
             except Exception as e:
-                logger.warning(f"Failed to preload column metadata: {str(e)}")
+                logger.warning(f"Failed to preload metadata: {str(e)}")
 
-    def _load_column_metadata(self) -> pd.DataFrame:
-        with h5py.File(self.gctx_file, "r") as f:
+    def _load_column_metadata(self, f=None) -> pd.DataFrame:
+        """
+        Load column metadata, with option to pass an open file handle.
+
+        Args:
+            f: Optional open h5py File object
+
+        Returns:
+            DataFrame with column metadata
+        """
+        close_file = f is None
+        try:
+            if f is None:
+                f = h5py.File(self.gctx_file, "r")
+
             meta_col_grp = f["0/META/COL"]
             col_dict = {key: meta_col_grp[key][:] for key in meta_col_grp.keys()}
             for key, data in col_dict.items():
                 if data.dtype.kind == "S":
                     col_dict[key] = [s.decode("utf-8", errors="ignore") for s in data]
+
             return pd.DataFrame(col_dict)
 
+        finally:
+            if close_file and "f" in locals():
+                f.close()
+
     def __enter__(self):
+        """Context manager entry."""
+        if self.f is not None:
+            self.f.close()
+
         self.f = h5py.File(self.gctx_file, "r")
+
+        # Validate file structure
         required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL"]
         for path in required:
             if path not in self.f:
                 raise ValueError(f"Invalid .gctx file: missing {path}")
+
         self._n_rows, self._n_cols = self.f["0/DATA/0/matrix"].shape
+
+        # Ensure metadata is loaded
         if self._col_metadata is None:
-            self._col_metadata = self._load_column_metadata()
+            self._col_metadata = self._load_column_metadata(self.f)
+
         if self._row_metadata_cache is None:
             self._row_metadata_cache = self.get_row_metadata()
+
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
         if self.f is not None:
             self.f.close()
+            self.f = None
 
     def _convert_to_indices(
-        self, selection: Union[slice, list, None], max_size: int
+        self, selection: Union[slice, list, np.ndarray, None], max_size: int
     ) -> Union[slice, list]:
+        """
+        Convert various index types to a consistent format.
+
+        Args:
+            selection: Input selection (slice, list, numpy array, or None)
+            max_size: Maximum number of rows/columns
+
+        Returns:
+            Slice or list of indices
+        """
         if selection is None:
             return slice(None)
-        elif isinstance(selection, slice):
+
+        # Convert numpy array to list
+        if isinstance(selection, np.ndarray):
+            selection = selection.tolist()
+
+        # Handle slice
+        if isinstance(selection, slice):
             return selection
-        elif isinstance(selection, list):
+
+        # Handle list of indices
+        if isinstance(selection, list):
+            # Convert to integer indices if not already
+            selection = [int(i) for i in selection]
+
+            # Check bounds
             if any(i < 0 or i >= max_size for i in selection):
                 raise IndexError(f"Indices out of bounds (0 to {max_size-1})")
+
             return selection
-        raise TypeError("Selection must be None, a slice, or a list of indices")
+
+        # If we've reached here, it's an unsupported type
+        raise TypeError(
+            "Selection must be None, a slice, list, or numpy array of indices"
+        )
 
     def get_gene_indices_for_feature_space(
         self, feature_space: Union[str, List[str]]
@@ -90,33 +152,85 @@ class GCTXDataLoader:
 
     def get_expression_data(
         self,
-        row_slice: Union[slice, list, None] = None,
-        col_slice: Union[slice, list, None] = None,
+        row_slice: Union[slice, list, np.ndarray, None] = None,
+        col_slice: Union[slice, list, np.ndarray, None] = None,
         feature_space: Optional[Union[str, List[str]]] = None,
         chunk_size: int = 10000,
     ) -> np.ndarray:
-        if col_slice is not None and feature_space is not None:
-            raise ValueError("Cannot specify both col_slice and feature_space.")
-        row_selection = self._convert_to_indices(row_slice, self._n_rows)
-        col_selection = self._convert_to_indices(
-            (
-                col_slice or self.get_gene_indices_for_feature_space(feature_space)
-                if feature_space
-                else None
-            ),
-            self._n_cols,
-        )
-        if isinstance(row_selection, list):
-            chunks = [
-                row_selection[i : i + chunk_size]
-                for i in range(0, len(row_selection), chunk_size)
-            ]
-            data = [
-                self.f["0/DATA/0/matrix"][chunk, col_selection]
-                for chunk in tqdm(chunks, desc="Loading expression chunks")
-            ]
-            return np.concatenate(data, axis=0)
-        return self.f["0/DATA/0/matrix"][row_selection, col_selection]
+        """
+        Robust method to get expression data with proper file handling.
+
+        Args:
+            row_slice: Rows to select
+            col_slice: Columns to select
+            feature_space: Feature space to use
+            chunk_size: Size of chunks for large datasets
+
+        Returns:
+            Numpy array of expression data
+        """
+        try:
+            # Open file
+            with h5py.File(self.gctx_file, "r") as f:
+                # Validate file structure
+                if "0/DATA/0/matrix" not in f:
+                    raise ValueError("Invalid GCTX file structure")
+
+                matrix = f["0/DATA/0/matrix"]
+                self._n_rows, self._n_cols = matrix.shape
+
+                # Process column selection
+                if col_slice is not None and feature_space is not None:
+                    raise ValueError("Cannot specify both col_slice and feature_space.")
+
+                col_selection = self._convert_to_indices(
+                    (
+                        col_slice
+                        or self.get_gene_indices_for_feature_space(feature_space)
+                        if feature_space
+                        else None
+                    ),
+                    self._n_cols,
+                )
+
+                # Process row selection
+                row_selection = self._convert_to_indices(row_slice, self._n_rows)
+
+                # Strategy for handling different selection types
+                def select_data(rows, cols):
+                    if isinstance(rows, slice) and isinstance(cols, slice):
+                        return matrix[rows, cols]
+                    elif isinstance(rows, slice):
+                        return matrix[rows, :][:, cols]
+                    elif isinstance(cols, slice):
+                        return matrix[rows, :][:, cols]
+                    else:
+                        # This is the most memory-intensive approach
+                        # Retrieve the entire matrix first, then select
+                        full_data = matrix[:]
+                        return full_data[rows, :][:, cols]
+
+                # Handle chunked loading for list-based row selection
+                if isinstance(row_selection, list):
+                    data = []
+                    for chunk in tqdm(
+                        [
+                            row_selection[i : i + chunk_size]
+                            for i in range(0, len(row_selection), chunk_size)
+                        ],
+                        desc="Loading expression chunks",
+                    ):
+                        chunk_data = select_data(chunk, col_selection)
+                        data.append(chunk_data)
+
+                    return np.concatenate(data, axis=0)
+
+                # Direct data selection
+                return select_data(row_selection, col_selection)
+
+        except Exception as e:
+            logger.error(f"Error retrieving expression data: {e}")
+            raise
 
     def get_row_metadata(
         self,

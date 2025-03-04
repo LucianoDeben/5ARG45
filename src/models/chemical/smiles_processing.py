@@ -1,6 +1,8 @@
 # models/chemical/smiles_processing.py
 import logging
 import math
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -35,40 +37,54 @@ class SMILESEncoder(nn.Module):
         hidden_dim: int,
         output_dim: int,
         architecture: str = "cnn",
-        vocab_file: str = "data/raw/vocab.txt",
+        vocab_file: str = None,
         max_length: int = 128,
         dropout: float = 0.2,
     ):
-        """
-        Initialize the SMILESEncoder.
-
-        Args:
-            embedding_dim: Dimension of token embeddings
-            hidden_dim: Dimension of hidden layers
-            output_dim: Dimension of the output representation
-            architecture: Type of architecture to use ('cnn' or 'rnn')
-            vocab_file: Path to vocabulary file for tokenization
-            max_length: Maximum SMILES sequence length
-            dropout: Dropout rate
-        """
         super(SMILESEncoder, self).__init__()
+
+        # Ensure all attributes are set before any method calls
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
-        self.architecture = architecture.lower()
+        self.architecture = architecture.lower()  # Ensure lowercase
         self.max_length = max_length
         self.dropout = dropout
 
+        # If no vocab file is provided, try to find it relative to the project root
+        if vocab_file is None:
+            # Determine project root
+            project_root = Path(__file__).parent.parent.parent.parent
+            possible_vocab_paths = [
+                project_root / "data" / "raw" / "vocab.txt",
+                project_root / "data" / "vocab.txt",
+                project_root / "vocab.txt",
+            ]
+
+            for path in possible_vocab_paths:
+                if path.exists():
+                    vocab_file = str(path)
+                    break
+
         # Initialize tokenizer
         try:
-            self.tokenizer = SmilesTokenizer(vocab_file=vocab_file)
-            self.vocab_size = self.tokenizer.vocab_size
-            logger.debug(f"Initialized tokenizer with vocab size {self.vocab_size}")
+            if vocab_file and os.path.exists(vocab_file):
+                self.tokenizer = SmilesTokenizer(vocab_file=vocab_file)
+
+                # Add max_len attribute if not present
+                if not hasattr(self.tokenizer, "max_len"):
+                    self.tokenizer.max_len = self.max_length
+
+                self.vocab_size = self.tokenizer.vocab_size
+                logger.debug(f"Initialized tokenizer with vocab size {self.vocab_size}")
+            else:
+                logger.warning("No vocabulary file found. Using default tokenization.")
+                self.tokenizer = None
+                self.vocab_size = 100  # Approximate size for common SMILES tokens
         except Exception as e:
             logger.warning(f"Failed to load tokenizer, using default vocabulary: {e}")
-            # Default to approximate vocabulary size if tokenizer fails
             self.tokenizer = None
-            self.vocab_size = 100  # Approximate size for common SMILES tokens
+            self.vocab_size = 100
 
         # Token embedding layer
         self.embedding = nn.Embedding(self.vocab_size, embedding_dim)
@@ -107,7 +123,7 @@ class SMILESEncoder(nn.Module):
         self.output = nn.Linear(hidden_dim, output_dim)
 
         logger.debug(
-            f"Initialized SMILESEncoder with {architecture} architecture, "
+            f"Initialized SMILESEncoder with {self.architecture} architecture, "
             f"embedding_dim={embedding_dim}, output_dim={output_dim}"
         )
 
@@ -473,3 +489,56 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
+
+
+class MolecularEncoder(nn.Module):
+    """
+    Flexible molecular encoder supporting multiple representation types
+    """
+
+    def __init__(
+        self,
+        representation_type: str = "fingerprint",
+        input_dim: int = 1024,
+        hidden_dims: List[int] = [256, 128],
+        output_dim: int = 128,
+        dropout: float = 0.3,
+    ):
+        super().__init__()
+
+        # Support different molecular representation types
+        self.representation_type = representation_type
+
+        # Encoder layers
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.extend(
+                [
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.BatchNorm1d(hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+            prev_dim = hidden_dim
+
+        # Final projection layer
+        layers.append(nn.Linear(prev_dim, output_dim))
+
+        self.encoder = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with support for different input types
+
+        Args:
+            x: Molecular representation tensor
+
+        Returns:
+            Encoded molecular features
+        """
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # Ensure 2D input
+
+        return self.encoder(x)

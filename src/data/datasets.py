@@ -7,6 +7,7 @@ import pandas as pd
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 from src.data.feature_transforms import (
     BasicSmilesDescriptorTransform,
@@ -17,7 +18,6 @@ from src.data.loaders import GCTXDataLoader
 logger = logging.getLogger(__name__)
 
 
-# Dataset Classes (Unchanged)
 class MultimodalDrugDataset(Dataset):
     def __init__(
         self,
@@ -105,7 +105,6 @@ class ChemicalDataset(Dataset):
         return sample
 
 
-# Factory Class with Chunked Splitting
 class DatasetFactory:
     """Factory for creating and splitting datasets from GCTX data with chunking support."""
 
@@ -117,55 +116,163 @@ class DatasetFactory:
         random_state: int = 42,
         group_by: Optional[str] = None,
         stratify_by: Optional[str] = None,
+        chunk_size: int = 10000,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Split indices based on metadata."""
+        """
+        Split indices based on metadata with support for large datasets.
+
+        Args:
+            metadata: DataFrame containing metadata
+            test_size: Proportion of data to use for testing
+            val_size: Proportion of data to use for validation
+            random_state: Random seed for reproducibility
+            group_by: Column to use for group-based splitting
+            stratify_by: Column to use for stratified splitting
+            chunk_size: Size of chunks for processing large datasets
+
+        Returns:
+            Tuple of train, validation, and test indices
+        """
+        logger.info("Performing data splitting...")
+
+        # Ensure test_size + val_size < 1
+        if test_size + val_size >= 1.0:
+            raise ValueError("Combined test and validation sizes must be less than 1.0")
+
         indices = np.arange(len(metadata))
+
+        # Group-based splitting
         if group_by and len(metadata[group_by].unique()) >= 3:
             logger.info(f"Using group-based splitting based on '{group_by}'")
-            gss = GroupShuffleSplit(
-                n_splits=1, test_size=test_size, random_state=random_state
-            )
-            train_val_idx, test_idx = next(
-                gss.split(indices, groups=metadata[group_by])
-            )
-            val_size_adjusted = val_size / (1 - test_size)
-            groups_train_val = metadata.iloc[train_val_idx][group_by]
-            gss_val = GroupShuffleSplit(
-                n_splits=1, test_size=val_size_adjusted, random_state=random_state
-            )
-            train_idx, val_idx = next(
-                gss_val.split(np.arange(len(train_val_idx)), groups=groups_train_val)
-            )
-            train_idx = train_val_idx[train_idx]
-            val_idx = train_val_idx[val_idx]
-        else:
+            try:
+                gss = GroupShuffleSplit(
+                    n_splits=1, test_size=test_size, random_state=random_state
+                )
+                train_val_idx, test_idx = next(
+                    gss.split(indices, groups=metadata[group_by])
+                )
+
+                # Adjust validation size for the remaining train set
+                val_size_adjusted = val_size / (1 - test_size)
+                groups_train_val = metadata.iloc[train_val_idx][group_by]
+
+                gss_val = GroupShuffleSplit(
+                    n_splits=1, test_size=val_size_adjusted, random_state=random_state
+                )
+                train_idx, val_idx = next(
+                    gss_val.split(
+                        np.arange(len(train_val_idx)), groups=groups_train_val
+                    )
+                )
+                train_idx = train_val_idx[train_idx]
+                val_idx = train_val_idx[val_idx]
+
+            except Exception as e:
+                logger.warning(
+                    f"Group-based splitting failed: {e}. Falling back to standard splitting."
+                )
+                group_by = None
+
+        # Standard stratified or random splitting
+        if not group_by:
+            # Prepare stratification
             stratify = None
             if stratify_by:
-                stratify = (
-                    pd.qcut(
-                        metadata[stratify_by], q=10, labels=False, duplicates="drop"
+                try:
+                    # Handle continuous variables
+                    if metadata[stratify_by].dtype in [float, int]:
+                        stratify = pd.qcut(
+                            metadata[stratify_by], q=10, labels=False, duplicates="drop"
+                        )
+                    else:
+                        stratify = metadata[stratify_by]
+                    logger.info(f"Using stratified splitting based on '{stratify_by}'")
+                except Exception as e:
+                    logger.warning(
+                        f"Stratification failed: {e}. Using random splitting."
                     )
-                    if metadata[stratify_by].dtype in [float, int]
-                    else metadata[stratify_by]
-                )
-                logger.info(f"Using stratified splitting based on '{stratify_by}'")
+                    stratify = None
+
+            # Split into train+val and test sets
             train_val_idx, test_idx = train_test_split(
                 indices,
                 test_size=test_size,
                 random_state=random_state,
                 stratify=stratify,
             )
+
+            # Adjust validation size for train set
+            val_size_adjusted = val_size / (1 - test_size)
             stratify_val = (
                 stratify.iloc[train_val_idx] if stratify is not None else None
             )
-            val_size_adjusted = val_size / (1 - test_size)
+
+            # Split train+val into train and validation sets
             train_idx, val_idx = train_test_split(
                 train_val_idx,
                 test_size=val_size_adjusted,
                 random_state=random_state,
                 stratify=stratify_val,
             )
+
+        # Ensure indices are numpy arrays
+        train_idx = np.array(train_idx, dtype=int)
+        val_idx = np.array(val_idx, dtype=int)
+        test_idx = np.array(test_idx, dtype=int)
+
+        logger.info(
+            f"Splitting complete. Train: {len(train_idx)}, Val: {len(val_idx)}, Test: {len(test_idx)}"
+        )
         return train_idx, val_idx, test_idx
+
+    @staticmethod
+    def _process_large_dataset(
+        gctx_loader: GCTXDataLoader,
+        nrows: Optional[int] = None,
+        feature_space: Union[str, List[str]] = "landmark",
+        chunk_size: int = 10000,
+    ) -> pd.DataFrame:
+        """
+        Process large datasets in chunks to manage memory.
+
+        Args:
+            gctx_loader: GCTX data loader
+            nrows: Number of rows to load
+            feature_space: Gene feature space
+            chunk_size: Size of chunks to process
+
+        Returns:
+            Processed metadata DataFrame
+        """
+        logger.info("Processing large dataset with chunked loading...")
+
+        with gctx_loader:
+            total_rows = (
+                gctx_loader._n_rows
+                if nrows is None
+                else min(nrows, gctx_loader._n_rows)
+            )
+
+            # Process in chunks if dataset is large
+            if total_rows > chunk_size:
+                metadata_chunks = []
+                for start in tqdm(
+                    range(0, total_rows, chunk_size), desc="Loading metadata"
+                ):
+                    end = min(start + chunk_size, total_rows)
+                    chunk = gctx_loader.get_row_metadata(row_slice=slice(start, end))
+                    metadata_chunks.append(chunk)
+
+                metadata = pd.concat(metadata_chunks, ignore_index=True)
+            else:
+                # Load entire dataset if small enough
+                metadata = gctx_loader.get_row_metadata(row_slice=slice(0, total_rows))
+
+        # Ensure metadata is a DataFrame
+        if not isinstance(metadata, pd.DataFrame):
+            metadata = pd.DataFrame(metadata)
+
+        return metadata
 
     @staticmethod
     def create_and_split_multimodal(
@@ -184,31 +291,36 @@ class DatasetFactory:
         """Create and split multimodal datasets with chunking for large datasets."""
         logger.info("Creating and splitting multimodal datasets with chunking...")
 
-        # Load all metadata (assumed to fit in memory)
-        with gctx_loader:
-            total_rows = (
-                gctx_loader._n_rows
-                if nrows is None
-                else min(nrows, gctx_loader._n_rows)
-            )
-            metadata = gctx_loader.get_row_metadata(row_slice=slice(0, total_rows))
+        # Process metadata
+        metadata = DatasetFactory._process_large_dataset(
+            gctx_loader, nrows, feature_space, chunk_size
+        )
 
-        if not isinstance(metadata, pd.DataFrame):
-            metadata = pd.DataFrame(metadata)
-
+        # Validate required columns
         required_cols = ["canonical_smiles", "pert_dose", "viability"]
         if group_by:
             required_cols.append(group_by)
         if stratify_by:
             required_cols.append(stratify_by)
+
         missing = [col for col in required_cols if col not in metadata.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
         # Split indices based on metadata
         train_idx, val_idx, test_idx = DatasetFactory._split_data(
-            metadata, test_size, val_size, random_state, group_by, stratify_by
+            metadata,
+            test_size,
+            val_size,
+            random_state,
+            group_by,
+            stratify_by,
+            chunk_size,
         )
+
+        train_idx = train_idx.tolist()  # or np.array(train_idx)
+        val_idx = val_idx.tolist()  # or np.array(val_idx)
+        test_idx = test_idx.tolist()  # or np.array(test_idx)
 
         # Create datasets using split indices
         train_ds = MultimodalDrugDataset(
@@ -254,18 +366,39 @@ class DatasetFactory:
     ) -> Tuple[TranscriptomicsDataset, TranscriptomicsDataset, TranscriptomicsDataset]:
         """Create and split transcriptomics datasets with chunking."""
         logger.info("Creating and splitting transcriptomics datasets with chunking...")
-        with gctx_loader:
-            total_rows = (
-                gctx_loader._n_rows
-                if nrows is None
-                else min(nrows, gctx_loader._n_rows)
-            )
-            metadata = gctx_loader.get_row_metadata(row_slice=slice(0, total_rows))
-        if not isinstance(metadata, pd.DataFrame):
-            metadata = pd.DataFrame(metadata)
-        train_idx, val_idx, test_idx = DatasetFactory._split_data(
-            metadata, test_size, val_size, random_state, group_by, stratify_by
+
+        # Process metadata
+        metadata = DatasetFactory._process_large_dataset(
+            gctx_loader, nrows, feature_space, chunk_size
         )
+
+        # Validate required columns
+        required_cols = ["viability"]
+        if group_by:
+            required_cols.append(group_by)
+        if stratify_by:
+            required_cols.append(stratify_by)
+
+        missing = [col for col in required_cols if col not in metadata.columns]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+
+        # Split indices based on metadata
+        train_idx, val_idx, test_idx = DatasetFactory._split_data(
+            metadata,
+            test_size,
+            val_size,
+            random_state,
+            group_by,
+            stratify_by,
+            chunk_size,
+        )
+
+        train_idx = train_idx.tolist()  # or np.array(train_idx)
+        val_idx = val_idx.tolist()  # or np.array(val_idx)
+        test_idx = test_idx.tolist()  # or np.array(test_idx)
+
+        # Create datasets using split indices
         train_ds = TranscriptomicsDataset(
             transcriptomics_data=gctx_loader.get_expression_data(
                 row_slice=train_idx, feature_space=feature_space
@@ -287,6 +420,7 @@ class DatasetFactory:
             viability=metadata.iloc[test_idx]["viability"].values,
             transform=transform,
         )
+
         logger.info(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
         return train_ds, val_ds, test_ds
 
@@ -304,18 +438,39 @@ class DatasetFactory:
     ) -> Tuple[ChemicalDataset, ChemicalDataset, ChemicalDataset]:
         """Create and split chemical datasets with chunking."""
         logger.info("Creating and splitting chemical datasets with chunking...")
-        with gctx_loader:
-            total_rows = (
-                gctx_loader._n_rows
-                if nrows is None
-                else min(nrows, gctx_loader._n_rows)
-            )
-            metadata = gctx_loader.get_row_metadata(row_slice=slice(0, total_rows))
-        if not isinstance(metadata, pd.DataFrame):
-            metadata = pd.DataFrame(metadata)
-        train_idx, val_idx, test_idx = DatasetFactory._split_data(
-            metadata, test_size, val_size, random_state, group_by, stratify_by
+
+        # Process metadata
+        metadata = DatasetFactory._process_large_dataset(
+            gctx_loader, nrows, "landmark", chunk_size
         )
+
+        # Validate required columns
+        required_cols = ["canonical_smiles", "pert_dose", "viability"]
+        if group_by:
+            required_cols.append(group_by)
+        if stratify_by:
+            required_cols.append(stratify_by)
+
+        missing = [col for col in required_cols if col not in metadata.columns]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+
+        # Split indices based on metadata
+        train_idx, val_idx, test_idx = DatasetFactory._split_data(
+            metadata,
+            test_size,
+            val_size,
+            random_state,
+            group_by,
+            stratify_by,
+            chunk_size,
+        )
+
+        train_idx = train_idx.tolist()  # or np.array(train_idx)
+        val_idx = val_idx.tolist()  # or np.array(val_idx)
+        test_idx = test_idx.tolist()  # or np.array(test_idx)
+
+        # Create datasets using split indices
         train_ds = ChemicalDataset(
             smiles=metadata.iloc[train_idx]["canonical_smiles"].values,
             dosage=metadata.iloc[train_idx]["pert_dose"].values,
@@ -334,5 +489,6 @@ class DatasetFactory:
             viability=metadata.iloc[test_idx]["viability"].values,
             transform=transform,
         )
+
         logger.info(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
         return train_ds, val_ds, test_ds
