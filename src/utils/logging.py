@@ -128,8 +128,6 @@ class SystemMonitor:
 
 
 class ExperimentLogger:
-    """Unified logging system supporting multiple backends."""
-
     def __init__(
         self,
         experiment_name: str,
@@ -145,14 +143,14 @@ class ExperimentLogger:
         metric_window_size: int = 100,
     ):
         # Set up deterministic timestamp to match previous implementation
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Create experiment directory with robust path handling
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
 
         self.experiment_name = experiment_name
-        self.experiment_dir = log_dir / f"{experiment_name}_{timestamp}"
+        self.experiment_dir = log_dir / f"{experiment_name}_{self.timestamp}"
 
         # Ensure all necessary subdirectories are created
         for subdir in ["figures", "config", "checkpoints", "images"]:

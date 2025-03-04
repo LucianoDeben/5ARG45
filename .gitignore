@@ -175,6 +175,7 @@ data/test
 *.bin
 *.zip
 *.pk
+*.pkl
 /pk
 
 # Assets

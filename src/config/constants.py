@@ -1,33 +1,42 @@
-# config/constants.py
+# src/config/constants.py
+import logging
 from enum import Enum
-from typing import Dict
+from typing import Any, Dict
+from venv import logger
 
-# Schema version for backward compatibility
+
+def check_config_types(config: Dict[str, Any], schema_dict: Dict[str, type]) -> bool:
+    """Validate configuration value types against a schema dictionary."""
+    for key, expected_type in schema_dict.items():
+        if key in config:
+            if isinstance(expected_type, dict) and isinstance(config[key], dict):
+                if not check_config_types(config[key], expected_type):
+                    return False
+            elif not isinstance(config[key], expected_type):
+                logger.error(
+                    f"Config key '{key}' has wrong type: {type(config[key])}, expected {expected_type}"
+                )
+                return False
+    return True
+
+
 CURRENT_SCHEMA_VERSION = "1.0.0"
-
-# Required configuration sections
 REQUIRED_CONFIG_SECTIONS = {"data", "model", "training", "chemical", "experiment"}
 
 
 class FeatureSpace(str, Enum):
-    """Valid gene feature spaces for L1000 data."""
-
     LANDMARK = "landmark"
     BEST_INFERRED = "best inferred"
     INFERRED = "inferred"
 
 
 class Normalization(str, Enum):
-    """Data normalization strategies."""
-
     ZSCORE = "zscore"
     MINMAX = "minmax"
     ROBUST = "robust"
 
 
 class Optimizer(str, Enum):
-    """Valid optimization algorithms."""
-
     ADAM = "adam"
     SGD = "sgd"
     ADAMW = "adamw"
@@ -35,8 +44,6 @@ class Optimizer(str, Enum):
 
 
 class LossFunction(str, Enum):
-    """Valid loss functions."""
-
     MSE = "mse"
     MAE = "mae"
     HUBER = "huber"
@@ -44,8 +51,6 @@ class LossFunction(str, Enum):
 
 
 class ChemicalRepresentation(str, Enum):
-    """Valid molecular representation types."""
-
     FINGERPRINT = "fingerprint"
     SMILES_SEQUENCE = "smiles_sequence"
     GRAPH = "graph"
@@ -53,8 +58,6 @@ class ChemicalRepresentation(str, Enum):
 
 
 class Activation(str, Enum):
-    """Valid activation functions."""
-
     RELU = "relu"
     LEAKY_RELU = "leaky_relu"
     GELU = "gelu"
@@ -63,8 +66,6 @@ class Activation(str, Enum):
 
 
 class FusionStrategy(str, Enum):
-    """Valid multimodal fusion strategies."""
-
     CONCAT = "concat"
     ATTENTION = "attention"
     CROSS_ATTENTION = "cross_attention"
@@ -72,16 +73,6 @@ class FusionStrategy(str, Enum):
     BILINEAR = "bilinear"
 
 
-# Convert enums to sets for backward compatibility
-VALID_FEATURE_SPACES = {e.value for e in FeatureSpace}
-VALID_NORMALIZATIONS = {e.value for e in Normalization}
-VALID_OPTIMIZERS = {e.value for e in Optimizer}
-VALID_LOSS_FUNCTIONS = {e.value for e in LossFunction}
-VALID_CHEMICAL_REPRESENTATIONS = {e.value for e in ChemicalRepresentation}
-VALID_ACTIVATIONS = {e.value for e in Activation}
-VALID_FUSION_STRATEGIES = {e.value for e in FusionStrategy}
-
-# Default paths with environment variable references
 DEFAULT_PATHS = {
     "data_dir": "${DATA_DIR:-data}",
     "model_dir": "${MODEL_DIR:-models/saved}",
@@ -89,8 +80,8 @@ DEFAULT_PATHS = {
     "results_dir": "${RESULTS_DIR:-results}",
 }
 
-# Logging configuration
 LOGGING_CONFIG = {
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     "level": "INFO",
+    "handlers": [logging.StreamHandler(), logging.FileHandler("app.log")],
 }

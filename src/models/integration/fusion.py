@@ -241,9 +241,9 @@ class MultimodalFusion(nn.Module):
             else:
                 self.proj = nn.Identity()
 
-        # For hierarchical fusion
-        if hierarchical and len(modality_dims) > 2:
-            # Create a binary tree of fusion modules
+        # Build fusion tree for hierarchical fusion if enabled
+        if hierarchical:
+            self.fusion_modules = nn.ModuleList()
             self.build_fusion_tree(list(modality_dims.items()))
 
         logger.debug(
@@ -252,44 +252,97 @@ class MultimodalFusion(nn.Module):
             f"hierarchical={hierarchical}, learnable_weights={learnable_weights}"
         )
 
-    def build_fusion_tree(self, modalities: List[Tuple[str, int]]):
+    def build_fusion_tree(self, modalities: List[Tuple[str, int]]) -> None:
         """
         Build a binary tree of fusion modules for hierarchical fusion.
 
         Args:
             modalities: List of (name, dimension) tuples for each modality
         """
-        self.fusion_modules = nn.ModuleList()
-
-        # Base case: just two modalities
-        if len(modalities) == 2:
+        if len(modalities) <= 1:
             return
 
-        # Build a balanced binary tree of fusion modules
+        # Create pairs for fusion, handling odd numbers by pairing with the last
         current_level = []
         for i in range(0, len(modalities) - 1, 2):
             if i + 1 < len(modalities):
-                # Create a fusion module for this pair
                 name1, dim1 = modalities[i]
                 name2, dim2 = modalities[i + 1]
-
+                output_dim = max(dim1, dim2)  # Match the largest dimension
                 fusion = FeatureFusion(
                     t_dim=dim1,
                     c_dim=dim2,
-                    output_dim=max(dim1, dim2),
+                    output_dim=output_dim,
                     strategy=self.strategy,
                     projection=True,
                 )
-
                 self.fusion_modules.append(fusion)
-                current_level.append((f"{name1}_{name2}", max(dim1, dim2)))
+                current_level.append((f"{name1}_{name2}", output_dim))
             else:
-                # Odd number of modalities, pass through
+                # Handle odd number of modalities by keeping the last one unchanged
                 current_level.append(modalities[i])
 
-        # If we have more than 2 fused representations, continue building the tree
-        if len(current_level) > 2:
+        # Recursively build the tree if there are still multiple nodes
+        if len(current_level) > 1:
             self.build_fusion_tree(current_level)
+        elif current_level:  # Handle the final node (single modality or fused pair)
+            self.final_dim = current_level[0][1]
+            self.final_projection = nn.Linear(self.final_dim, self.output_dim)
+
+    def _hierarchical_fusion(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Apply hierarchical fusion by recursively fusing pairs of modalities.
+
+        Args:
+            features: Dictionary mapping modality names to their feature tensors
+
+        Returns:
+            Tensor [batch_size, output_dim] with fused representation
+        """
+        modality_names = list(features.keys())
+        feature_list = [features[name] for name in modality_names]
+
+        # Project features to compatible dimensions
+        projected_features = []
+        for feature in feature_list:
+            if feature.size(-1) in self.modality_dims.values():
+                projected_features.append(feature)
+            else:
+                # Find the matching projection or use identity
+                for name, proj in self.modality_projections.items():
+                    if self.modality_dims[name] == feature.size(-1):
+                        projected_features.append(proj(feature))
+                        break
+                else:
+                    raise ValueError(
+                        f"No matching projection for feature dimension {feature.size(-1)}"
+                    )
+
+        # Initialize the list of features to fuse
+        current_features = projected_features
+        fusion_idx = 0
+
+        while len(current_features) > 1:
+            new_features = []
+            for i in range(0, len(current_features) - 1, 2):
+                if i + 1 < len(current_features):
+                    # Fuse this pair using the corresponding fusion module
+                    fused = self.fusion_modules[fusion_idx](
+                        current_features[i], current_features[i + 1]
+                    )
+                    new_features.append(fused)
+                    fusion_idx += 1
+                else:
+                    # Handle odd number by keeping the last feature unchanged
+                    new_features.append(current_features[i])
+            current_features = new_features
+
+        # Apply final projection if we have a single fused feature
+        if current_features:
+            if hasattr(self, "final_projection"):
+                return self.final_projection(current_features[0])
+            return self.proj(current_features[0])
+        raise ValueError("No features to fuse after hierarchical processing")
 
     def forward(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -316,7 +369,7 @@ class MultimodalFusion(nn.Module):
                 projected_features[name] = tensor
 
         # Hierarchical fusion
-        if self.hierarchical and len(self.modality_dims) > 2:
+        if self.hierarchical:
             return self._hierarchical_fusion(projected_features)
 
         # Standard fusion
@@ -347,49 +400,3 @@ class MultimodalFusion(nn.Module):
 
         # Apply projection
         return self.proj(fused)
-
-    def _hierarchical_fusion(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Apply hierarchical fusion by recursively fusing pairs of modalities.
-
-        Args:
-            features: Dictionary mapping modality names to their feature tensors
-
-        Returns:
-            Tensor with fused representation
-        """
-        modality_names = list(features.keys())
-        feature_list = [features[name] for name in modality_names]
-
-        # For simplicity, handle the case of exactly 3 modalities
-        if len(feature_list) == 3:
-            # First fuse modalities 0 and 1
-            intermediate = self.fusion_modules[0](feature_list[0], feature_list[1])
-            # Then fuse the result with modality 2
-            return self.proj(torch.cat([intermediate, feature_list[2]], dim=-1))
-
-        # More complex hierarchical fusion would require implementing a full tree traversal
-        # This is a simplified implementation
-        remaining_features = feature_list
-        fusion_idx = 0
-
-        while len(remaining_features) > 1:
-            new_features = []
-
-            # Process pairs
-            for i in range(0, len(remaining_features) - 1, 2):
-                if i + 1 < len(remaining_features):
-                    # Fuse this pair
-                    fused = self.fusion_modules[fusion_idx](
-                        remaining_features[i], remaining_features[i + 1]
-                    )
-                    new_features.append(fused)
-                    fusion_idx += 1
-                else:
-                    # Odd number, pass through
-                    new_features.append(remaining_features[i])
-
-            remaining_features = new_features
-
-        # Apply final projection
-        return self.proj(remaining_features[0])

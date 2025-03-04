@@ -1,328 +1,174 @@
-# data/preprocessing.py
+# src/data/preprocessing.py
 import logging
-import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import torch
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
-from torch.utils.data import DataLoader
+from sklearn.impute import KNNImputer
 
-from data.datasets import ChemicalDataset, MultimodalDrugDataset, TranscriptomicsDataset
-from data.loaders import GCTXDataLoader
-from data.transformers import create_transformations
+from src.data.loaders import GCTXDataLoader
 
 logger = logging.getLogger(__name__)
 
 
 class LINCSCTRPDataProcessor:
-    """Processor for LINCS/CTRP data with support for different model types."""
+    """Preprocessor for LINCS/CTRP data before dataset creation."""
 
     def __init__(
         self,
         gctx_file: str,
         feature_space: Union[str, List[str]] = "landmark",
         nrows: Optional[int] = None,
-        test_size: float = 0.2,
-        val_size: float = 0.1,
-        random_state: int = 42,
-        group_by: Optional[str] = None,
-        stratify_by: Optional[str] = None,
-        batch_size: int = 32,
         transform_transcriptomics: Optional[Callable] = None,
         transform_molecular: Optional[Callable] = None,
+        imputation_strategy: str = "mean",
+        handle_outliers: bool = False,
+        outlier_threshold: float = 3.0,
     ):
-        """
-        Initialize data processor.
-
-        Args:
-            gctx_file: Path to the GCTX file
-            feature_space: Gene feature space to use ('landmark', 'best inferred', etc.)
-            nrows: Number of rows to load (None for all)
-            test_size: Fraction of data to use for testing
-            val_size: Fraction of data to use for validation
-            random_state: Random seed for reproducibility
-            group_by: Column name to use for group-based splitting (e.g., 'cell_id')
-            stratify_by: Column name to use for stratified splitting (e.g., 'viability_bin')
-            batch_size: Batch size for dataloaders
-            transform_transcriptomics: Transformation function for transcriptomics data
-            transform_molecular: Transformation function for molecular data
-        """
         self.gctx_file = gctx_file
         self.feature_space = feature_space
         self.nrows = nrows
-        self.test_size = test_size
-        self.val_size = val_size
-        self.random_state = random_state
-        self.group_by = group_by
-        self.stratify_by = stratify_by
-        self.batch_size = batch_size
         self.transform_transcriptomics = transform_transcriptomics
         self.transform_molecular = transform_molecular
-
-        # Set random seed
-        np.random.seed(random_state)
-        torch.manual_seed(random_state)
-
-        # Validate that group_by and stratify_by are not both specified
-        if self.group_by and self.stratify_by:
-            raise ValueError(
-                "Cannot specify both group_by and stratify_by simultaneously"
-            )
+        self.imputation_strategy = imputation_strategy
+        self.handle_outliers = handle_outliers
+        self.outlier_threshold = outlier_threshold
+        self._transcriptomics = None
+        self._metadata = None
 
     def _load_data(self) -> Tuple[np.ndarray, pd.DataFrame]:
-        """Load data from GCTX file."""
         with GCTXDataLoader(self.gctx_file) as loader:
-            row_slice = slice(0, self.nrows) if self.nrows is not None else None
-            transcriptomics, metadata, _ = loader.get_data_with_metadata(
-                row_slice=row_slice,
-                feature_space=self.feature_space,
+            row_slice = slice(0, self.nrows) if self.nrows else None
+            data, meta, _ = loader.get_data_with_metadata(
+                row_slice=row_slice, feature_space=self.feature_space
+            )
+            return data, meta
+
+    def _impute_missing_values(
+        self, data: np.ndarray, metadata: pd.DataFrame
+    ) -> Tuple[np.ndarray, pd.DataFrame]:
+        """Impute missing values in data and metadata using the specified strategy."""
+        # Impute transcriptomics data
+        if np.isnan(data).any():
+            logger.info(
+                f"Imputing {np.isnan(data).sum()} missing values in transcriptomics data"
+            )
+            if self.imputation_strategy == "mean":
+                col_means = np.nanmean(data, axis=0)
+                inds = np.where(np.isnan(data))
+                data[inds] = np.take(col_means, inds[1])
+            elif self.imputation_strategy == "median":
+                col_medians = np.nanmedian(data, axis=0)
+                inds = np.where(np.isnan(data))
+                data[inds] = np.take(col_medians, inds[1])
+            elif self.imputation_strategy == "knn":
+                imputer = KNNImputer(n_neighbors=5)
+                data = imputer.fit_transform(data)
+            else:
+                raise ValueError(
+                    f"Unsupported imputation strategy: {self.imputation_strategy}"
+                )
+
+        # Impute metadata
+        if "viability" in metadata.columns and metadata["viability"].isna().any():
+            if self.imputation_strategy == "mean":
+                metadata["viability"] = metadata["viability"].fillna(
+                    metadata["viability"].mean()
+                )
+            elif self.imputation_strategy == "median":
+                metadata["viability"] = metadata["viability"].fillna(
+                    metadata["viability"].median()
+                )
+            elif self.imputation_strategy == "knn":
+                # For simplicity, use mean for metadata in case of KNN
+                metadata["viability"] = metadata["viability"].fillna(
+                    metadata["viability"].mean()
+                )
+
+        if "pert_dose" in metadata.columns and metadata["pert_dose"].isna().any():
+            metadata["pert_dose"] = metadata["pert_dose"].fillna(
+                metadata["pert_dose"].median()
             )
 
-            # Validate metadata
-            required_cols = ["canonical_smiles", "pert_dose", "viability"]
-            if self.group_by:
-                required_cols.append(self.group_by)
-            if self.stratify_by:
-                required_cols.append(self.stratify_by)
+        return data, metadata
 
-            missing = [col for col in required_cols if col not in metadata.columns]
-            if missing:
-                raise ValueError(f"Missing required columns: {missing}")
+    def _handle_outliers(self, data: np.ndarray) -> np.ndarray:
+        """Handle outliers in transcriptomics data using z-score clipping."""
+        if not self.handle_outliers:
+            return data
 
-            return transcriptomics, metadata
+        logger.info("Handling outliers in transcriptomics data")
+        means = np.mean(data, axis=0)
+        stds = np.std(data, axis=0)
+        z_scores = np.abs((data - means) / (stds + 1e-8))
 
-    def _split_data(self, transcriptomics: np.ndarray, metadata: pd.DataFrame) -> Tuple[
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-    ]:
-        """Split data into train/val/test sets."""
-        if self.group_by and len(metadata[self.group_by].unique()) >= 3:
-            return self._group_split(transcriptomics, metadata)
-        return self._random_split(transcriptomics, metadata)
+        # Create a mask for values beyond the threshold
+        mask = z_scores > self.outlier_threshold
+        outlier_count = np.sum(mask)
 
-    def _random_split(
-        self, transcriptomics: np.ndarray, metadata: pd.DataFrame
-    ) -> Tuple[
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-    ]:
-        """Random splitting strategy with optional stratification."""
-        indices = np.arange(len(transcriptomics))
-
-        # Use stratification if specified
-        stratify = None
-        if self.stratify_by and self.stratify_by in metadata.columns:
-            stratify = metadata[self.stratify_by]
-            logger.info(f"Using stratified splitting based on '{self.stratify_by}'")
-
-        # First split into train+val and test
-        train_val_idx, test_idx = train_test_split(
-            indices,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            stratify=stratify,
-        )
-
-        # Adjusted stratification for val split
-        stratify_val = None
-        if stratify is not None:
-            stratify_val = stratify.iloc[train_val_idx]
-
-        # Then split train+val into train and val
-        val_size_adjusted = self.val_size / (1 - self.test_size)
-        train_idx, val_idx = train_test_split(
-            train_val_idx,
-            test_size=val_size_adjusted,
-            random_state=self.random_state,
-            stratify=stratify_val,
-        )
-
-        # Create splits
-        splits = []
-        for idx in [train_idx, val_idx, test_idx]:
-            splits.append(
-                (transcriptomics[idx], metadata.iloc[idx].reset_index(drop=True))
+        if outlier_count > 0:
+            logger.info(
+                f"Clipping {outlier_count} outliers ({outlier_count/(data.size)*100:.2f}%)"
             )
-        return tuple(splits)
+            # Replace outliers with the threshold value (in the right direction)
+            max_allowed = means + self.outlier_threshold * stds
+            min_allowed = means - self.outlier_threshold * stds
+            data = np.minimum(data, max_allowed)
+            data = np.maximum(data, min_allowed)
 
-    def _group_split(
-        self, transcriptomics: np.ndarray, metadata: pd.DataFrame
-    ) -> Tuple[
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-        Tuple[np.ndarray, pd.DataFrame],
-    ]:
-        """Group-based splitting strategy."""
-        indices = np.arange(len(transcriptomics))
+        return data
 
-        logger.info(f"Using group-based splitting based on '{self.group_by}'")
-        unique_groups = metadata[self.group_by].unique()
-        logger.info(f"Found {len(unique_groups)} unique groups")
+    def _validate_smiles(self, metadata: pd.DataFrame) -> pd.DataFrame:
+        """Validate SMILES strings and remove invalid entries."""
+        if "canonical_smiles" not in metadata.columns:
+            return metadata
 
-        # Split into train+val and test
-        gss = GroupShuffleSplit(
-            n_splits=1, test_size=self.test_size, random_state=self.random_state
+        valid_smiles = metadata["canonical_smiles"].apply(
+            lambda x: isinstance(x, str) and len(x) > 0
         )
-        train_val_idx, test_idx = next(
-            gss.split(indices, groups=metadata[self.group_by])
-        )
+        invalid_count = (~valid_smiles).sum()
 
-        # Split train+val into train and val
-        val_size_adjusted = self.val_size / (1 - self.test_size)
-        groups_train_val = metadata.iloc[train_val_idx][self.group_by]
-        gss_val = GroupShuffleSplit(
-            n_splits=1, test_size=val_size_adjusted, random_state=self.random_state
-        )
-        train_idx, val_idx = next(
-            gss_val.split(np.arange(len(train_val_idx)), groups=groups_train_val)
-        )
-
-        # Get final indices
-        train_idx = train_val_idx[train_idx]
-        val_idx = train_val_idx[val_idx]
-
-        # Create splits
-        splits = []
-        for idx in [train_idx, val_idx, test_idx]:
-            splits.append(
-                (transcriptomics[idx], metadata.iloc[idx].reset_index(drop=True))
+        if invalid_count > 0:
+            logger.warning(
+                f"Removing {invalid_count} samples with invalid SMILES strings"
             )
-        return tuple(splits)
+            return metadata[valid_smiles]
+        return metadata
 
-    def get_multimodal_data(
-        self,
-    ) -> Tuple[MultimodalDrugDataset, MultimodalDrugDataset, MultimodalDrugDataset]:
-        """Get datasets for deep learning models."""
-        logger.info("Preparing multimodal datasets...")
+    def preprocess(self) -> Tuple[np.ndarray, pd.DataFrame]:
+        """Preprocess data with imputation, outlier handling, and transformations."""
+        if self._transcriptomics is None or self._metadata is None:
+            logger.info(f"Loading data from {self.gctx_file}")
+            self._transcriptomics, self._metadata = self._load_data()
 
-        # Load and split data
-        transcriptomics, metadata = self._load_data()
-        train_data, val_data, test_data = self._split_data(transcriptomics, metadata)
+        logger.info(f"Initial data shape: {self._transcriptomics.shape}")
 
-        # Create datasets
-        train_ds = MultimodalDrugDataset(
-            *train_data,
-            transform_transcriptomics=self.transform_transcriptomics,
-            transform_molecular=self.transform_molecular,
-        )
-        val_ds = MultimodalDrugDataset(
-            *val_data,
-            transform_transcriptomics=self.transform_transcriptomics,
-            transform_molecular=self.transform_molecular,
-        )
-        test_ds = MultimodalDrugDataset(
-            *test_data,
-            transform_transcriptomics=self.transform_transcriptomics,
-            transform_molecular=self.transform_molecular,
+        # Impute missing values
+        self._transcriptomics, self._metadata = self._impute_missing_values(
+            self._transcriptomics, self._metadata
         )
 
-        logger.info(
-            f"Created datasets - Train: {len(train_ds)}, "
-            f"Val: {len(val_ds)}, Test: {len(test_ds)}"
-        )
-        return train_ds, val_ds, test_ds
+        # Handle outliers
+        self._transcriptomics = self._handle_outliers(self._transcriptomics)
 
-    def get_transcriptomics_data(
-        self,
-    ) -> Tuple[TranscriptomicsDataset, TranscriptomicsDataset, TranscriptomicsDataset]:
-        """Get datasets for traditional ML models using only transcriptomics data."""
-        logger.info("Preparing transcriptomics datasets...")
+        # Validate SMILES
+        valid_metadata = self._validate_smiles(self._metadata)
+        if len(valid_metadata) < len(self._metadata):
+            valid_indices = valid_metadata.index
+            self._transcriptomics = self._transcriptomics[valid_indices]
+            self._metadata = valid_metadata
 
-        # Load and split data
-        transcriptomics, metadata = self._load_data()
-        train_data, val_data, test_data = self._split_data(transcriptomics, metadata)
+        # Apply transcriptomics transformation
+        if self.transform_transcriptomics:
+            logger.info("Applying transcriptomics transformation")
+            if hasattr(self.transform_transcriptomics, "fit_transform"):
+                self._transcriptomics = self.transform_transcriptomics.fit_transform(
+                    self._transcriptomics
+                )
+            else:
+                self._transcriptomics = self.transform_transcriptomics(
+                    self._transcriptomics
+                )
 
-        # Create datasets
-        train_ds = TranscriptomicsDataset(
-            train_data[0],
-            train_data[1]["viability"].values,
-            transform=self.transform_transcriptomics,
-        )
-        val_ds = TranscriptomicsDataset(
-            val_data[0],
-            val_data[1]["viability"].values,
-            transform=self.transform_transcriptomics,
-        )
-        test_ds = TranscriptomicsDataset(
-            test_data[0],
-            test_data[1]["viability"].values,
-            transform=self.transform_transcriptomics,
-        )
-
-        logger.info(
-            f"Created datasets - Train: {len(train_ds)}, "
-            f"Val: {len(val_ds)}, Test: {len(test_ds)}"
-        )
-        return train_ds, val_ds, test_ds
-
-    def get_chemical_data(
-        self,
-    ) -> Tuple[ChemicalDataset, ChemicalDataset, ChemicalDataset]:
-        """Get datasets for traditional ML models using only chemical/molecular data."""
-        logger.info("Preparing chemical datasets...")
-
-        # Load and split data
-        transcriptomics, metadata = self._load_data()
-        train_data, val_data, test_data = self._split_data(transcriptomics, metadata)
-
-        # Create datasets
-        train_ds = ChemicalDataset(
-            smiles=train_data[1]["canonical_smiles"].values,
-            dosage=train_data[1]["pert_dose"].values,
-            viability=train_data[1]["viability"].values,
-            transform=self.transform_molecular,
-        )
-        val_ds = ChemicalDataset(
-            smiles=val_data[1]["canonical_smiles"].values,
-            dosage=val_data[1]["pert_dose"].values,
-            viability=val_data[1]["viability"].values,
-            transform=self.transform_molecular,
-        )
-        test_ds = ChemicalDataset(
-            smiles=test_data[1]["canonical_smiles"].values,
-            dosage=test_data[1]["pert_dose"].values,
-            viability=test_data[1]["viability"].values,
-            transform=self.transform_molecular,
-        )
-
-        logger.info(
-            f"Created datasets - Train: {len(train_ds)}, "
-            f"Val: {len(val_ds)}, Test: {len(test_ds)}"
-        )
-        return train_ds, val_ds, test_ds
-
-    def get_multimodal_dataloaders(self) -> Tuple[DataLoader, DataLoader, DataLoader]:
-        """Get PyTorch dataloaders for deep learning."""
-        train_ds, val_ds, test_ds = self.get_multimodal_data()
-
-        # Use single process data loading on Windows
-        num_workers = 0 if os.name == "nt" else 4
-
-        return (
-            DataLoader(
-                train_ds,
-                batch_size=self.batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=True,
-            ),
-            DataLoader(
-                val_ds,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=True,
-            ),
-            DataLoader(
-                test_ds,
-                batch_size=self.batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=True,
-            ),
-        )
+        logger.info(f"Preprocessed data: {len(self._transcriptomics)} samples")
+        return self._transcriptomics, self._metadata

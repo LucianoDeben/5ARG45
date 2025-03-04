@@ -1,9 +1,11 @@
+# models/multimodal_models.py
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
 
+from config.constants import Activation, FusionStrategy
 from models.chemical.descriptors import (
     IntegratedMolecularEncoder,
     MolecularDescriptorEncoder,
@@ -17,7 +19,6 @@ from models.prediction.viability_prediction import (
     ViabilityPredictor,
 )
 from models.transcriptomics.encoders import (
-    BiologicallyInformedEncoder,
     CNNTranscriptomicEncoder,
     TranscriptomicEncoder,
 )
@@ -29,10 +30,10 @@ class MultimodalDrugResponseModel(nn.Module):
     """
     End-to-end multimodal model for drug response prediction.
 
-    This model combines transcriptomics and chemical data processing
-    components to predict cancer cell viability in response to drug
-    treatments. It supports various encoder architectures, fusion
-    strategies, and prediction heads.
+    Combines transcriptomics and chemical data processing components to predict
+    cancer cell viability in response to drug treatments. Supports various encoder
+    architectures, fusion strategies, and prediction heads, configured via a
+    configuration dictionary.
 
     Attributes:
         transcriptomics_encoder: Encoder for gene expression data
@@ -40,6 +41,7 @@ class MultimodalDrugResponseModel(nn.Module):
         fusion_module: Module for combining modality features
         predictor: Prediction head for viability estimation
         config: Model configuration dictionary
+        modality_dims: Dictionary mapping modality names to feature indices for interpretation
     """
 
     def __init__(
@@ -54,7 +56,7 @@ class MultimodalDrugResponseModel(nn.Module):
         Initialize the MultimodalDrugResponseModel.
 
         Args:
-            config: Configuration dictionary
+            config: Configuration dictionary containing model specifications
             transcriptomics_encoder: Optional pre-initialized transcriptomics encoder
             chemical_encoder: Optional pre-initialized chemical encoder
             fusion_module: Optional pre-initialized fusion module
@@ -104,7 +106,9 @@ class MultimodalDrugResponseModel(nn.Module):
                 output_dim=model_config["transcriptomics_output_dim"],
                 normalize=model_config.get("normalize", True),
                 dropout=model_config.get("dropout", 0.3),
-                activation=model_config.get("activation", "relu"),
+                activation=Activation[
+                    model_config.get("activation", "RELU").upper()
+                ].value,
                 residual=model_config.get("use_residual", False),
             )
         elif encoder_type == "cnn":
@@ -112,23 +116,9 @@ class MultimodalDrugResponseModel(nn.Module):
                 input_dim=model_config["transcriptomics_input_dim"],
                 hidden_dims=model_config["transcriptomics_hidden_dims"],
                 output_dim=model_config["transcriptomics_output_dim"],
-                kernel_sizes=model_config.get("kernel_sizes", None),
+                kernel_sizes=model_config.get("kernel_sizes", [5, 5, 3]),
                 normalize=model_config.get("normalize", True),
                 dropout=model_config.get("dropout", 0.3),
-            )
-        elif encoder_type == "biological":
-            # For biological encoder, we need pathway groups
-            if "pathway_groups" not in model_config:
-                raise ValueError("pathway_groups required for biological encoder")
-
-            return BiologicallyInformedEncoder(
-                input_dim=model_config["transcriptomics_input_dim"],
-                pathway_groups=model_config["pathway_groups"],
-                hidden_dims=model_config["transcriptomics_hidden_dims"],
-                output_dim=model_config["transcriptomics_output_dim"],
-                normalize=model_config.get("normalize", True),
-                dropout=model_config.get("dropout", 0.3),
-                aggregation=model_config.get("pathway_aggregation", "attention"),
             )
         else:
             raise ValueError(
@@ -180,7 +170,9 @@ class MultimodalDrugResponseModel(nn.Module):
                 t_dim=model_config["transcriptomics_output_dim"],
                 c_dim=model_config["chemical_output_dim"],
                 output_dim=model_config["fusion_output_dim"],
-                strategy=model_config.get("fusion_strategy", "concat"),
+                strategy=FusionStrategy[
+                    model_config.get("fusion_strategy", "CONCAT").upper()
+                ].value,
                 projection=model_config.get("fusion_projection", True),
                 dropout=model_config.get("dropout", 0.3),
             )
@@ -217,7 +209,9 @@ class MultimodalDrugResponseModel(nn.Module):
                 input_dim=model_config["fusion_output_dim"],
                 hidden_dims=model_config["predictor_hidden_dims"],
                 dropout=model_config.get("dropout", 0.3),
-                activation=model_config.get("activation", "relu"),
+                activation=Activation[
+                    model_config.get("activation", "RELU").upper()
+                ].value,
                 use_batch_norm=model_config.get("use_batch_norm", True),
                 output_activation="sigmoid",
                 uncertainty=model_config.get("uncertainty", False),
@@ -235,35 +229,32 @@ class MultimodalDrugResponseModel(nn.Module):
             raise ValueError(f"Unsupported predictor type: {predictor_type}")
 
     def forward(
-        self, batch: Union[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
+        self, batch: Dict[str, torch.Tensor]
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass for end-to-end drug response prediction.
 
         Args:
-            batch: Either a dictionary with 'transcriptomics' and 'molecular' keys,
-                  or a tuple of (transcriptomics_data, chemical_data)
+            batch: Dictionary with 'transcriptomics' and 'molecular' keys containing tensors
+                  from MultimodalDrugDataset
 
         Returns:
-            Predicted viability or dictionary of predictions for multi-task model
+            Predicted viability (Tensor) or dictionary of predictions for multi-task model
         """
-        # Handle different input formats
-        if isinstance(batch, dict):
-            transcriptomics_data = batch["transcriptomics"]
-            chemical_data = batch["molecular"]
-        elif isinstance(batch, tuple) and len(batch) == 2:
-            transcriptomics_data, chemical_data = batch
-        else:
+        if (
+            not isinstance(batch, dict)
+            or "transcriptomics" not in batch
+            or "molecular" not in batch
+        ):
             raise ValueError(
-                "Input must be either a dictionary with 'transcriptomics' and 'molecular' keys "
-                "or a tuple of (transcriptomics_data, chemical_data)"
+                "Input must be a dictionary with 'transcriptomics' and 'molecular' keys"
             )
 
         # Process transcriptomics data
-        t_features = self.transcriptomics_encoder(transcriptomics_data)
+        t_features = self.transcriptomics_encoder(batch["transcriptomics"])
 
         # Process chemical data
-        c_features = self.chemical_encoder(chemical_data)
+        c_features = self.chemical_encoder(batch["molecular"])
 
         # Handle different fusion types
         fusion_type = self.config["model"].get("fusion_type", "simple")
@@ -271,9 +262,7 @@ class MultimodalDrugResponseModel(nn.Module):
         if fusion_type == "simple":
             fused_features = self.fusion_module(t_features, c_features)
         elif fusion_type == "attention":
-            # CrossModalAttention can do bi-directional or uni-directional attention
             direction = self.config["model"].get("attention_direction", "both")
-
             if direction == "both":
                 t_updated, c_updated = self.fusion_module(
                     t_features, c_features, direction="both"
@@ -284,12 +273,8 @@ class MultimodalDrugResponseModel(nn.Module):
                     t_features, c_features, direction=direction
                 )
         elif fusion_type == "multimodal":
-            # ModalityAttentionFusion takes a dictionary of features
             fused_features = self.fusion_module(
-                {
-                    "transcriptomics": t_features,
-                    "chemical": c_features,
-                }
+                {"transcriptomics": t_features, "chemical": c_features}
             )
 
         # Make predictions
@@ -300,9 +285,9 @@ class ModelFactory:
     """
     Factory class for creating multimodal drug response models.
 
-    This class simplifies model creation by instantiating model components
-    based on configuration settings, ensuring compatibility between components,
-    and handling any necessary preprocessing.
+    Simplifies model creation by instantiating model components based on configuration
+    settings, ensuring compatibility between components, and handling necessary
+    preprocessing.
     """
 
     @staticmethod
@@ -315,17 +300,17 @@ class ModelFactory:
 
         Returns:
             Initialized MultimodalDrugResponseModel
-        """
-        # Validate configuration
-        ModelFactory._validate_config(config)
 
-        # Create model
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        ModelFactory._validate_config(config)
         return MultimodalDrugResponseModel(config)
 
     @staticmethod
     def _validate_config(config: Dict) -> None:
         """
-        Validate model configuration.
+        Validate model configuration against infrastructure constants and requirements.
 
         Args:
             config: Configuration dictionary to validate
@@ -354,27 +339,70 @@ class ModelFactory:
         if missing_params:
             raise ValueError(f"Missing required model parameters: {missing_params}")
 
-        # Special case for biological encoder which needs pathway information
-        if (
-            model_config.get("transcriptomics_encoder_type") == "biological"
-            and "pathway_groups" not in model_config
-        ):
-            raise ValueError("pathway_groups required for biological encoder")
+        # Validate activation functions
+        for param in ["activation"]:
+            if param in model_config:
+                try:
+                    Activation[model_config[param].upper()]
+                except KeyError:
+                    raise ValueError(f"Invalid {param}: {model_config[param]}")
 
-        # Special case for multitask predictor which needs task names
+        # Validate fusion strategy
+        if "fusion_strategy" in model_config:
+            try:
+                FusionStrategy[model_config["fusion_strategy"].upper()]
+            except KeyError:
+                raise ValueError(
+                    f"Invalid fusion_strategy: {model_config['fusion_strategy']}"
+                )
+
+        # Special case for multitask predictor
         if (
             model_config.get("predictor_type") == "multitask"
             and "prediction_tasks" not in model_config
         ):
             raise ValueError("prediction_tasks required for multitask predictor")
 
+        # Validate optional parameters (e.g., ensure they exist if specified)
+        optional_params = {
+            "normalize": bool,
+            "dropout": float,
+            "use_batch_norm": bool,
+            "use_residual": bool,
+            "dosage_integration": str,
+            "gnn_type": str,
+            "graph_pooling": str,
+            "smiles_architecture": str,
+            "vocab_file": str,
+            "max_smiles_length": int,
+            "smiles_embedding_dim": int,
+            "kernel_sizes": List[int],
+            "attention_heads": int,
+            "attention_direction": str,
+            "attention_aggregation": str,
+            "fusion_projection": bool,
+            "task_specific_dims": List[int],
+            "uncertainty": bool,
+        }
+        for param, expected_type in optional_params.items():
+            if param in model_config and not isinstance(
+                model_config[param], expected_type
+            ):
+                raise ValueError(
+                    f"Invalid type for {param}: expected {expected_type}, got {type(model_config[param])}"
+                )
+
 
 class TranscriptomicsOnlyModel(nn.Module):
     """
     Unimodal model for drug response prediction using only transcriptomics data.
 
-    This model is a simplification of the full multimodal model, using only
-    the transcriptomics modality. It's useful for ablation studies and as a baseline.
+    A simplification of the full multimodal model, useful for ablation studies
+    and baselines. Supports configuration-driven encoder selection.
+
+    Attributes:
+        encoder: Encoder for transcriptomics data
+        predictor: Prediction head for viability
     """
 
     def __init__(self, config: Dict):
@@ -387,14 +415,15 @@ class TranscriptomicsOnlyModel(nn.Module):
         super(TranscriptomicsOnlyModel, self).__init__()
         model_config = config["model"]
 
-        # Create transcriptomics encoder
+        # Use factory method for encoder creation
         self.encoder = TranscriptomicEncoder(
             input_dim=model_config["transcriptomics_input_dim"],
             hidden_dims=model_config["transcriptomics_hidden_dims"],
             output_dim=model_config["transcriptomics_output_dim"],
             normalize=model_config.get("normalize", True),
             dropout=model_config.get("dropout", 0.3),
-            activation=model_config.get("activation", "relu"),
+            activation=Activation[model_config.get("activation", "RELU").upper()].value,
+            residual=model_config.get("use_residual", False),
         )
 
         # Create predictor
@@ -402,7 +431,7 @@ class TranscriptomicsOnlyModel(nn.Module):
             input_dim=model_config["transcriptomics_output_dim"],
             hidden_dims=model_config["predictor_hidden_dims"],
             dropout=model_config.get("dropout", 0.3),
-            activation=model_config.get("activation", "relu"),
+            activation=Activation[model_config.get("activation", "RELU").upper()].value,
             use_batch_norm=model_config.get("use_batch_norm", True),
             output_activation="sigmoid",
         )
@@ -414,10 +443,10 @@ class TranscriptomicsOnlyModel(nn.Module):
         Forward pass for transcriptomics-only model.
 
         Args:
-            x: Transcriptomics data tensor
+            x: Transcriptomics data tensor [batch_size, input_dim]
 
         Returns:
-            Predicted viability
+            Predicted viability [batch_size, 1]
         """
         features = self.encoder(x)
         return self.predictor(features)
@@ -427,8 +456,12 @@ class ChemicalOnlyModel(nn.Module):
     """
     Unimodal model for drug response prediction using only chemical data.
 
-    This model is a simplification of the full multimodal model, using only
-    the chemical modality. It's useful for ablation studies and as a baseline.
+    A simplification of the full multimodal model, useful for ablation studies
+    and baselines. Supports configuration-driven encoder selection.
+
+    Attributes:
+        encoder: Encoder for chemical data
+        predictor: Prediction head for viability
     """
 
     def __init__(self, config: Dict):
@@ -441,11 +474,29 @@ class ChemicalOnlyModel(nn.Module):
         super(ChemicalOnlyModel, self).__init__()
         model_config = config["model"]
 
-        # Create chemical encoder based on type
+        # Use factory method for encoder creation
+        self.encoder = self._create_chemical_encoder(model_config)
+
+        # Create predictor
+        self.predictor = ViabilityPredictor(
+            input_dim=model_config["chemical_output_dim"],
+            hidden_dims=model_config["predictor_hidden_dims"],
+            dropout=model_config.get("dropout", 0.3),
+            activation=Activation[model_config.get("activation", "RELU").upper()].value,
+            use_batch_norm=model_config.get("use_batch_norm", True),
+            output_activation="sigmoid",
+        )
+
+        logger.info(
+            f"Initialized ChemicalOnlyModel with encoder type {model_config.get('chemical_encoder_type', 'descriptors')}"
+        )
+
+    def _create_chemical_encoder(self, model_config: Dict) -> nn.Module:
+        """Create chemical encoder based on config (shared with MultimodalDrugResponseModel)."""
         encoder_type = model_config.get("chemical_encoder_type", "descriptors")
 
         if encoder_type == "descriptors":
-            self.encoder = IntegratedMolecularEncoder(
+            return IntegratedMolecularEncoder(
                 descriptor_dim=model_config["chemical_input_dim"],
                 hidden_dims=model_config["chemical_hidden_dims"],
                 output_dim=model_config["chemical_output_dim"],
@@ -453,8 +504,17 @@ class ChemicalOnlyModel(nn.Module):
                 normalize=model_config.get("normalize", True),
                 dropout=model_config.get("dropout", 0.3),
             )
+        elif encoder_type == "graph":
+            return MolecularGraphEncoder(
+                input_dim=model_config["chemical_input_dim"],
+                hidden_dims=model_config["chemical_hidden_dims"],
+                output_dim=model_config["chemical_output_dim"],
+                gnn_type=model_config.get("gnn_type", "gcn"),
+                pooling=model_config.get("graph_pooling", "mean"),
+                dropout=model_config.get("dropout", 0.3),
+            )
         elif encoder_type == "smiles":
-            self.encoder = SMILESWithDosageEncoder(
+            return SMILESWithDosageEncoder(
                 embedding_dim=model_config.get("smiles_embedding_dim", 64),
                 hidden_dim=model_config["chemical_hidden_dims"][0],
                 output_dim=model_config["chemical_output_dim"],
@@ -465,31 +525,17 @@ class ChemicalOnlyModel(nn.Module):
                 dropout=model_config.get("dropout", 0.3),
             )
         else:
-            raise ValueError(
-                f"Unsupported chemical encoder type for unimodal model: {encoder_type}"
-            )
-
-        # Create predictor
-        self.predictor = ViabilityPredictor(
-            input_dim=model_config["chemical_output_dim"],
-            hidden_dims=model_config["predictor_hidden_dims"],
-            dropout=model_config.get("dropout", 0.3),
-            activation=model_config.get("activation", "relu"),
-            use_batch_norm=model_config.get("use_batch_norm", True),
-            output_activation="sigmoid",
-        )
-
-        logger.info(f"Initialized ChemicalOnlyModel with encoder type {encoder_type}")
+            raise ValueError(f"Unsupported chemical encoder type: {encoder_type}")
 
     def forward(self, x: Union[torch.Tensor, Dict]) -> torch.Tensor:
         """
         Forward pass for chemical-only model.
 
         Args:
-            x: Chemical data tensor or dictionary with 'smiles' and 'dosage'
+            x: Chemical data tensor or dictionary with 'molecular' key [batch_size, input_dim] or {'molecular': tensor, 'dosage': tensor}
 
         Returns:
-            Predicted viability
+            Predicted viability [batch_size, 1]
         """
         features = self.encoder(x)
         return self.predictor(features)

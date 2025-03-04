@@ -1,6 +1,7 @@
 # models/chemical/smiles_processing.py
 import logging
-from typing import Dict, List, Optional, Union
+import math
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -309,3 +310,166 @@ class SMILESWithDosageEncoder(nn.Module):
             x = self.bilinear(smiles_embedding, dosage)
             x = F.relu(x)
             return self.projection(x)
+
+
+class AttentionSMILESEncoder(nn.Module):
+    """
+    Process SMILES strings using attention mechanisms for better representation.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_heads: int = 4,
+        num_layers: int = 2,
+        vocab_file: str = "data/raw/vocab.txt",
+        max_length: int = 128,
+        dropout: float = 0.2,
+    ):
+        super(AttentionSMILESEncoder, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.max_length = max_length
+        self.dropout = dropout
+
+        # Initialize tokenizer
+        try:
+            self.tokenizer = SmilesTokenizer(vocab_file=vocab_file)
+            self.vocab_size = self.tokenizer.vocab_size
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer, using default vocabulary: {e}")
+            self.tokenizer = None
+            self.vocab_size = 100
+
+        # Token embedding layer
+        self.embedding = nn.Embedding(self.vocab_size, embedding_dim)
+
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(embedding_dim, dropout)
+
+        # Transformer encoder
+        encoder_layers = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layers, num_layers=num_layers
+        )
+
+        # Output projection
+        self.output = nn.Linear(embedding_dim, output_dim)
+
+    def tokenize_smiles(
+        self, smiles_list: List[str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Tokenize a list of SMILES strings.
+
+        Returns:
+            Tuple of (token_indices, attention_mask)
+        """
+        # Implementation similar to SMILESEncoder.tokenize_smiles
+        # Plus creating attention mask for padding tokens
+
+        token_indices = []
+        attention_masks = []
+
+        for smiles in smiles_list:
+            tokens = self.tokenizer.tokenize(smiles)
+            indices = self.tokenizer.convert_tokens_to_ids(tokens)
+
+            # Create attention mask (0 for padding, 1 for actual tokens)
+            mask = [1] * len(indices)
+
+            # Padding or truncation
+            if len(indices) > self.max_length:
+                indices = indices[: self.max_length]
+                mask = mask[: self.max_length]
+            else:
+                pad_length = self.max_length - len(indices)
+                indices = indices + [0] * pad_length
+                mask = mask + [0] * pad_length
+
+            token_indices.append(indices)
+            attention_masks.append(mask)
+
+        return (
+            torch.tensor(token_indices, dtype=torch.long),
+            torch.tensor(attention_masks, dtype=torch.bool),
+        )
+
+    def forward(
+        self, x: Union[torch.Tensor, Dict[str, Union[torch.Tensor, List[str]]]]
+    ) -> torch.Tensor:
+        # Handle different input types like in SMILESEncoder
+        # Then process through the transformer with attention
+
+        # Get token sequences and attention mask
+        if isinstance(x, dict):
+            if "smiles" not in x:
+                raise ValueError("Expected dictionary with 'smiles' key")
+
+            smiles_data = x["smiles"]
+            if isinstance(smiles_data, list):
+                smiles_sequences, attention_mask = self.tokenize_smiles(smiles_data)
+            else:
+                # Assume pre-tokenized with attention mask
+                smiles_sequences = smiles_data
+                attention_mask = x.get("attention_mask", None)
+        else:
+            # Direct tensor input
+            smiles_sequences = x
+            attention_mask = None
+
+        # Embedding with positional encoding
+        embedded = self.embedding(smiles_sequences)
+        embedded = self.pos_encoder(embedded)
+
+        # Apply transformer with attention mask if available
+        if attention_mask is not None:
+            # Convert boolean mask to transformer-compatible mask
+            src_key_padding_mask = ~attention_mask
+            output = self.transformer_encoder(
+                embedded, src_key_padding_mask=src_key_padding_mask
+            )
+        else:
+            output = self.transformer_encoder(embedded)
+
+        # Use [CLS] token output or mean pooling
+        output = output.mean(dim=1)  # Mean pooling across sequence length
+
+        # Apply final projection
+        return self.output(output)
+
+
+class PositionalEncoding(nn.Module):
+    """
+    Adds positional encoding to the token embedding.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 512):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(1, max_len, d_model)
+        pe[0, :, 0::2] = torch.sin(position * div_term)
+        pe[0, :, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor, shape [batch_size, seq_len, embedding_dim]
+        """
+        x = x + self.pe[:, : x.size(1)]
+        return self.dropout(x)
