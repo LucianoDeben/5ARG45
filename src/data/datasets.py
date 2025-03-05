@@ -34,25 +34,32 @@ class MultimodalDrugDataset(Dataset):
     def __len__(self) -> int:
         return len(self.metadata)
 
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, float]]:
-        sample = {
-            "transcriptomics": torch.tensor(
-                self.transcriptomics_data[idx], dtype=torch.float32
-            ),
-            "smiles": self.metadata.iloc[idx]["canonical_smiles"],
-            "dosage": torch.tensor(
-                self.metadata.iloc[idx]["pert_dose"], dtype=torch.float32
-            ),
-            "viability": torch.tensor(
-                self.metadata.iloc[idx]["viability"], dtype=torch.float32
-            ),
-        }
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        transcriptomics = torch.tensor(
+            self.transcriptomics_data[idx], dtype=torch.float32
+        )
         if self.transform_transcriptomics:
-            sample["transcriptomics"] = self.transform_transcriptomics(
-                sample["transcriptomics"]
-            )
+            transcriptomics = self.transform_transcriptomics(transcriptomics)
+
+        smiles = self.metadata.iloc[idx]["canonical_smiles"]
+        dosage = torch.tensor(self.metadata.iloc[idx]["pert_dose"], dtype=torch.float32)
+
+        molecular = None
         if self.transform_molecular:
-            sample["molecular"] = self.transform_molecular(sample["smiles"])
+            mol_input = {"smiles": [smiles], "dosage": [dosage]}
+            molecular = self.transform_molecular(mol_input)[0]
+            molecular = torch.from_numpy(molecular)
+
+        viability = torch.tensor(
+            self.metadata.iloc[idx]["viability"], dtype=torch.float32
+        )
+
+        sample = {
+            "transcriptomics": transcriptomics,
+            "molecular": molecular,
+            "dosage": dosage,
+            "viability": viability,
+        }
         return sample
 
 

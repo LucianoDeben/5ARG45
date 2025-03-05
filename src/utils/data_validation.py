@@ -1,5 +1,5 @@
 # utils/data_validation.py
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 def validate_batch(

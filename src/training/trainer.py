@@ -10,11 +10,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader
 
 from ..config.config_utils import load_config
+from ..utils.data_validation import validate_batch
 from ..utils.logging import ExperimentLogger
+from ..utils.loss import create_criterion
+from ..utils.metrics import compute_metrics
 from ..utils.storage import CheckpointManager
 
 logger = logging.getLogger(__name__)
@@ -212,14 +214,14 @@ class ModelCheckpointCallback(TrainingCallback):
 
         additional_data = {"epoch": epoch, "config": trainer.config}
         if self.save_weights_only:
-            self.checkpoint_handler.save_checkpoint(
+            self.checkpoint_handler.save(
                 model=trainer.model.state_dict(),
                 epoch=epoch,
                 metrics=logs,
                 additional_data=additional_data,
             )
         else:
-            self.checkpoint_handler.save_checkpoint(
+            self.checkpoint_handler.save(
                 model=trainer.model,
                 epoch=epoch,
                 metrics=logs,
@@ -283,7 +285,7 @@ class Trainer:
         self.model.to(self.device)
         self.optimizer = optimizer or self._create_optimizer()
         self.scheduler = scheduler or self._create_scheduler()
-        self.criterion = criterion or self._create_criterion()
+        self.criterion = criterion or create_criterion(self.config, "training")
 
         self.scaler = (
             torch.cuda.amp.GradScaler()
@@ -337,74 +339,46 @@ class Trainer:
         else:
             raise ValueError(f"Unsupported scheduler: {sch_type}")
 
-    def _create_criterion(self) -> Callable:
-        """Create loss function from config."""
-        train_cfg = self.config.get("training", {})
-        loss_type = train_cfg.get("loss", "mse").lower()
-        if loss_type == "mse":
-            return nn.MSELoss()
-        elif loss_type == "mae":
-            return nn.L1Loss()
-        else:
-            raise ValueError(f"Unsupported loss: {loss_type}")
-
     def _train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch."""
+        """
+        Train the model for one epoch.
+
+        Returns:
+            Dictionary of training metrics
+        """
         self.model.train()
-        epoch_loss = 0.0
+        train_loss = 0.0
         num_samples = len(self.train_loader.dataset)
+        all_targets, all_outputs = [], []
 
         for batch_idx, batch in enumerate(self.train_loader):
-            for callback in self.callbacks:
-                callback.on_batch_begin(self, batch_idx)
-
-            # Handle different batch input types
-            if isinstance(batch, list):
-                # Assume the list contains [inputs, targets]
-                if len(batch) != 2:
-                    raise ValueError(
-                        f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
-                    )
-                inputs, targets = batch
-            elif isinstance(batch, dict):
-                inputs = {k: v for k, v in batch.items() if k != "viability"}
-                targets = batch["viability"]
-            else:
-                raise ValueError(f"Unexpected batch type: {type(batch)}")
-
-            # Move inputs and targets to device
-            if isinstance(inputs, dict):
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            else:
-                inputs = inputs.to(self.device)
-
-            targets = targets.to(self.device)
+            validate_batch(batch)  # Assuming this checks batch validity
+            inputs = {
+                k: v.to(self.device) for k, v in batch.items() if k != "viability"
+            }
+            targets = batch["viability"].to(self.device)
 
             self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.criterion(outputs, targets)
+            loss.backward()
+            self.optimizer.step()
 
-            if self.scaler:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(inputs)
-                    loss = self.criterion(outputs, targets)
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets)
-                loss.backward()
-                self.optimizer.step()
+            train_loss += loss.item() * targets.size(0)
+            all_targets.append(targets.detach().cpu().numpy())  # Detach targets
+            all_outputs.append(outputs.detach().cpu().numpy())  # Detach outputs
 
-            epoch_loss += loss.item() * targets.size(0)
-            if self.exp_logger and (batch_idx + 1) % 5 == 0:
-                self.exp_logger.log_metrics(
-                    {"loss": loss.item()},
-                    step=self.current_epoch * len(self.train_loader) + batch_idx,
-                    phase="train_batch",
-                )
+            # Optional: Log batch-level loss separately if desired
+            # if self.exp_logger and batch_idx % 10 == 0:  # Log every 10 batches
+            #     self.exp_logger.log_metric("batch_loss", loss.item(), step=batch_idx, phase="train_batch")
 
-        train_loss = epoch_loss / num_samples
-        return {"loss": train_loss}
+        train_loss /= num_samples
+        all_targets = np.concatenate(all_targets)
+        all_outputs = np.concatenate(all_outputs)
+        metrics = compute_metrics(all_targets, all_outputs, ["r2", "pearson", "rmse"])
+        metrics["loss"] = train_loss
+
+        return metrics
 
     def _validate_epoch(self) -> Dict[str, float]:
         """Validate model on validation set."""
@@ -418,26 +392,11 @@ class Trainer:
 
         with torch.no_grad():
             for batch in self.val_loader:
-                # Handle different batch input types
-                if isinstance(batch, list):
-                    if len(batch) != 2:
-                        raise ValueError(
-                            f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
-                        )
-                    inputs, targets = batch
-                elif isinstance(batch, dict):
-                    inputs = {k: v for k, v in batch.items() if k != "viability"}
-                    targets = batch["viability"]
-                else:
-                    raise ValueError(f"Unexpected batch type: {type(batch)}")
-
-                # Move inputs and targets to device
-                if isinstance(inputs, dict):
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                else:
-                    inputs = inputs.to(self.device)
-
-                targets = targets.to(self.device)
+                validate_batch(batch)
+                inputs = {
+                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
+                }
+                targets = batch["viability"].to(self.device)
 
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, targets)
@@ -446,76 +405,30 @@ class Trainer:
                 all_targets.append(targets.cpu().numpy())
                 all_outputs.append(outputs.cpu().numpy())
 
-        from scipy.stats import pearsonr
-        from sklearn.metrics import mean_squared_error, r2_score
+        val_loss /= num_samples
+        all_targets = np.concatenate(all_targets)
+        all_outputs = np.concatenate(all_outputs)
+        metrics = compute_metrics(all_targets, all_outputs, ["r2", "pearson", "rmse"])
+        metrics["loss"] = val_loss
 
-        r2 = r2_score(all_targets, all_outputs)
-        pearson_corr, _ = pearsonr(all_targets.flatten(), all_outputs.flatten())
-        rmse = np.sqrt(mean_squared_error(all_targets, all_outputs))
-
-        return {"loss": val_loss, "r2": r2, "pearson": pearson_corr, "rmse": rmse}
-
-    def fit(
-        self, epochs: Optional[int] = None, validation_freq: int = 1, verbose: int = 1
-    ) -> Dict[str, List[float]]:
-        """
-        Train the model.
-
-        Args:
-            epochs: Number of epochs (overrides config if provided).
-            validation_freq: Validate every this many epochs.
-            verbose: 0 (silent), 1 (progress), 2 (detailed).
-
-        Returns:
-            Training history.
-        """
-        epochs = epochs or self.config["training"].get("epochs", 50)
-
-        for callback in self.callbacks:
-            callback.on_train_begin(self)
-
-        for epoch in range(epochs):
-            if self.stop_training:
-                break
-
-            self.current_epoch = epoch
-            for callback in self.callbacks:
-                callback.on_epoch_begin(self, epoch)
-
-            train_metrics = self._train_epoch()
-            train_logs = {f"train_{k}": v for k, v in train_metrics.items()}
-
-            val_metrics = {}
-            if self.val_loader and (epoch + 1) % validation_freq == 0:
-                val_metrics = self._validate_epoch()
-                train_logs.update({f"val_{k}": v for k, v in val_metrics.items()})
-
-            if self.exp_logger:
-                self.exp_logger.log_metrics(train_metrics, step=epoch, phase="train")
-                if val_metrics:
-                    self.exp_logger.log_metrics(val_metrics, step=epoch, phase="val")
-
-            if verbose > 0:
-                logger.info(
-                    f"Epoch {epoch + 1}/{epochs} - "
-                    + " - ".join(f"{k}: {v:.4f}" for k, v in train_logs.items())
-                )
-
-            for callback in self.callbacks:
-                callback.on_epoch_end(self, epoch, train_logs)
-
-        for callback in self.callbacks:
-            callback.on_train_end(self)
-
-        return self.history
+        return metrics
 
     def evaluate(
-        self, test_loader: Optional[DataLoader] = None, verbose: int = 1
+        self,
+        test_loader: Optional[DataLoader] = None,
+        verbose: int = 1,
+        use_evaluator: bool = False,
     ) -> Dict[str, float]:
         """Evaluate model performance."""
         test_loader = test_loader or self.val_loader
         if not test_loader:
             raise ValueError("No test_loader or val_loader provided")
+
+        if use_evaluator:
+            from ..evaluation.evaluator import Evaluator
+
+            evaluator = Evaluator(self.model, self.device, self.exp_logger, self.config)
+            return evaluator.evaluate(test_loader, prefix="test_")
 
         self.model.eval()
         test_loss = 0.0
@@ -524,31 +437,11 @@ class Trainer:
 
         with torch.no_grad():
             for batch in test_loader:
-                # Handle different batch input types
-                if isinstance(batch, list):
-                    # Assume the list contains [inputs, targets]
-                    if len(batch) != 2:
-                        raise ValueError(
-                            f"Unexpected batch format. Expected [inputs, targets], got {len(batch)} elements"
-                        )
-                    inputs, targets = batch
-                elif isinstance(batch, dict):
-                    inputs = {k: v for k, v in batch.items() if k != "viability"}
-                    targets = batch["viability"]
-                else:
-                    raise ValueError(f"Unexpected batch type: {type(batch)}")
-
-                # Move inputs and targets to device
-                if isinstance(inputs, dict):
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                else:
-                    inputs = inputs.to(self.device)
-
-                targets = targets.to(self.device)
-
-                # Ensure targets are float
-                if targets.dtype != torch.float32:
-                    targets = targets.float()
+                validate_batch(batch)
+                inputs = {
+                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
+                }
+                targets = batch["viability"].to(self.device).float()
 
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, targets)
@@ -560,32 +453,71 @@ class Trainer:
         test_loss /= num_samples
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
+        metrics = compute_metrics(
+            all_targets, all_outputs, ["r2", "rmse", "mae", "pearson"]
+        )
+        metrics["loss"] = test_loss
 
-        from scipy.stats import pearsonr
-        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
-        r2 = r2_score(all_targets, all_outputs)
-        rmse = np.sqrt(mean_squared_error(all_targets, all_outputs))
-        mae = mean_absolute_error(all_targets, all_outputs)
-        pearson_corr, _ = pearsonr(all_targets.flatten(), all_outputs.flatten())
-
-        test_metrics = {
-            "loss": test_loss,
-            "r2": r2,
-            "rmse": rmse,
-            "mae": mae,
-            "pearson": pearson_corr,
-        }
         if self.exp_logger:
-            self.exp_logger.log_metrics(test_metrics, step=0, phase="test")
+            self.exp_logger.log_metrics(metrics, step=0, phase="test")
 
         if verbose > 0:
             logger.info(
-                "Evaluation: "
-                + " - ".join(f"{k}: {v:.4f}" for k, v in test_metrics.items())
+                "Evaluation: " + " - ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
             )
 
-        return test_metrics
+        return metrics
+
+    def fit(self, epochs: int = 50) -> None:
+        """
+        Train the model for a specified number of epochs.
+
+        Args:
+            epochs: Number of epochs to train
+        """
+        for epoch in range(epochs):
+            # Train for one epoch
+            train_metrics = self._train_epoch()
+
+            # Validate for one epoch
+            val_metrics = self._validate_epoch()
+
+            # Log metrics with epoch as step
+            if self.exp_logger:
+                self.exp_logger.log_metrics(train_metrics, step=epoch, phase="train")
+                self.exp_logger.log_metrics(val_metrics, step=epoch, phase="val")
+
+            # Combine metrics for logging and callbacks
+            logs = {"train": train_metrics, "val": val_metrics}
+
+            # Log epoch summary
+            log_str = f"Epoch {epoch + 1}/{epochs}"
+            for phase, phase_metrics in logs.items():
+                log_str += f" - {phase}_loss: {phase_metrics['loss']:.4f}"
+                for metric, value in phase_metrics.items():
+                    if metric != "loss":
+                        log_str += f" - {phase}_{metric}: {value:.4f}"
+            logger.info(log_str)
+
+            # Update scheduler if present
+            if self.scheduler:
+                if isinstance(
+                    self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau
+                ):
+                    self.scheduler.step(val_metrics["loss"])
+                else:
+                    self.scheduler.step()
+
+            # Callbacks
+            if self.callbacks:
+                for callback in self.callbacks:
+                    callback.on_epoch_end(self, epoch, logs)
+
+        # Final evaluation on test set if provided
+        if hasattr(self, "test_loader") and self.test_loader:
+            test_metrics = self.evaluate(self.test_loader, verbose=1)
+            if self.exp_logger:
+                self.exp_logger.log_metrics(test_metrics, step=epochs, phase="test")
 
     def predict(
         self, data_loader: DataLoader, return_targets: bool = False
@@ -596,11 +528,7 @@ class Trainer:
 
         with torch.no_grad():
             for batch in data_loader:
-                if not isinstance(batch, dict):
-                    raise ValueError(
-                        "Batch must be a dict with 'transcriptomics', 'molecular', 'viability' keys"
-                    )
-
+                validate_batch(batch)
                 inputs = {
                     k: v.to(self.device) for k, v in batch.items() if k != "viability"
                 }
@@ -656,9 +584,6 @@ class Trainer:
 class MultiRunTrainer:
     """
     Manages multiple training runs of the same model architecture for statistical analysis.
-
-    This class runs the same model configuration multiple times with different random seeds,
-    collects performance metrics, and provides statistical summaries across runs.
     """
 
     def __init__(
@@ -717,7 +642,6 @@ class MultiRunTrainer:
         self.num_runs = num_runs
         self.save_models = save_models
 
-        # Set output directory
         self.output_dir = output_dir or self.config.get("paths", {}).get(
             "results_dir", "results"
         )
@@ -725,7 +649,6 @@ class MultiRunTrainer:
         if self.save_models:
             os.makedirs(self.models_dir, exist_ok=True)
 
-        # Initialize results storage
         self.run_results = []
         self.trained_models = []
         self.aggregate_results = {}
@@ -734,31 +657,24 @@ class MultiRunTrainer:
 
     def _get_run_trainer(self, run_id: int) -> Trainer:
         """Create a Trainer instance for a specific run."""
-        # Create a new model instance
         model = self.model_class(**self.model_kwargs)
 
-        # Set random seeds for reproducibility but with different values per run
         seed = 42 + run_id
         torch.manual_seed(seed)
         np.random.seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
 
-        # Create optimizer
         optimizer = self.optimizer_class(
             model.parameters(),
             lr=self.config.get("training", {}).get("learning_rate", 0.001),
         )
 
-        # Create scheduler if specified
         scheduler = None
         if self.scheduler_class:
             scheduler = self.scheduler_class(optimizer)
 
-        # Create run-specific callbacks
         run_callbacks = self.callbacks.copy()
-
-        # Create checkpoint callback for this run if saving models
         if self.save_models:
             run_model_dir = os.path.join(self.models_dir, f"run_{run_id}")
             checkpoint_callback = ModelCheckpointCallback(
@@ -766,23 +682,16 @@ class MultiRunTrainer:
             )
             run_callbacks.append(checkpoint_callback)
 
-        # Create a run-specific experiment logger if provided
-        run_logger = None
-        if self.exp_logger:
-            run_name = f"run_{run_id}"
+        run_logger = (
+            self.exp_logger.clone_with_run_name(f"run_{run_id}")
+            if self.exp_logger and hasattr(self.exp_logger, "clone_with_run_name")
+            else self.exp_logger
+        )
+        if run_logger == self.exp_logger and self.exp_logger:
+            logger.warning(
+                "ExperimentLogger does not support cloning. Using default logger."
+            )
 
-            # Check if clone_with_run_name exists, if not, use the existing logger
-            if hasattr(self.exp_logger, "clone_with_run_name"):
-                run_logger = self.exp_logger.clone_with_run_name(run_name)
-            else:
-                # If no clone method, just use the existing logger
-                # You might want to modify this based on your ExperimentLogger implementation
-                run_logger = self.exp_logger
-                logger.warning(
-                    "ExperimentLogger does not support run-specific cloning. Using default logger."
-                )
-
-        # Return configured trainer
         return Trainer(
             model=model,
             train_loader=self.train_loader,
@@ -797,72 +706,76 @@ class MultiRunTrainer:
             mixed_precision=self.mixed_precision,
         )
 
-    def run_training(self, epochs: Optional[int] = None) -> Dict[str, Dict[str, float]]:
+    def run_training(
+        self, epochs: Optional[int] = None, use_evaluator: bool = False
+    ) -> Dict[str, Dict[str, float]]:
         """
         Run multiple training instances and collect results.
 
         Args:
             epochs: Number of epochs per run (defaults to config)
+            use_evaluator: Use Evaluator for test set evaluation
 
         Returns:
             Dictionary with aggregate statistics of metrics across runs
         """
+        from ..evaluation.evaluator import Evaluator
+
         epochs = epochs or self.config.get("training", {}).get("epochs", 50)
+        evaluator = (
+            Evaluator(
+                self.model_class(**self.model_kwargs),
+                self.device,
+                self.exp_logger,
+                self.config,
+            )
+            if use_evaluator
+            else None
+        )
 
         for run_id in range(self.num_runs):
             logger.info(f"Starting training run {run_id+1}/{self.num_runs}")
-
-            # Create and configure trainer for this run
             trainer = self._get_run_trainer(run_id)
-
-            # Train the model
             trainer.fit(epochs=epochs)
 
-            # Evaluate on validation set
             val_metrics = {}
             if self.val_loader:
                 val_metrics = trainer.evaluate(self.val_loader, verbose=1)
 
-            # Evaluate on test set if provided
             test_metrics = {}
             if self.test_loader:
-                test_metrics = trainer.evaluate(self.test_loader, verbose=1)
+                test_metrics = (
+                    evaluator.evaluate(self.test_loader, prefix=f"run_{run_id}_")
+                    if use_evaluator
+                    else trainer.evaluate(self.test_loader, verbose=1)
+                )
 
-            # Store results
             run_result = {
                 "run_id": run_id,
                 "val_metrics": val_metrics,
                 "test_metrics": test_metrics,
             }
             self.run_results.append(run_result)
-
-            # Store the trained model
             self.trained_models.append(trainer.model)
 
             logger.info(f"Completed training run {run_id+1}/{self.num_runs}")
 
-        # Compute aggregate statistics
         self._compute_aggregate_stats()
-
-        # Save results
         self._save_results()
 
         return self.aggregate_results
 
     def _compute_aggregate_stats(self) -> None:
         """Compute statistical measures across runs."""
-        # Initialize containers for metrics
         val_metrics = defaultdict(list)
         test_metrics = defaultdict(list)
 
-        # Collect metrics across runs
         for result in self.run_results:
             for k, v in result["val_metrics"].items():
                 val_metrics[k].append(v)
             for k, v in result["test_metrics"].items():
                 test_metrics[k].append(v)
 
-        # Compute statistics for validation metrics
         val_stats = {}
         for metric, values in val_metrics.items():
             val_stats[f"{metric}_mean"] = float(np.mean(values))
@@ -870,7 +783,6 @@ class MultiRunTrainer:
             val_stats[f"{metric}_min"] = float(np.min(values))
             val_stats[f"{metric}_max"] = float(np.max(values))
 
-        # Compute statistics for test metrics
         test_stats = {}
         for metric, values in test_metrics.items():
             test_stats[f"{metric}_mean"] = float(np.mean(values))
@@ -878,7 +790,6 @@ class MultiRunTrainer:
             test_stats[f"{metric}_min"] = float(np.min(values))
             test_stats[f"{metric}_max"] = float(np.max(values))
 
-        # Store aggregate results
         self.aggregate_results = {
             "val": val_stats,
             "test": test_stats,
@@ -887,86 +798,43 @@ class MultiRunTrainer:
 
     def _save_results(self) -> None:
         """Save aggregate results and generate visualizations."""
+        from ..utils.visualization import plot_boxplot
+
         if not self.output_dir:
             return
 
-        # Create results directory
         results_dir = os.path.join(self.output_dir, "multi_run_results")
         os.makedirs(results_dir, exist_ok=True)
 
-        # Save aggregate metrics
         metrics_file = os.path.join(results_dir, "aggregate_metrics.json")
         with open(metrics_file, "w") as f:
             json.dump(self.aggregate_results, f, indent=2)
 
-        # Save individual run results
         runs_file = os.path.join(results_dir, "individual_runs.json")
         with open(runs_file, "w") as f:
             json.dump(self.run_results, f, indent=2)
 
-        # Generate boxplots for validation metrics
-        self._plot_metric_distributions(results_dir, "val")
-
-        # Generate boxplots for test metrics
-        if any(
-            "test_metrics" in result and result["test_metrics"]
-            for result in self.run_results
-        ):
-            self._plot_metric_distributions(results_dir, "test")
-
-        logger.info(f"Saved multi-run results to {results_dir}")
-
-    def _plot_metric_distributions(self, output_dir: str, dataset: str) -> None:
-        """Generate boxplots for metrics distributions across runs."""
-        # Collect metrics for the specified dataset
-        metrics_data = defaultdict(list)
-        dataset_key = f"{dataset}_metrics"
-
-        for result in self.run_results:
-            if dataset_key in result and result[dataset_key]:
-                for metric, value in result[dataset_key].items():
-                    metrics_data[metric].append(value)
-
-        if not metrics_data:
-            return
-
-        # Create figure
-        plt.figure(figsize=(12, 6))
-
-        # Prepare data for boxplot
-        metrics = list(metrics_data.keys())
-        data = [metrics_data[m] for m in metrics]
-
-        # Create boxplot
-        box = plt.boxplot(data, labels=metrics, patch_artist=True)
-
-        # Add run points
-        for i, metric in enumerate(metrics):
-            x = np.random.normal(i + 1, 0.04, size=len(metrics_data[metric]))
-            plt.plot(x, metrics_data[metric], "r.", alpha=0.5)
-
-        # Add mean and std annotations
-        for i, metric in enumerate(metrics):
-            values = metrics_data[metric]
-            mean_val = np.mean(values)
-            std_val = np.std(values)
-            plt.annotate(
-                f"μ={mean_val:.4f}\nσ={std_val:.4f}",
-                xy=(i + 1, max(values) + 0.05 * (max(values) - min(values))),
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5),
+        if self.aggregate_results["val"]:
+            plot_boxplot(
+                {
+                    k.split("_")[0]: v
+                    for k, v in self.aggregate_results["val"].items()
+                    if "_mean" in k
+                },
+                "Validation Metrics Across Runs",
+                "Value",
+                os.path.join(results_dir, "val_metrics_distribution.png"),
+            )
+        if self.aggregate_results["test"]:
+            plot_boxplot(
+                {
+                    k.split("_")[0]: v
+                    for k, v in self.aggregate_results["test"].items()
+                    if "_mean" in k
+                },
+                "Test Metrics Across Runs",
+                "Value",
+                os.path.join(results_dir, "test_metrics_distribution.png"),
             )
 
-        # Set plot attributes
-        plt.title(f"{dataset.upper()} Metrics Across {self.num_runs} Runs")
-        plt.ylabel("Value")
-        plt.grid(True, linestyle="--", alpha=0.7)
-
-        # Save figure
-        plt.tight_layout()
-        plt.savefig(
-            os.path.join(output_dir, f"{dataset}_metrics_distribution.png"), dpi=300
-        )
-        plt.close()
+        logger.info(f"Saved multi-run results to {results_dir}")
