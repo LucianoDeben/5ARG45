@@ -217,9 +217,10 @@ class FeatureInterpreter:
         top_k_values: np.ndarray,
         method: str,
         modality: Optional[str] = None,
+        feature_names: Optional[Dict[int, str]] = None,
     ) -> plt.Figure:
         """
-        Create visualization of attribution results.
+        Create visualization of attribution results with human-readable feature names.
 
         Args:
             attributions: Attribution values
@@ -227,12 +228,13 @@ class FeatureInterpreter:
             top_k_values: Values of top-k features
             method: Attribution method used
             modality: Modality being visualized (if applicable)
+            feature_names: Optional dictionary mapping feature indices to names
 
         Returns:
             Matplotlib figure with visualization
         """
         # Create figure with 2 subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
 
         # Plot heatmap of attributions for first sample
         abs_attr = np.abs(attributions[0])
@@ -241,10 +243,17 @@ class FeatureInterpreter:
         ax1.set_xlabel("Feature Index")
         fig.colorbar(im, ax=ax1, label="Attribution Magnitude")
 
-        # Plot top-k features
+        # Plot top-k features with names
         ax2.barh(range(len(top_k_indices)), top_k_values)
         ax2.set_yticks(range(len(top_k_indices)))
-        ax2.set_yticklabels([f"Feature {idx}" for idx in top_k_indices])
+        
+        # Use feature names if available
+        if feature_names:
+            y_labels = [feature_names.get(idx, f"Feature {idx}") for idx in top_k_indices]
+        else:
+            y_labels = [f"Feature {idx}" for idx in top_k_indices]
+            
+        ax2.set_yticklabels(y_labels)
         ax2.set_title(f"Top {len(top_k_indices)} Features")
         ax2.set_xlabel("Mean Attribution")
 
@@ -395,3 +404,132 @@ class MultimodalInterpreter:
         }
 
         return result
+
+class ModelInterpreterWrapper(torch.nn.Module):
+    """
+    Wrapper to make the multimodal model compatible with Captum's interpretation methods.
+    
+    Captum expects a model that takes a single tensor as input, but our multimodal model
+    takes a dictionary with different modalities. This wrapper handles the conversion.
+    """
+    
+    def __init__(self, model, transcriptomics_dim, molecular_dim):
+        """
+        Initialize with the base model and dimension information.
+        
+        Args:
+            model: The multimodal model to wrap
+            transcriptomics_dim: Dimension of transcriptomics features
+            molecular_dim: Dimension of molecular features
+        """
+        super().__init__()
+        self.model = model
+        self.transcriptomics_dim = transcriptomics_dim
+        self.molecular_dim = molecular_dim
+        
+    def forward(self, x):
+        """
+        Forward pass that converts a concatenated input tensor back into
+        the format expected by the multimodal model.
+        
+        Args:
+            x: Combined input tensor [batch_size, transcriptomics_dim + molecular_dim]
+            
+        Returns:
+            Model prediction
+        """
+        # Split the input tensor into modalities
+        transcriptomics = x[:, :self.transcriptomics_dim]
+        molecular = x[:, self.transcriptomics_dim:self.transcriptomics_dim + self.molecular_dim]
+        
+        # Create input dictionary for the model
+        model_input = {
+            "transcriptomics": transcriptomics,
+            "molecular": molecular
+        }
+        
+        # Forward pass through the model
+        return self.model(model_input)
+    
+def get_feature_names(config, modality_dims):
+    """
+    Get human-readable feature names for each modality to improve interpretation.
+    
+    Args:
+        config: Configuration dictionary with feature naming information
+        modality_dims: Dictionary mapping modality names to (start_idx, end_idx) tuples
+        
+    Returns:
+        Dictionary mapping feature indices to human-readable names
+    """
+    import pandas as pd
+    import os
+    import logging
+    
+    feature_names = {}
+    
+    # Get feature naming configuration
+    feature_naming_config = config.get('interpretation', {}).get('feature_naming', {})
+    
+    # Process each modality
+    for modality, (start_idx, end_idx) in modality_dims.items():
+        # Get naming file path for this modality
+        naming_file = feature_naming_config.get(modality)
+        
+        # Skip if no naming file specified
+        if not naming_file:
+            # Use default naming
+            feature_names.update({
+                i: f"{modality}_{i-start_idx}" 
+                for i in range(start_idx, end_idx)
+            })
+            continue
+            
+        # Skip if file doesn't exist
+        if not os.path.exists(naming_file):
+            logging.warning(f"Feature naming file for {modality} not found: {naming_file}")
+            feature_names.update({
+                i: f"{modality}_{i-start_idx}" 
+                for i in range(start_idx, end_idx)
+            })
+            continue
+            
+        try:
+            # Try to load the feature names
+            if modality == "transcriptomics" and naming_file.endswith(".txt"):
+                # For transcriptomics, load gene info
+                gene_info = pd.read_csv(naming_file, sep="\t")
+                
+                # Expected columns: pr_gene_id, pr_gene_symbol, pr_gene_title
+                if 'pr_gene_id' in gene_info.columns and 'pr_gene_symbol' in gene_info.columns:
+                    # Map gene IDs to symbols
+                    gene_symbols = dict(zip(gene_info['pr_gene_id'], gene_info['pr_gene_symbol']))
+                    
+                    # Create feature names (assuming landmark genes are first n genes in order)
+                    feature_count = end_idx - start_idx
+                    for i, gene_id in enumerate(gene_info['pr_gene_id'][:feature_count]):
+                        if i < feature_count:
+                            feature_names[start_idx + i] = gene_symbols.get(gene_id, f"Gene_{gene_id}")
+                else:
+                    # Handle unexpected file format
+                    logging.warning(f"Unexpected format in gene info file: {naming_file}")
+                    feature_names.update({
+                        i: f"{modality}_{i-start_idx}" 
+                        for i in range(start_idx, end_idx)
+                    })
+            else:
+                # For other modalities, use index-based naming
+                feature_names.update({
+                    i: f"{modality}_{i-start_idx}" 
+                    for i in range(start_idx, end_idx)
+                })
+                
+        except Exception as e:
+            logging.error(f"Error loading feature names for {modality}: {e}")
+            # Fallback to index-based naming
+            feature_names.update({
+                i: f"{modality}_{i-start_idx}" 
+                for i in range(start_idx, end_idx)
+            })
+    
+    return feature_names

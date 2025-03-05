@@ -105,4 +105,19 @@ experiment:
   save_checkpoints: true
   checkpoint_freq: 5
   keep_n_checkpoints: 3
-  log_level: "INFO"
+  log_level: "WARNING"
+
+interpretation:
+  enabled: true
+  attribution_methods: 
+    - "integrated_gradients"
+    - "feature_ablation"
+    - "deep_lift"
+  n_samples: 5  # Number of samples to use for interpretation
+  top_k: 20     # Number of top features to highlight
+  visualize_features: true
+  feature_naming:
+    transcriptomics: "data/raw/LINCS/geneinfo_beta.txt"  # Path to gene name mapping
+    molecular: null  # No naming for molecular features
+  save_attributions: true  # Whether to save raw attribution values
+  generate_figures: true

@@ -186,4 +186,5 @@ models/
 !src/models
 
 /logs
+/$logs
 /results

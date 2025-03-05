@@ -1,0 +1,80 @@
+# src/data/data_preparation.py
+import logging
+from typing import Tuple
+
+from torch.utils.data import DataLoader
+
+from src.data.datasets import DatasetFactory
+from src.data.feature_transforms import create_feature_transform
+from src.data.loaders import GCTXDataLoader
+from src.data.preprocessing import LINCSCTRPDataProcessor
+
+logger = logging.getLogger(__name__)
+
+def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Prepare training, validation, and test data loaders based on the provided configuration.
+
+    Args:
+        config (dict): Configuration dictionary containing data and training parameters.
+
+    Returns:
+        Tuple[DataLoader, DataLoader, DataLoader]: Train, validation, and test data loaders.
+    """
+    try:
+        # Step 2: Preprocess data using LINCSCTRPDataProcessor
+        processor = LINCSCTRPDataProcessor(
+            gctx_file=config["data"]["gctx_file"],
+            feature_space=config["data"]["feature_space"],
+            nrows=config["data"].get("nrows"),
+            imputation_strategy=config["data"].get("imputation_strategy", "mean"),
+            handle_outliers=config["data"].get("handle_outliers", False),
+            outlier_threshold=config["data"].get("outlier_threshold", 3.0),
+        )
+        transcriptomics, metadata = processor.preprocess()
+
+        # Step 3: Create feature transform for molecular data
+        transform_molecular = create_feature_transform(
+            config["data"]["transform_type"],
+            fingerprint_size=config["data"].get("fingerprint_size", 1024),
+            fingerprint_radius=config["data"].get("fingerprint_radius", 2),
+        )
+
+        # Step 4: Create and split datasets using DatasetFactory
+        train_ds, val_ds, test_ds = DatasetFactory.create_and_split_multimodal(
+            transcriptomics=transcriptomics,
+            metadata=metadata,
+            transform_molecular=transform_molecular,
+            test_size=config["training"]["test_size"],
+            val_size=config["training"]["val_size"],
+            random_state=config["data"]["random_seed"],
+            group_by=config["training"]["group_by"],
+            stratify_by=config["training"]["stratify_by"],
+        )
+
+        # Step 5: Create PyTorch DataLoaders
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=config["training"]["batch_size"],
+            shuffle=True,
+            num_workers=config["data"].get("num_workers", 0),
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=config["data"].get("num_workers", 0),
+        )
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=config["data"].get("num_workers", 0),
+        )
+
+        logger.info("Data preparation completed successfully.")
+        return train_loader, val_loader, test_loader
+
+    except Exception as e:
+        logger.error(f"Error in data preparation: {str(e)}")
+        raise
