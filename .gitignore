@@ -182,4 +182,4 @@ assets/
 
 # Models
 models/
-!src/models
+!src/models/
