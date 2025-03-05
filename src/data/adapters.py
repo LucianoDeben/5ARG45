@@ -350,5 +350,5 @@ if __name__ == "__main__":
     }
 
     # Convert dataset
-    output_path = "../data/processed/LINCS2.gctx"
+    output_path = "../data/processed/LINCS.gctx"
     LINCSDatasetFactory.convert_dataset(config, output_path)

@@ -1,0 +1,120 @@
+chemical:
+  fingerprint_size: 1024
+  radius: 2
+  representation: !!python/object/apply:src.config.constants.ChemicalRepresentation
+  - fingerprint
+  sanitize: true
+  use_chirality: true
+  use_features: true
+data:
+  cache_data: true
+  chunk_size: 10000
+  curves_post_qc: ${DATA_DIR:-data}/raw/CTRP/v20.data.curves_post_qc.txt
+  feature_space: !!python/object/apply:src.config.constants.FeatureSpace
+  - landmark
+  gctx_file: $./data/processed/LINCS.gctx
+  geneinfo_file: ${DATA_DIR:-data}/raw/LINCS/geneinfo_beta.txt
+  matching_strategy: parallel
+  max_workers: null
+  normalize: !!python/object/apply:src.config.constants.Normalization
+  - zscore
+  nrows: 1000
+  num_workers: 4
+  output_path: ${DATA_DIR:-data}/processed/LINCS_CTRP_matched.gctx
+  per_cell_line: ${DATA_DIR:-data}/raw/CTRP/v20.meta.per_cell_line.txt
+  per_compound: ${DATA_DIR:-data}/raw/CTRP/v20.meta.per_compound.txt
+  per_cpd_post_qc: ${DATA_DIR:-data}/raw/CTRP/v20.data.per_cpd_post_qc.txt
+  per_experiment: ${DATA_DIR:-data}/raw/CTRP/v20.meta.per_experiment.txt
+  random_seed: 42
+  siginfo_file: ${DATA_DIR:-data}/raw/LINCS/siginfo_beta.txt
+  use_multiprocessing: true
+deployment:
+  quantization:
+  - static
+  - dynamic
+evaluation:
+  loss: mse
+  metrics:
+  - r2
+  - rmse
+  - mae
+  - pearson
+  output_dir: results/eval
+  visualization:
+    dpi: 300
+    figsize:
+    - 10
+    - 8
+experiment:
+  checkpoint_freq: 5
+  keep_n_checkpoints: 3
+  project_name: lincs_ctrp_prediction
+  run_name: ${RUN_NAME:-run_20250304_151607}
+  save_checkpoints: true
+  tags:
+  - multimodal
+  - drug-response
+  track: false
+  version: 1.0.0
+inference:
+  device: cuda
+  export_formats:
+  - pytorch
+  - onnx
+  - torchscript
+  max_ensemble: 5
+  output_path: results/predictions.csv
+model:
+  activation: !!python/object/apply:src.config.constants.Activation
+  - relu
+  chemical_hidden_dims:
+  - 256
+  - 128
+  chemical_input_dim: 1025
+  chemical_output_dim: 128
+  dropout: 0.3
+  fusion_output_dim: 256
+  fusion_strategy: !!python/object/apply:src.config.constants.FusionStrategy
+  - concat
+  layer_norm: true
+  normalize: true
+  predictor_hidden_dims:
+  - 128
+  - 64
+  residual_connections: true
+  transcriptomics_hidden_dims:
+  - 512
+  - 256
+  transcriptomics_input_dim: 978
+  transcriptomics_output_dim: 128
+  use_batch_norm: true
+paths:
+  data_dir: $data
+  log_dir: $logs
+  model_dir: $models/saved
+  results_dir: $results
+training:
+  batch_size: 32
+  clip_grad_norm: true
+  early_stopping: true
+  epochs: 100
+  group_by: null
+  label_smoothing: 0.1
+  learning_rate: 0.001
+  loss: !!python/object/apply:src.config.constants.LossFunction
+  - mse
+  lr_scheduler:
+    min_lr: 1.0e-06
+    type: step
+    warmup_epochs: 5
+  max_grad_norm: 1.0
+  min_delta: 0.001
+  optimizer: !!python/object/apply:src.config.constants.Optimizer
+  - adam
+  patience: 10
+  random_state: 42
+  stratify_by: null
+  test_size: 0.2
+  use_amp: true
+  val_size: 0.1
+  weight_decay: 0.01

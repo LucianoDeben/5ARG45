@@ -1,37 +1,65 @@
 # config.yaml
+paths:
+  data_dir: "data"
+  model_dir: "models/saved"
+  log_dir: "logs"
+  results_dir: "results"
+  checkpoint_dir: "models/saved/checkpoints"
+
 data:
-  # LINCS files
-  gctx_file: "../data/raw/LINCS/level5_beta_trt_cp_n720216x12328.gctx"
-  geneinfo_file: "../data/raw/LINCS/geneinfo_beta.txt"
-  siginfo_file: "../data/raw/LINCS/siginfo_beta.txt"
-
-  # CTRP files
-  curves_post_qc: "../data/raw/CTRP/v20.data.curves_post_qc.txt"
-  per_cpd_post_qc: "../data/raw/CTRP/v20.data.per_cpd_post_qc.txt"
-  per_experiment: "../data/raw/CTRP/v20.meta.per_experiment.txt"
-  per_compound: "../data/raw/CTRP/v20.meta.per_compound.txt"
-  per_cell_line: "../data/raw/CTRP/v20.meta.per_cell_line.txt"
-
-  # Output configuration
-  output_path: "../data/processed/LINCS_CTRP_matched.gctx"
-
-  # Existing configurations
+  gctx_file: "data/processed/LINCS.gctx"
+  geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
+  siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
+  curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
+  per_cpd_post_qc: "data/raw/CTRP/v20.data.per_cpd_post_qc.txt"
+  per_experiment: "data/raw/CTRP/v20.meta.per_experiment.txt"
+  per_compound: "data/raw/CTRP/v20.meta.per_compound.txt"
+  per_cell_line: "data/raw/CTRP/v20.meta.per_cell_line.txt"
+  output_path: "data/processed/LINCS_CTRP_matched.gctx"
+  matching_strategy: "parallel"
+  max_workers: null
+  chunk_size: 10000
   feature_space: "landmark"
-  nrows: 2000
+  nrows: 1000
+  normalize: "zscore"
+  random_seed: 42
+  cache_data: true
+  use_multiprocessing: true
+  num_workers: 4
+  batch_size: 32
+
 training:
-  epochs: 10
-  lr: 0.001
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: "adam" # Adjusted to match trainer.py (add "adamw" support if needed)
+  loss: "mse"
   test_size: 0.2
   val_size: 0.1
   random_state: 42
-  batch_size: 32
-experiment:
-  project_name: "lincs_ctrp_debug"
-  track: false
+  group_by: null
+  stratify_by: null
+  lr_scheduler:
+    type: "step" # Adjusted to match trainer.py (add "cosine" support if needed)
+    step_size: 10
+    gamma: 0.1
+  early_stopping: true
+  patience: 10
+  min_delta: 0.001
+  clip_grad_norm: true
+  max_grad_norm: 1.0
+  use_amp: true
+  weight_decay: 0.01
+  label_smoothing: 0.1
+
 chemical:
   representation: "fingerprint"
   fingerprint_size: 1024
   radius: 2
+  use_chirality: true
+  use_features: true
+  sanitize: true
+
 model:
   transcriptomics_input_dim: 978
   transcriptomics_hidden_dims: [512, 256]
@@ -40,9 +68,41 @@ model:
   chemical_hidden_dims: [256, 128]
   chemical_output_dim: 128
   fusion_output_dim: 256
+  predictor_hidden_dims: [128, 64]
+  transcriptomics_encoder_type: "mlp"
+  chemical_encoder_type: "descriptors"
+  fusion_type: "simple"
   fusion_strategy: "concat"
-  predictor_hidden_dims: [64, 32]
-  normalize: true
-  dropout: 0.3
   activation: "relu"
+  dropout: 0.3
+  normalize: true
   use_batch_norm: true
+  predictor_type: "standard"
+
+evaluation:
+  metrics: ["r2", "rmse", "mae", "pearson"]
+  loss: "mse"
+  output_dir: "results/eval"
+  visualization:
+    dpi: 300
+    figsize: [10, 8]
+
+inference:
+  device: "cuda"
+  max_ensemble: 5
+  output_path: "results/predictions.csv"
+  export_formats: ["pytorch", "onnx", "torchscript"]
+
+deployment:
+  quantization: ["static", "dynamic"]
+
+experiment:
+  project_name: "lincs_ctrp_prediction"
+  run_name: "${RUN_NAME:-run_${timestamp}}"
+  track: false
+  tags: ["multimodal", "drug-response"]
+  version: "1.0.0"
+  save_checkpoints: true
+  checkpoint_freq: 5
+  keep_n_checkpoints: 3
+  log_level: "INFO"

@@ -175,6 +175,7 @@ data/test
 *.bin
 *.zip
 *.pk
+*.pkl
 /pk
 
 # Assets
@@ -182,4 +183,6 @@ assets/
 
 # Models
 models/
-!src/models/
+!src/models
+
+/logs

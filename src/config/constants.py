@@ -1,48 +1,87 @@
-# config/constants.py
-from typing import Dict, Set
+# src/config/constants.py
+import logging
+from enum import Enum
+from typing import Any, Dict
+from venv import logger
 
-# Required configuration sections
+
+def check_config_types(config: Dict[str, Any], schema_dict: Dict[str, type]) -> bool:
+    """Validate configuration value types against a schema dictionary."""
+    for key, expected_type in schema_dict.items():
+        if key in config:
+            if isinstance(expected_type, dict) and isinstance(config[key], dict):
+                if not check_config_types(config[key], expected_type):
+                    return False
+            elif not isinstance(config[key], expected_type):
+                logger.error(
+                    f"Config key '{key}' has wrong type: {type(config[key])}, expected {expected_type}"
+                )
+                return False
+    return True
+
+
+CURRENT_SCHEMA_VERSION = "1.0.0"
 REQUIRED_CONFIG_SECTIONS = {"data", "model", "training", "chemical", "experiment"}
 
-# Valid options for different parameters
-VALID_FEATURE_SPACES: Set[str] = {"landmark", "best inferred", "inferred"}
 
-VALID_NORMALIZATIONS: Set[str] = {"zscore", "minmax", "robust"}
+class FeatureSpace(str, Enum):
+    LANDMARK = "landmark"
+    BEST_INFERRED = "best inferred"
+    INFERRED = "inferred"
 
-VALID_OPTIMIZERS: Set[str] = {"adam", "sgd", "adamw", "radam"}
 
-VALID_LOSS_FUNCTIONS: Set[str] = {"mse", "mae", "huber", "quantile"}
+class Normalization(str, Enum):
+    ZSCORE = "zscore"
+    MINMAX = "minmax"
+    ROBUST = "robust"
 
-VALID_CHEMICAL_REPRESENTATIONS: Set[str] = {
-    "fingerprint",
-    "smiles_sequence",
-    "graph",
-    "descriptors",
-}
 
-VALID_ACTIVATIONS: Set[str] = {"relu", "leaky_relu", "gelu", "selu", "elu"}
+class Optimizer(str, Enum):
+    ADAM = "adam"
+    SGD = "sgd"
+    ADAMW = "adamw"
+    RADAM = "radam"
 
-VALID_FUSION_STRATEGIES: Set[str] = {
-    "concat",
-    "attention",
-    "cross_attention",
-    "gated",
-    "bilinear",
-}
 
-# Schema version for backward compatibility
-CURRENT_SCHEMA_VERSION = "1.0.0"
+class LossFunction(str, Enum):
+    MSE = "mse"
+    MAE = "mae"
+    HUBER = "huber"
+    QUANTILE = "quantile"
 
-# Default paths
+
+class ChemicalRepresentation(str, Enum):
+    FINGERPRINT = "fingerprint"
+    SMILES_SEQUENCE = "smiles_sequence"
+    GRAPH = "graph"
+    DESCRIPTORS = "descriptors"
+
+
+class Activation(str, Enum):
+    RELU = "relu"
+    LEAKY_RELU = "leaky_relu"
+    GELU = "gelu"
+    SELU = "selu"
+    ELU = "elu"
+
+
+class FusionStrategy(str, Enum):
+    CONCAT = "concat"
+    ATTENTION = "attention"
+    CROSS_ATTENTION = "cross_attention"
+    GATED = "gated"
+    BILINEAR = "bilinear"
+
+
 DEFAULT_PATHS = {
-    "data_dir": "data/processed",
-    "model_dir": "models/saved",
-    "log_dir": "logs",
-    "results_dir": "results",
+    "data_dir": "${DATA_DIR:-data}",
+    "model_dir": "${MODEL_DIR:-models/saved}",
+    "log_dir": "${LOG_DIR:-logs}",
+    "results_dir": "${RESULTS_DIR:-results}",
 }
 
-# Logging configuration
 LOGGING_CONFIG = {
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     "level": "INFO",
+    "handlers": [logging.StreamHandler(), logging.FileHandler("app.log")],
 }

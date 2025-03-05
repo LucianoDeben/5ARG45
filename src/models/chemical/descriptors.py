@@ -189,3 +189,143 @@ class IntegratedMolecularEncoder(nn.Module):
             # Multiply for feature-wise scaling
             x = x * torch.sigmoid(d)
             return self.output_projection(x)
+
+
+class ResidualMolecularEncoder(nn.Module):
+    """
+    Enhanced molecular descriptor encoder with residual connections.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int],
+        output_dim: int,
+        normalize: bool = True,
+        dropout: float = 0.3,
+        activation: str = "relu",
+    ):
+        super(ResidualMolecularEncoder, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = output_dim
+
+        # Choose activation function
+        if activation.lower() == "relu":
+            self.activation_fn = F.relu
+        elif activation.lower() == "leaky_relu":
+            self.activation_fn = F.leaky_relu
+        elif activation.lower() == "elu":
+            self.activation_fn = F.elu
+        elif activation.lower() == "gelu":
+            self.activation_fn = F.gelu
+        else:
+            raise ValueError(f"Unsupported activation function: {activation}")
+
+        # Build network with residual connections
+        self.input_layer = nn.Linear(input_dim, hidden_dims[0])
+        if normalize:
+            self.input_norm = nn.BatchNorm1d(hidden_dims[0])
+        else:
+            self.input_norm = nn.Identity()
+
+        # Residual blocks
+        self.res_blocks = nn.ModuleList()
+        for i in range(len(hidden_dims) - 1):
+            # Only add residual connections when dimensions match or we provide a projection
+            if hidden_dims[i] == hidden_dims[i + 1]:
+                projection = None
+            else:
+                projection = nn.Linear(hidden_dims[i], hidden_dims[i + 1])
+
+            self.res_blocks.append(
+                ResidualBlock(
+                    hidden_dims[i],
+                    hidden_dims[i + 1],
+                    projection=projection,
+                    normalize=normalize,
+                    dropout=dropout,
+                    activation_fn=self.activation_fn,
+                )
+            )
+
+        # Output layer
+        self.output_layer = nn.Linear(hidden_dims[-1], output_dim)
+
+        logger.debug(
+            f"Initialized ResidualMolecularEncoder with input_dim={input_dim}, "
+            f"output_dim={output_dim}, residual blocks={len(self.res_blocks)}"
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Initial layer
+        x = self.input_layer(x)
+        x = self.input_norm(x)
+        x = self.activation_fn(x)
+
+        # Residual blocks
+        for block in self.res_blocks:
+            x = block(x)
+
+        # Output layer
+        return self.output_layer(x)
+
+
+class ResidualBlock(nn.Module):
+    """
+    Residual block with optional projection for when dimensions change.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        projection: Optional[nn.Module] = None,
+        normalize: bool = True,
+        dropout: float = 0.3,
+        activation_fn=F.relu,
+    ):
+        super(ResidualBlock, self).__init__()
+        self.projection = projection
+        self.activation_fn = activation_fn
+
+        # First layer
+        self.linear1 = nn.Linear(in_dim, out_dim)
+        if normalize:
+            self.norm1 = nn.BatchNorm1d(out_dim)
+        else:
+            self.norm1 = nn.Identity()
+        self.dropout1 = nn.Dropout(dropout)
+
+        # Second layer
+        self.linear2 = nn.Linear(out_dim, out_dim)
+        if normalize:
+            self.norm2 = nn.BatchNorm1d(out_dim)
+        else:
+            self.norm2 = nn.Identity()
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Store input for residual connection
+        identity = x
+
+        # First layer
+        out = self.linear1(x)
+        out = self.norm1(out)
+        out = self.activation_fn(out)
+        out = self.dropout1(out)
+
+        # Second layer
+        out = self.linear2(out)
+        out = self.norm2(out)
+
+        # Apply projection if needed
+        if self.projection is not None:
+            identity = self.projection(identity)
+
+        # Add residual connection
+        out += identity
+        out = self.activation_fn(out)
+        out = self.dropout2(out)
+
+        return out

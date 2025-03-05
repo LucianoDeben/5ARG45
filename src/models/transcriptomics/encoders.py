@@ -266,102 +266,286 @@ class CNNTranscriptomicEncoder(nn.Module):
         return self.projection(x)
 
 
-class BiologicallyInformedEncoder(nn.Module):
+class AttentionTranscriptomicEncoder(nn.Module):
     """
-    Transcriptomics encoder that incorporates biological prior knowledge.
+    Self-attention based encoder for transcriptomics data.
 
-    This encoder applies optional biological pathway or gene grouping information
-    to improve feature extraction from gene expression data. It's designed to
-    leverage biological knowledge for more interpretable representations.
+    This encoder uses self-attention mechanisms to capture global relationships
+    between genes in expression data, allowing it to model complex interactions
+    and dependencies that might be missed by MLP or CNN architectures.
 
     Attributes:
         input_dim: Number of input genes
-        pathway_groups: Gene groupings based on biological pathways
-        hidden_dims: List of hidden layer dimensions
+        hidden_dim: Dimension of hidden representations
         output_dim: Dimension of the output representation
+        num_heads: Number of attention heads
+        num_layers: Number of transformer encoder layers
+        normalize: Whether to apply layer normalization
+        dropout: Dropout rate
     """
 
     def __init__(
         self,
         input_dim: int,
-        pathway_groups: Dict[str, List[int]],
-        hidden_dims: List[int],
+        hidden_dim: int,
         output_dim: int,
+        num_heads: int = 4,
+        num_layers: int = 2,
         normalize: bool = True,
-        dropout: float = 0.3,
-        aggregation: str = "attention",
+        dropout: float = 0.2,
+        feed_forward_dim: Optional[int] = None,
     ):
         """
-        Initialize the BiologicallyInformedEncoder.
+        Initialize the AttentionTranscriptomicEncoder.
+
+        Args:
+            input_dim: Number of input genes
+            hidden_dim: Dimension of hidden representations
+            output_dim: Dimension of the output representation
+            num_heads: Number of attention heads
+            num_layers: Number of transformer encoder layers
+            normalize: Whether to apply layer normalization
+            dropout: Dropout rate
+            feed_forward_dim: Dimension of feed-forward network (defaults to 4*hidden_dim)
+        """
+        super(AttentionTranscriptomicEncoder, self).__init__()
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.num_heads = num_heads
+
+        if feed_forward_dim is None:
+            feed_forward_dim = 4 * hidden_dim
+
+        # Initial projection of gene expression to hidden dimension
+        self.input_projection = nn.Linear(input_dim, hidden_dim)
+
+        # Create transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=feed_forward_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=normalize,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
+
+        # Final projection to output dimension
+        self.output_projection = nn.Linear(hidden_dim, output_dim)
+
+        # Learned positions for genes (as we don't have sequential order)
+        self.position_embedding = nn.Parameter(torch.randn(1, 1, hidden_dim))
+
+        logger.debug(
+            f"Initialized AttentionTranscriptomicEncoder with input_dim={input_dim}, "
+            f"hidden_dim={hidden_dim}, output_dim={output_dim}, "
+            f"num_heads={num_heads}, num_layers={num_layers}"
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for gene expression data.
+
+        This implementation treats each gene as a "token" in the transformer framework,
+        allowing the self-attention mechanism to model relationships between genes.
+
+        Args:
+            x: Tensor [batch_size, input_dim] with gene expression values
+
+        Returns:
+            Tensor [batch_size, output_dim] with gene expression embedding
+        """
+        batch_size = x.shape[0]
+
+        # Reshape for transformer: [batch_size, input_dim] -> [batch_size, input_dim, 1]
+        # This treats each gene as a "token" with a single feature
+        x = x.unsqueeze(-1)
+
+        # Project each gene to hidden dimension: [batch_size, input_dim, hidden_dim]
+        x = self.input_projection(x)
+
+        # Add positional embedding
+        x = x + self.position_embedding
+
+        # Pass through transformer encoder
+        # Shape remains [batch_size, input_dim, hidden_dim]
+        x = self.transformer_encoder(x)
+
+        # Global pooling across genes
+        x = x.mean(dim=1)  # [batch_size, hidden_dim]
+
+        # Project to output dimension
+        x = self.output_projection(x)  # [batch_size, output_dim]
+
+        return x
+
+
+class MultiHeadAttentionPooling(nn.Module):
+    """
+    Multi-head attention pooling for aggregating gene features.
+
+    This module applies multi-head attention with a learnable query to
+    aggregate gene-level features into a single representation, giving
+    different weights to different genes based on their importance.
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1):
+        """
+        Initialize the multi-head attention pooling.
+
+        Args:
+            hidden_dim: Dimension of gene representations
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+        """
+        super(MultiHeadAttentionPooling, self).__init__()
+
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+
+        # Use multi-head attention with a learnable query
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply attention pooling to gene expressions.
+
+        Args:
+            x: Tensor [batch_size, num_genes, hidden_dim] with gene representations
+
+        Returns:
+            Tensor [batch_size, hidden_dim] with aggregated gene representation
+        """
+        batch_size = x.shape[0]
+
+        # Expand query to batch size
+        query = self.query.expand(batch_size, -1, -1)
+
+        # Apply attention (query = [batch_size, 1, hidden_dim],
+        #                 key/value = [batch_size, num_genes, hidden_dim])
+        # Output = [batch_size, 1, hidden_dim]
+        output, _ = self.attention(query, x, x)
+
+        # Remove singleton dimension
+        output = output.squeeze(1)
+
+        return output
+
+
+class HierarchicalTranscriptomicEncoder(nn.Module):
+    """
+    Hierarchical encoder for transcriptomics data using pathway/gene-set organization.
+
+    This encoder organizes genes into biologically meaningful pathways or gene-sets,
+    processes each set with a pathway-specific encoder, and then aggregates the
+    pathway representations using self-attention mechanisms. This can improve
+    interpretability and potentially performance by leveraging known biological structures.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        pathway_groups: Dict[str, List[int]],  # Maps pathway names to gene indices
+        pathway_hidden_dim: int = 64,
+        global_hidden_dim: int = 128,
+        output_dim: int = 256,
+        pathway_encoder_type: str = "attention",
+        global_num_heads: int = 4,
+        dropout: float = 0.3,
+    ):
+        """
+        Initialize the HierarchicalTranscriptomicEncoder.
 
         Args:
             input_dim: Number of input genes
             pathway_groups: Dictionary mapping pathway names to lists of gene indices
-            hidden_dims: List of hidden layer dimensions
+            pathway_hidden_dim: Hidden dimension for pathway-specific encoders
+            global_hidden_dim: Hidden dimension for global integration
             output_dim: Dimension of the output representation
-            normalize: Whether to apply batch normalization
+            pathway_encoder_type: Type of encoder for each pathway ('mlp', 'cnn', 'attention')
+            global_num_heads: Number of attention heads for global integration
             dropout: Dropout rate
-            aggregation: Method to aggregate pathway features ('attention', 'mean', 'concat')
         """
-        super(BiologicallyInformedEncoder, self).__init__()
+        super(HierarchicalTranscriptomicEncoder, self).__init__()
 
         self.input_dim = input_dim
-        self.output_dim = output_dim
         self.pathway_groups = pathway_groups
-        self.aggregation = aggregation.lower()
+        self.output_dim = output_dim
 
-        # Validate aggregation method
-        valid_aggregations = ["attention", "mean", "concat"]
-        if self.aggregation not in valid_aggregations:
-            raise ValueError(
-                f"Invalid aggregation method: {aggregation}. Must be one of {valid_aggregations}"
-            )
-
-        # Create pathway-specific encoders
+        # Create encoders for each pathway
         self.pathway_encoders = nn.ModuleDict()
+
         for pathway_name, gene_indices in pathway_groups.items():
-            # Each pathway gets its own encoder
             pathway_input_dim = len(gene_indices)
-            self.pathway_encoders[pathway_name] = TranscriptomicEncoder(
-                input_dim=pathway_input_dim,
-                hidden_dims=[hidden_dims[0] // 2],  # Smaller network for each pathway
-                output_dim=hidden_dims[0] // 2,
-                normalize=normalize,
-                dropout=dropout,
-            )
 
-        # For attention-based aggregation
-        if self.aggregation == "attention":
-            self.attention = nn.Sequential(
-                nn.Linear(hidden_dims[0] // 2, 1), nn.Softmax(dim=1)
-            )
-            self.merged_dim = hidden_dims[0] // 2
-        elif self.aggregation == "mean":
-            self.merged_dim = hidden_dims[0] // 2
-        elif self.aggregation == "concat":
-            self.merged_dim = (hidden_dims[0] // 2) * len(pathway_groups)
+            if pathway_encoder_type == "mlp":
+                encoder = TranscriptomicEncoder(
+                    input_dim=pathway_input_dim,
+                    hidden_dims=[pathway_hidden_dim],
+                    output_dim=pathway_hidden_dim,
+                    normalize=True,
+                    dropout=dropout,
+                )
+            elif pathway_encoder_type == "cnn":
+                encoder = CNNTranscriptomicEncoder(
+                    input_dim=pathway_input_dim,
+                    hidden_dims=[pathway_hidden_dim, pathway_hidden_dim],
+                    output_dim=pathway_hidden_dim,
+                    normalize=True,
+                    dropout=dropout,
+                )
+            elif pathway_encoder_type == "attention":
+                encoder = AttentionTranscriptomicEncoder(
+                    input_dim=pathway_input_dim,
+                    hidden_dim=pathway_hidden_dim,
+                    output_dim=pathway_hidden_dim,
+                    num_heads=2,
+                    num_layers=1,
+                    dropout=dropout,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported pathway encoder type: {pathway_encoder_type}"
+                )
 
-        # Global encoder for all genes
-        self.global_encoder = TranscriptomicEncoder(
-            input_dim=input_dim,
-            hidden_dims=[hidden_dims[0]],
-            output_dim=hidden_dims[0],
-            normalize=normalize,
+            self.pathway_encoders[pathway_name] = encoder
+
+        # Global integration of pathway representations
+        self.num_pathways = len(pathway_groups)
+
+        # Initial projection to ensure uniform dimension
+        self.pathway_projection = nn.Linear(pathway_hidden_dim, global_hidden_dim)
+
+        # Global integration via self-attention
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=global_hidden_dim,
+            nhead=global_num_heads,
+            dim_feedforward=global_hidden_dim * 4,
             dropout=dropout,
+            batch_first=True,
+        )
+        self.global_integration = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+        # Attention-based pooling
+        self.attention_pooling = MultiHeadAttentionPooling(
+            hidden_dim=global_hidden_dim, num_heads=global_num_heads, dropout=dropout
         )
 
-        # Integration layer
-        self.integration = nn.Sequential(
-            nn.Linear(self.merged_dim + hidden_dims[0], hidden_dims[1]),
-            nn.BatchNorm1d(hidden_dims[1]) if normalize else nn.Identity(),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dims[1], output_dim),
-        )
+        # Final projection
+        self.output_projection = nn.Linear(global_hidden_dim, output_dim)
 
         logger.debug(
-            f"Initialized BiologicallyInformedEncoder with {len(pathway_groups)} pathways, "
-            f"aggregation={aggregation}, output_dim={output_dim}"
+            f"Initialized HierarchicalTranscriptomicEncoder with {self.num_pathways} pathways, "
+            f"pathway_hidden_dim={pathway_hidden_dim}, global_hidden_dim={global_hidden_dim}, "
+            f"output_dim={output_dim}"
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -372,51 +556,34 @@ class BiologicallyInformedEncoder(nn.Module):
             x: Tensor [batch_size, input_dim] with gene expression values
 
         Returns:
-            Tensor [batch_size, output_dim] with biologically informed embedding
+            Tensor [batch_size, output_dim] with gene expression embedding
         """
-        # Process through global encoder
-        global_features = self.global_encoder(x)
+        batch_size = x.shape[0]
 
-        # Process through pathway-specific encoders
-        pathway_features = []
+        # Process each pathway
+        pathway_embeddings = []
+
         for pathway_name, gene_indices in self.pathway_groups.items():
             # Extract genes for this pathway
             pathway_input = x[:, gene_indices]
-            # Process through pathway encoder
-            pathway_output = self.pathway_encoders[pathway_name](pathway_input)
-            pathway_features.append(pathway_output)
 
-        # Stack pathway features
-        if pathway_features:
-            pathway_features = torch.stack(
-                pathway_features, dim=1
-            )  # [batch, n_pathways, feature_dim]
+            # Process with pathway-specific encoder
+            pathway_embedding = self.pathway_encoders[pathway_name](pathway_input)
+            pathway_embeddings.append(pathway_embedding)
 
-            # Aggregate pathway features
-            if self.aggregation == "attention":
-                # Calculate attention weights
-                attn_weights = self.attention(
-                    pathway_features
-                )  # [batch, n_pathways, 1]
-                # Apply attention
-                merged_pathway_features = torch.sum(
-                    pathway_features * attn_weights, dim=1
-                )  # [batch, feature_dim]
-            elif self.aggregation == "mean":
-                merged_pathway_features = torch.mean(pathway_features, dim=1)
-            elif self.aggregation == "concat":
-                merged_pathway_features = pathway_features.view(
-                    pathway_features.size(0), -1
-                )  # [batch, n_pathways * feature_dim]
-        else:
-            # If no pathway features, use zeros
-            batch_size = x.size(0)
-            merged_pathway_features = torch.zeros(
-                batch_size, self.merged_dim, device=x.device
-            )
+        # Stack pathway embeddings [batch_size, num_pathways, pathway_hidden_dim]
+        pathway_embeddings = torch.stack(pathway_embeddings, dim=1)
 
-        # Combine global and pathway features
-        combined = torch.cat([global_features, merged_pathway_features], dim=1)
+        # Project to global hidden dimension
+        pathway_embeddings = self.pathway_projection(pathway_embeddings)
 
-        # Process through integration layer
-        return self.integration(combined)
+        # Global integration with self-attention
+        global_embeddings = self.global_integration(pathway_embeddings)
+
+        # Attention-based pooling
+        pooled_embedding = self.attention_pooling(global_embeddings)
+
+        # Final projection
+        output = self.output_projection(pooled_embedding)
+
+        return output
