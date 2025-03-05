@@ -890,31 +890,45 @@ class CheckpointManager:
             return current < self.best_score
         return current > self.best_score
 
-    def _update_metrics_history(self, epoch: int, metrics: Dict[str, float]) -> None:
-        """Update metrics history."""
+    def _update_metrics_history(self, epoch: int, metrics: Dict[str, Any]) -> None:
+        """Update metrics history with support for nested metrics."""
         if not self.metric_history:
             return
 
         metrics_path = self.dirpath / "metrics" / f"metrics_{epoch:04d}.json"
 
         try:
+            # Prepare metrics data with timestamp
+            metrics_data = {
+                "epoch": epoch,
+                "metrics": metrics,
+                "timestamp": datetime.now().isoformat(),
+            }
+            
+            # Save to disk
             with open(metrics_path, "w") as f:
-                json.dump(
-                    {
-                        "epoch": epoch,
-                        "metrics": metrics,
-                        "timestamp": datetime.now().isoformat(),
-                    },
-                    f,
-                    indent=2,
-                )
+                json.dump(metrics_data, f, indent=2)
 
-            # Update in-memory history
-            for key, value in metrics.items():
-                if key not in self.metrics_history:
-                    self.metrics_history[key] = []
-                self.metrics_history[key].append((epoch, value))
-
+            # Update in-memory history, handling both flat and nested metrics
+            flat_metrics = metrics.get("flattened", {})
+            if not flat_metrics and isinstance(metrics, dict):
+                # If no flattened metrics provided, try to flatten metrics on the fly
+                for key, value in metrics.items():
+                    if isinstance(value, dict):
+                        for subkey, subvalue in value.items():
+                            if isinstance(subvalue, (int, float)):
+                                flat_key = f"{key}_{subkey}"
+                                flat_metrics[flat_key] = subvalue
+                    elif isinstance(value, (int, float)):
+                        flat_metrics[key] = value
+            
+            # Update history
+            for key, value in flat_metrics.items():
+                if isinstance(value, (int, float, np.number)):
+                    if key not in self.metrics_history:
+                        self.metrics_history[key] = []
+                    self.metrics_history[key].append((epoch, float(value)))
+                    
         except Exception as e:
             logger.warning(f"Failed to save metrics history: {e}")
 
@@ -957,7 +971,7 @@ class CheckpointManager:
         self,
         model: Union[torch.nn.Module, Dict],
         epoch: int,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         optimizer: Optional[torch.optim.Optimizer] = None,
         scheduler: Optional[Any] = None,
         additional_data: Optional[Dict[str, Any]] = None,
@@ -968,7 +982,7 @@ class CheckpointManager:
         Args:
             model: PyTorch model or state dict
             epoch: Current epoch
-            metrics: Dictionary of metrics
+            metrics: Dictionary of metrics (can be nested or flat)
             optimizer: Optional optimizer to save state
             scheduler: Optional scheduler to save state
             additional_data: Additional data to save in checkpoint
@@ -976,27 +990,63 @@ class CheckpointManager:
         Returns:
             Path to saved checkpoint
         """
-        # Format filename with metrics
+        # Flatten metrics if nested
+        flat_metrics = {}
+        for key, value in metrics.items():
+            if isinstance(value, dict):
+                # Handle nested metrics (e.g., {'val': {'loss': 0.5}})
+                for subkey, subvalue in value.items():
+                    flat_key = f"{key}_{subkey}"
+                    if isinstance(subvalue, (int, float)):
+                        flat_metrics[flat_key] = subvalue
+            elif isinstance(value, (int, float)):
+                # Handle flat metrics (e.g., {'val_loss': 0.5})
+                flat_metrics[key] = value
+        
+        # Format filename with metrics, trying both flat and original formats
         try:
-            filename = self.filename.format(epoch=epoch, **metrics)
+            filename = self.filename.format(epoch=epoch, **flat_metrics)
         except KeyError:
-            # Fall back to simpler filename if formatting fails
-            filename = f"model_epoch{epoch:04d}.pt"
+            try:
+                # Try original metrics as fallback
+                filename = self.filename.format(epoch=epoch, **metrics)
+            except KeyError:
+                # Fall back to simpler filename if formatting fails
+                logger.warning(
+                    f"Failed to format filename with metrics. Using default format. "
+                    f"Template: {self.filename}, Available metrics: {list(flat_metrics.keys())}"
+                )
+                filename = f"model_epoch{epoch:04d}.pt"
 
         checkpoint_path = self.dirpath / filename
         temp_path = self.dirpath / f"{filename}.tmp"
 
         # Check if monitored metric exists
-        current_score = metrics.get(self.monitor)
+        current_score = None
+        
+        # First try direct access in flat metrics
+        if self.monitor in flat_metrics:
+            current_score = flat_metrics[self.monitor]
+        else:
+            # Try to find in nested structure (e.g., 'val_loss' as val/loss)
+            if '_' in self.monitor:
+                main_key, sub_key = self.monitor.split('_', 1)
+                if main_key in metrics and isinstance(metrics[main_key], dict) and sub_key in metrics[main_key]:
+                    current_score = metrics[main_key][sub_key]
+        
         if current_score is None:
             logger.warning(
                 f"Monitored metric '{self.monitor}' not found in metrics. "
-                f"Available metrics: {list(metrics.keys())}"
+                f"Available flat metrics: {list(flat_metrics.keys())}"
             )
             current_score = float("inf") if self.mode == "min" else float("-inf")
 
-        # Update metrics history
-        self._update_metrics_history(epoch, metrics)
+        # Update metrics history - store both original and flattened metrics
+        metrics_to_save = {
+            "original": metrics,
+            "flattened": flat_metrics
+        }
+        self._update_metrics_history(epoch, metrics_to_save)
 
         # Prepare checkpoint
         model_state_dict = None
@@ -1012,7 +1062,8 @@ class CheckpointManager:
 
         checkpoint = {
             "epoch": epoch,
-            "metrics": metrics,
+            "metrics": metrics,  # Store original metrics
+            "flat_metrics": flat_metrics,  # Also store flattened metrics
             "model_state_dict": model_state_dict,
             "timestamp": datetime.now().isoformat(),
         }

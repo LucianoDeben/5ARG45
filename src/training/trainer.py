@@ -771,24 +771,26 @@ class MultiRunTrainer:
         test_metrics = defaultdict(list)
 
         for result in self.run_results:
-            for k, v in result["val_metrics"].items():
+            for k, v in result.get("val_metrics", {}).items():
                 val_metrics[k].append(v)
-            for k, v in result["test_metrics"].items():
+            for k, v in result.get("test_metrics", {}).items():
                 test_metrics[k].append(v)
 
         val_stats = {}
         for metric, values in val_metrics.items():
-            val_stats[f"{metric}_mean"] = float(np.mean(values))
-            val_stats[f"{metric}_std"] = float(np.std(values))
-            val_stats[f"{metric}_min"] = float(np.min(values))
-            val_stats[f"{metric}_max"] = float(np.max(values))
+            if values:  # Only compute stats if we have values
+                val_stats[f"{metric}_mean"] = float(np.mean(values))
+                val_stats[f"{metric}_std"] = float(np.std(values))
+                val_stats[f"{metric}_min"] = float(np.min(values))
+                val_stats[f"{metric}_max"] = float(np.max(values))
 
         test_stats = {}
         for metric, values in test_metrics.items():
-            test_stats[f"{metric}_mean"] = float(np.mean(values))
-            test_stats[f"{metric}_std"] = float(np.std(values))
-            test_stats[f"{metric}_min"] = float(np.min(values))
-            test_stats[f"{metric}_max"] = float(np.max(values))
+            if values:  # Only compute stats if we have values
+                test_stats[f"{metric}_mean"] = float(np.mean(values))
+                test_stats[f"{metric}_std"] = float(np.std(values))
+                test_stats[f"{metric}_min"] = float(np.min(values))
+                test_stats[f"{metric}_max"] = float(np.max(values))
 
         self.aggregate_results = {
             "val": val_stats,
@@ -806,35 +808,60 @@ class MultiRunTrainer:
         results_dir = os.path.join(self.output_dir, "multi_run_results")
         os.makedirs(results_dir, exist_ok=True)
 
+        # Save aggregate metrics
         metrics_file = os.path.join(results_dir, "aggregate_metrics.json")
         with open(metrics_file, "w") as f:
             json.dump(self.aggregate_results, f, indent=2)
 
+        # Save individual run results
         runs_file = os.path.join(results_dir, "individual_runs.json")
         with open(runs_file, "w") as f:
             json.dump(self.run_results, f, indent=2)
 
-        if self.aggregate_results["val"]:
-            plot_boxplot(
-                {
-                    k.split("_")[0]: v
-                    for k, v in self.aggregate_results["val"].items()
-                    if "_mean" in k
-                },
-                "Validation Metrics Across Runs",
-                "Value",
-                os.path.join(results_dir, "val_metrics_distribution.png"),
-            )
-        if self.aggregate_results["test"]:
-            plot_boxplot(
-                {
-                    k.split("_")[0]: v
-                    for k, v in self.aggregate_results["test"].items()
-                    if "_mean" in k
-                },
-                "Test Metrics Across Runs",
-                "Value",
-                os.path.join(results_dir, "test_metrics_distribution.png"),
-            )
+        # Create validation metrics visualization
+        try:
+            if self.aggregate_results.get("val"):
+                # Prepare data for boxplot - gather values by metric
+                val_metrics_data = {}
+                for run_result in self.run_results:
+                    for metric, value in run_result.get("val_metrics", {}).items():
+                        if metric not in val_metrics_data:
+                            val_metrics_data[metric] = []
+                        val_metrics_data[metric].append(value)
+                
+                # Only plot if we have valid data
+                if val_metrics_data:
+                    plot_boxplot(
+                        val_metrics_data,
+                        "Validation Metrics Across Runs",
+                        "Value",
+                        os.path.join(results_dir, "val_metrics_distribution.png"),
+                    )
+                    logger.info("Generated validation metrics boxplot")
+        except Exception as e:
+            logger.error(f"Error creating validation metrics visualization: {e}")
+
+        # Create test metrics visualization
+        try:
+            if self.aggregate_results.get("test"):
+                # Prepare data for boxplot - gather values by metric
+                test_metrics_data = {}
+                for run_result in self.run_results:
+                    for metric, value in run_result.get("test_metrics", {}).items():
+                        if metric not in test_metrics_data:
+                            test_metrics_data[metric] = []
+                        test_metrics_data[metric].append(value)
+                
+                # Only plot if we have valid data
+                if test_metrics_data:
+                    plot_boxplot(
+                        test_metrics_data,
+                        "Test Metrics Across Runs",
+                        "Value",
+                        os.path.join(results_dir, "test_metrics_distribution.png"),
+                    )
+                    logger.info("Generated test metrics boxplot")
+        except Exception as e:
+            logger.error(f"Error creating test metrics visualization: {e}")
 
         logger.info(f"Saved multi-run results to {results_dir}")

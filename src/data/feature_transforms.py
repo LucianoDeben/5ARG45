@@ -179,54 +179,34 @@ class RobustSmilesDescriptorTransform:
             return np.zeros((1, self.output_dim), dtype=np.float32)
 
 
-# class MorganFingerprintTransform:
-#     fpgen = None
-
-#     def __init__(self, fingerprint_size=1024, fingerprint_radius=2):
-#         self.fingerprint_size = fingerprint_size
-#         self.fingerprint_radius = fingerprint_radius
-#         # Default Morgan fingerprint size is 2048
-#         self.default_size = 2048
-#         # Calculate fold factor (must be a power of 2 reduction)
-#         if (
-#             self.default_size % self.fingerprint_size != 0
-#             or self.fingerprint_size > self.default_size
-#         ):
-#             raise ValueError(
-#                 f"fingerprint_size ({self.fingerprint_size}) must be a divisor of 2048 (e.g., 2048, 1024, 512)"
-#             )
-#         self.fold_factor = self.default_size // self.fingerprint_size
-
-#     def __call__(self, mol_input):
-#         if MorganFingerprintTransform.fpgen is None:
-#             MorganFingerprintTransform.fpgen = AllChem.GetMorganGenerator(
-#                 radius=self.fingerprint_radius
-#             )
-#         smiles_list = mol_input["smiles"]
-#         mols = [Chem.MolFromSmiles(smiles) for smiles in smiles_list]
-#         fps = []
-#         for mol in mols:
-#             if mol is None:
-#                 fp = [0] * self.fingerprint_size
-#             else:
-#                 full_fp = MorganFingerprintTransform.fpgen.GetFingerprint(
-#                     mol
-#                 )  # 2048 bits
-#                 folded_fp = FoldFingerprint(full_fp, foldFactor=self.fold_factor)
-#                 fp_list = list(folded_fp)
-#                 assert len(fp_list) == self.fingerprint_size
-#             fps.append(fp_list)
-#         return np.array(fps)
-
-
 class MorganFingerprintTransform:
-    """Generate Morgan fingerprints from SMILES."""
+    """Generate Morgan/ECFP fingerprints from SMILES using recommended RDKit API."""
 
     def __init__(self, radius: int = 2, size: int = 1024):
+        """
+        Initialize the Morgan fingerprint transform.
+        
+        Args:
+            radius: The radius of the Morgan fingerprint (radius 2 = ECFP4)
+            size: The number of bits in the fingerprint
+        """
         self.radius = radius
         self.size = size
+        # Create the fingerprint generator once at initialization
+        self.fpgen = AllChem.GetMorganGenerator(radius=radius, fpSize=size)
+        logger.info(f"Initialized Morgan fingerprint generator with radius={radius}, size={size}")
 
     def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
+        """
+        Generate Morgan fingerprints for a batch of SMILES strings.
+        
+        Args:
+            mol_input: Either a dictionary with 'smiles' key, or a list of SMILES strings.
+                       If a dictionary with 'dosage' key is provided, dosage is appended to features.
+        
+        Returns:
+            NumPy array of fingerprints with shape (n_valid_smiles, self.size + n_dosage_features)
+        """
         smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
         dosage = (
             np.array(mol_input["dosage"]).reshape(-1, 1)
@@ -250,10 +230,10 @@ class MorganFingerprintTransform:
                     logger.warning(f"Failed to parse SMILES at index {i}: {smiles}")
                     continue
 
-                # Generate fingerprint
-                fp = AllChem.GetMorganFingerprintAsBitVect(
-                    mol, self.radius, nBits=self.size
-                )
+                # Generate fingerprint using the recommended approach
+                fp = self.fpgen.GetFingerprint(mol)
+                
+                # Convert the ExplicitBitVect to numpy array
                 fingerprints[i] = np.array(fp)
                 valid_indices.append(i)
             except Exception as e:
@@ -268,6 +248,57 @@ class MorganFingerprintTransform:
 
         valid_indices = np.array(valid_indices)
         return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
+
+
+# class MorganFingerprintTransform:
+#     """Generate Morgan fingerprints from SMILES."""
+
+#     def __init__(self, radius: int = 2, size: int = 1024):
+#         self.radius = radius
+#         self.size = size
+
+#     def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
+#         smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
+#         dosage = (
+#             np.array(mol_input["dosage"]).reshape(-1, 1)
+#             if isinstance(mol_input, dict) and "dosage" in mol_input
+#             else np.zeros((len(smiles_list), 1))
+#         )
+
+#         fingerprints = np.zeros((len(smiles_list), self.size), dtype=np.float32)
+#         valid_indices = []
+
+#         for i, smiles in enumerate(smiles_list):
+#             # Skip invalid SMILES strings
+#             if not isinstance(smiles, str) or not smiles.strip():
+#                 logger.warning(f"Invalid SMILES at index {i}: {smiles}")
+#                 continue
+
+#             try:
+#                 # Try to parse the SMILES
+#                 mol = Chem.MolFromSmiles(smiles)
+#                 if mol is None:
+#                     logger.warning(f"Failed to parse SMILES at index {i}: {smiles}")
+#                     continue
+
+#                 # Generate fingerprint
+#                 fp = AllChem.GetMorganFingerprintAsBitVect(
+#                     mol, self.radius, nBits=self.size
+#                 )
+#                 fingerprints[i] = np.array(fp)
+#                 valid_indices.append(i)
+#             except Exception as e:
+#                 logger.warning(
+#                     f"Error processing SMILES at index {i} ({smiles}): {str(e)}"
+#                 )
+#                 continue
+
+#         if not valid_indices:
+#             logger.error("No valid SMILES found in batch, returning empty arrays")
+#             return np.zeros((0, self.size + 1), dtype=np.float32)
+
+#         valid_indices = np.array(valid_indices)
+#         return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
 
 
 class MolecularGraphTransform:

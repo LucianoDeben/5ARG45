@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import psutil
 import torch
-from scipy.stats import pearsonr  # Added import for Pearson correlation
+from scipy.stats import pearsonr
 from torch.utils.tensorboard import SummaryWriter
 
 import wandb
@@ -251,29 +251,35 @@ class ExperimentLogger:
             if self.use_wandb:
                 wandb.log({f"system/{k}": v for k, v in system_stats.items()})
 
+        # Safely calculate Pearson correlation if possible
         if isinstance(value, (int, float, np.number)):
             try:
-                if len(self.metrics[phase][name]) > 1:
+                if len(self.metrics[phase][name]) > 2:  # Need at least 3 points for correlation
                     steps, values = zip(*self.metrics[phase][name])
-                    pearson_corr, p_value = pearsonr(steps, values)
-                    self.logger.info(
-                        f"{phase.capitalize()} Pearson Correlation for {name}: "
-                        f"r = {pearson_corr:.4f}, p = {p_value:.4f}"
-                    )
-                    if self.use_tensorboard:
-                        self.writer.add_scalar(
-                            f"{phase}/{name}/pearson_correlation", pearson_corr, step
+                    steps_array = np.array(steps)
+                    values_array = np.array(values)
+                    
+                    # Check dimensions match before calculating correlation
+                    if len(steps_array) == len(values_array) and len(steps_array) > 2:
+                        pearson_corr, p_value = pearsonr(steps_array, values_array)
+                        self.logger.info(
+                            f"{phase.capitalize()} Pearson Correlation for {name}: "
+                            f"r = {pearson_corr:.4f}, p = {p_value:.4f}"
                         )
-                    if self.use_wandb:
-                        wandb.log(
-                            {
-                                f"{phase}/{name}/pearson_correlation": pearson_corr,
-                                f"{phase}/{name}/pearson_pvalue": p_value,
-                            }
-                        )
+                        if self.use_tensorboard:
+                            self.writer.add_scalar(
+                                f"{phase}/{name}/pearson_correlation", pearson_corr, step
+                            )
+                        if self.use_wandb:
+                            wandb.log(
+                                {
+                                    f"{phase}/{name}/pearson_correlation": pearson_corr,
+                                    f"{phase}/{name}/pearson_pvalue": p_value,
+                                }
+                            )
             except Exception as corr_error:
                 self.logger.warning(
-                    f"Error calculating Pearson correlation: {corr_error}"
+                    f"Error calculating Pearson correlation for {phase}/{name}: {corr_error}"
                 )
 
     def log_metrics(
@@ -389,24 +395,38 @@ class ExperimentLogger:
             for phase in self.metrics:
                 for metric_name in self.metrics[phase]:
                     phase_metrics = self.metrics[phase][metric_name]
-                    if not phase_metrics:
+                    if not phase_metrics or len(phase_metrics) < 2:
+                        self.logger.warning(f"Not enough data points to plot {phase}/{metric_name}")
                         continue
-                    steps, values = zip(*phase_metrics)
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.plot(steps, values, marker="o", linestyle="-", label=phase)
-                    ax.set_title(f"{metric_name} vs Steps ({phase})")
-                    ax.set_xlabel("Steps")
-                    ax.set_ylabel(metric_name)
-                    ax.grid(True)
-                    if save:
-                        figures_dir = self.experiment_dir / "figures"
-                        figures_dir.mkdir(exist_ok=True)
-                        filename = f"{phase}_{metric_name}_history_{max(steps)}.png"
-                        figure_path = figures_dir / filename
-                        fig.savefig(figure_path, dpi=300, bbox_inches="tight")
-                        self.logger.info(f"Saved metric plot to {figure_path}")
-                    plots[f"{phase}_{metric_name}"] = fig
-                    plt.close(fig)
+                        
+                    try:
+                        steps, values = zip(*phase_metrics)
+                        
+                        # Ensure arrays match in dimension
+                        if len(steps) != len(values):
+                            self.logger.warning(
+                                f"Dimension mismatch in {phase}/{metric_name}: "
+                                f"steps={len(steps)}, values={len(values)}"
+                            )
+                            continue
+                            
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        ax.plot(steps, values, marker="o", linestyle="-", label=phase)
+                        ax.set_title(f"{metric_name} vs Steps ({phase})")
+                        ax.set_xlabel("Steps")
+                        ax.set_ylabel(metric_name)
+                        ax.grid(True)
+                        if save:
+                            figures_dir = self.experiment_dir / "figures"
+                            figures_dir.mkdir(exist_ok=True)
+                            filename = f"{phase}_{metric_name}_history_{max(steps)}.png"
+                            figure_path = figures_dir / filename
+                            fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+                            self.logger.info(f"Saved metric plot to {figure_path}")
+                        plots[f"{phase}_{metric_name}"] = fig
+                        plt.close(fig)
+                    except Exception as e:
+                        self.logger.warning(f"Error plotting {phase}/{metric_name}: {e}")
         except Exception as e:
             self.logger.error(f"Error in plot_metrics: {e}")
         return plots
@@ -414,45 +434,81 @@ class ExperimentLogger:
     def plot_comparison(
         self, metric_name: str, save: bool = True
     ) -> Optional[plt.Figure]:
+        """
+        Plot comparison of a metric across different phases.
+        
+        Args:
+            metric_name: Name of the metric to compare
+            save: Whether to save the figure
+            
+        Returns:
+            The matplotlib figure or None if an error occurred
+        """
+        fig = None
         try:
             phases_with_metric = [
                 phase
                 for phase in self.metrics
                 if metric_name in self.metrics[phase]
                 and self.metrics[phase][metric_name]
+                and len(self.metrics[phase][metric_name]) >= 2  # Need at least 2 points
             ]
+            
             if not phases_with_metric:
                 self.logger.warning(
                     f"No data found for metric '{metric_name}' in any phase"
                 )
                 return None
 
-            fig, ax = plt.subplots(figsize=(12, 6))
+            fig = plt.figure(figsize=(12, 6))
             max_global_step = 0
+            
             for phase in phases_with_metric:
-                steps, values = zip(*self.metrics[phase][metric_name])
-                max_global_step = max(max_global_step, max(steps))
-                ax.plot(
-                    steps, values, marker="o", linestyle="-", label=phase.capitalize()
-                )
-            ax.set_title(f"{metric_name} Comparison")
-            ax.set_xlabel("Steps")
-            ax.set_ylabel(metric_name)
-            ax.grid(True)
-            ax.legend()
+                try:
+                    steps, values = zip(*self.metrics[phase][metric_name])
+                    
+                    # Ensure arrays match in dimension
+                    if len(steps) != len(values):
+                        self.logger.warning(
+                            f"Dimension mismatch in {phase}/{metric_name}: "
+                            f"steps={len(steps)}, values={len(values)}"
+                        )
+                        continue
+                        
+                    max_global_step = max(max_global_step, max(steps))
+                    plt.plot(
+                        steps, values, marker="o", linestyle="-", label=phase.capitalize()
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Error plotting phase {phase} for {metric_name}: {e}")
+                    continue
+                    
+            if not plt.gca().lines:  # No data was successfully plotted
+                self.logger.warning(f"No valid data to plot for comparison of {metric_name}")
+                plt.close(fig)
+                return None
+                    
+            plt.title(f"{metric_name} Comparison")
+            plt.xlabel("Steps")
+            plt.ylabel(metric_name)
+            plt.grid(True)
+            plt.legend()
 
             if save:
                 figures_dir = self.experiment_dir / "figures"
                 figures_dir.mkdir(exist_ok=True)
                 filename = f"{metric_name}_comparison_{max_global_step}.png"
                 figure_path = figures_dir / filename
-                fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+                plt.savefig(figure_path, dpi=300)
                 self.logger.info(f"Saved comparison plot to {figure_path}")
-            plt.close(fig)
+            
             return fig
         except Exception as e:
-            self.logger.error(f"Error in plot_comparison: {e}")
+            self.logger.error(f"Error in plot_comparison for {metric_name}: {e}")
             return None
+        finally:
+            if fig is not None:
+                plt.close(fig)
 
     def clone_with_run_name(self, run_name: str) -> "ExperimentLogger":
         return ExperimentLogger(
@@ -470,14 +526,39 @@ class ExperimentLogger:
         )
 
     def close(self) -> None:
-        self.plot_metrics()
-        all_metric_names = set()
-        for phase in self.metrics:
-            all_metric_names.update(self.metrics[phase].keys())
-        for metric_name in all_metric_names:
-            self.plot_comparison(metric_name)
-        if hasattr(self, "writer"):
-            self.writer.close()
-        if self.use_wandb:
-            wandb.finish()
+        """
+        Close the experiment logger, saving final plots and cleaning up resources.
+        """
+        try:
+            # Generate all metric plots
+            self.plot_metrics()
+            
+            # Get all metric names safely
+            all_metric_names = set()
+            for phase in self.metrics:
+                all_metric_names.update(self.metrics[phase].keys())
+                
+            # Plot each metric comparison with error handling
+            for metric_name in all_metric_names:
+                try:
+                    self.plot_comparison(metric_name)
+                except Exception as e:
+                    self.logger.error(f"Error plotting comparison for {metric_name}: {e}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error during final plotting: {e}")
+            
+        # Always clean up resources
+        try:
+            if hasattr(self, "writer"):
+                self.writer.close()
+        except Exception as e:
+            self.logger.error(f"Error closing TensorBoard writer: {e}")
+            
+        try:
+            if self.use_wandb:
+                wandb.finish()
+        except Exception as e:
+            self.logger.error(f"Error finishing wandb: {e}")
+            
         self.logger.info(f"Experiment '{self.experiment_name}' completed")
