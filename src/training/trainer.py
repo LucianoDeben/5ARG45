@@ -365,8 +365,8 @@ class Trainer:
             self.optimizer.step()
 
             train_loss += loss.item() * targets.size(0)
-            all_targets.append(targets.detach().cpu().numpy())  # Detach targets
-            all_outputs.append(outputs.detach().cpu().numpy())  # Detach outputs
+            all_targets.append(targets.detach().cpu().numpy())
+            all_outputs.append(outputs.detach().cpu().numpy())
 
             # Optional: Log batch-level loss separately if desired
             # if self.exp_logger and batch_idx % 10 == 0:  # Log every 10 batches
@@ -828,7 +828,7 @@ class MultiRunTrainer:
                         if metric not in val_metrics_data:
                             val_metrics_data[metric] = []
                         val_metrics_data[metric].append(value)
-                
+
                 # Only plot if we have valid data
                 if val_metrics_data:
                     plot_boxplot(
@@ -851,7 +851,7 @@ class MultiRunTrainer:
                         if metric not in test_metrics_data:
                             test_metrics_data[metric] = []
                         test_metrics_data[metric].append(value)
-                
+
                 # Only plot if we have valid data
                 if test_metrics_data:
                     plot_boxplot(

@@ -6,10 +6,10 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 
-from src.models.chemical.smiles_processing import MolecularEncoder, SMILESEncoder
+from src.models.molecular.smiles_processing import MolecularEncoder, SMILESEncoder
 
-from ..models.chemical.descriptors import MolecularDescriptorEncoder
 from ..models.integration.fusion import FeatureFusion
+from ..models.molecular.descriptors import MolecularDescriptorEncoder
 from ..models.prediction.viability_prediction import ViabilityPredictor
 from ..models.transcriptomics.encoders import TranscriptomicEncoder
 
@@ -66,7 +66,7 @@ class MultimodalDrugResponseModel(nn.Module):
             normalize=True,
         )
 
-        # Chemical encoder (handles molecular descriptors with dosage)
+        # molecular encoder (handles molecular descriptors with dosage)
         self.chemical_encoder = MolecularDescriptorEncoder(
             input_dim=chemical_input_dim,
             hidden_dims=chemical_hidden_dims,

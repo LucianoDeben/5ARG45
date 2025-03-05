@@ -11,6 +11,7 @@ from src.data.preprocessing import LINCSCTRPDataProcessor
 
 logger = logging.getLogger(__name__)
 
+
 def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Prepare training, validation, and test data loaders based on the provided configuration.
@@ -22,6 +23,9 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         Tuple[DataLoader, DataLoader, DataLoader]: Train, validation, and test data loaders.
     """
     try:
+        # Step 1: Load data using GCTXDataLoader
+        gctx_loader = GCTXDataLoader(config["data"]["gctx_file"])
+
         # Step 2: Preprocess data using LINCSCTRPDataProcessor
         processor = LINCSCTRPDataProcessor(
             gctx_file=config["data"]["gctx_file"],
@@ -35,21 +39,22 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
         # Step 3: Create feature transform for molecular data
         transform_molecular = create_feature_transform(
-            config["data"]["transform_type"],
-            fingerprint_size=config["data"].get("fingerprint_size", 1024),
-            fingerprint_radius=config["data"].get("fingerprint_radius", 2),
+            config["molecular"].get("transform_molecular", "fingerprint"),
+            fingerprint_size=config["molecular"].get("fingerprint_size", 1024),
+            fingerprint_radius=config["molecular"].get("fingerprint_radius", 2),
         )
 
         # Step 4: Create and split datasets using DatasetFactory
         train_ds, val_ds, test_ds = DatasetFactory.create_and_split_multimodal(
-            transcriptomics=transcriptomics,
-            metadata=metadata,
-            transform_molecular=transform_molecular,
+            gctx_loader=gctx_loader,
+            feature_space=config["data"]["feature_space"],
             test_size=config["training"]["test_size"],
             val_size=config["training"]["val_size"],
             random_state=config["data"]["random_seed"],
             group_by=config["training"]["group_by"],
             stratify_by=config["training"]["stratify_by"],
+            transform_transcriptomics=None,
+            transform_molecular=transform_molecular,
         )
 
         # Step 5: Create PyTorch DataLoaders

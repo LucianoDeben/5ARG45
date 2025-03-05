@@ -5,10 +5,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..config.constants import (
     Activation,
-    ChemicalRepresentation,
     FeatureSpace,
     FusionStrategy,
+    ImputationStrategy,
     LossFunction,
+    MolecularRepresentation,
     Normalization,
     Optimizer,
 )
@@ -21,8 +22,13 @@ class PathsConfig(BaseModel):
     results_dir: str = Field(
         "results", description="Directory for results and analysis"
     )
+    checkpoint_dir: str = Field(
+        "models/saved/checkpoints", description="Directory for model checkpoints"
+    )
 
-    @field_validator("data_dir", "model_dir", "log_dir", "results_dir")
+    @field_validator(
+        "data_dir", "model_dir", "log_dir", "results_dir", "checkpoint_dir"
+    )
     def validate_path(cls, v):
         if not isinstance(v, str):
             raise ValueError(f"Path must be a string, got {type(v)}")
@@ -39,6 +45,13 @@ class DataConfig(BaseModel):
     per_compound: str = Field(..., description="Path to per compound file")
     per_cell_line: str = Field(..., description="Path to per cell line file")
     output_path: Optional[str] = Field(None, description="Path for output dataset")
+    matching_strategy: str = Field(
+        "parallel", description="Strategy for matching LINCS and CTRP data"
+    )
+    max_workers: Optional[int] = Field(
+        None, description="Max workers for multiprocessing; null uses cpu_count * 2"
+    )
+    chunk_size: int = Field(10000, description="Chunk size for data processing")
     feature_space: Union[FeatureSpace, List[FeatureSpace]] = Field(
         FeatureSpace.LANDMARK, description="Gene feature space"
     )
@@ -50,64 +63,26 @@ class DataConfig(BaseModel):
     cache_data: bool = Field(True, description="Whether to cache preprocessed data")
     use_multiprocessing: bool = Field(True, description="Use multiprocessing")
     num_workers: int = Field(4, description="Number of worker processes")
-    matching_strategy: Optional[str] = Field(
-        "parallel", description="Strategy for matching LINCS and CTRP data"
+    batch_size: int = Field(32, description="Batch size for data loading")
+    imputation_strategy: ImputationStrategy = Field(
+        ImputationStrategy.MEAN, description="Strategy for imputing missing values"
     )
-    max_workers: Optional[int] = Field(
-        None, description="Max workers for multiprocessing; null uses cpu_count * 2"
-    )
-    chunk_size: Optional[int] = Field(
-        10000, description="Chunk size for data processing"
-    )
+    handle_outliers: bool = Field(False, description="Whether to handle outliers")
+    outlier_threshold: float = Field(3.0, description="Threshold for outlier detection")
 
 
 class LRSchedulerConfig(BaseModel):
     type: str = Field("cosine", description="Learning rate scheduler type")
     warmup_epochs: int = Field(5, description="Number of warmup epochs")
     min_lr: float = Field(1e-6, description="Minimum learning rate")
-
-
-class ModelConfig(BaseModel):
-    transcriptomics_input_dim: int = Field(
-        ..., gt=0, description="Input dimension for transcriptomics data"
-    )
-    transcriptomics_hidden_dims: List[int] = Field(
-        ..., min_items=1, description="Hidden layer dimensions"
-    )
-    transcriptomics_output_dim: int = Field(
-        ..., gt=0, description="Output dimension for transcriptomics encoder"
-    )
-    chemical_input_dim: int = Field(
-        ..., gt=0, description="Input dimension for chemical data"
-    )
-    chemical_hidden_dims: List[int] = Field(
-        ..., min_items=1, description="Hidden layer dimensions"
-    )
-    chemical_output_dim: int = Field(
-        ..., gt=0, description="Output dimension for chemical encoder"
-    )
-    fusion_output_dim: int = Field(
-        ..., gt=0, description="Output dimension after fusion"
-    )
-    fusion_strategy: FusionStrategy = Field(
-        FusionStrategy.CONCAT, description="Feature fusion strategy"
-    )
-    predictor_hidden_dims: List[int] = Field(
-        ..., min_items=1, description="Hidden layer dimensions for predictor"
-    )
-    normalize: bool = Field(True, description="Whether to normalize inputs")
-    dropout: float = Field(0.3, ge=0.0, le=1.0, description="Dropout probability")
-    activation: Activation = Field(Activation.RELU, description="Activation function")
-    use_batch_norm: bool = Field(True, description="Whether to use batch normalization")
-    layer_norm: bool = Field(True, description="Whether to use layer normalization")
-    residual_connections: bool = Field(
-        True, description="Whether to use residual connections"
-    )
+    step_size: int = Field(10, description="Step size for StepLR scheduler")
+    gamma: float = Field(0.1, description="Gamma factor for StepLR scheduler")
 
 
 class TrainingConfig(BaseModel):
     batch_size: int = Field(32, gt=0, description="Training batch size")
     epochs: int = Field(100, gt=0, description="Number of training epochs")
+    num_runs: int = Field(5, gt=0, description="Number of training runs")
     learning_rate: float = Field(0.001, gt=0.0, description="Initial learning rate")
     optimizer: Optimizer = Field(Optimizer.ADAM, description="Optimizer name")
     loss: LossFunction = Field(LossFunction.MSE, description="Loss function name")
@@ -123,8 +98,7 @@ class TrainingConfig(BaseModel):
         None, description="Column for stratified splitting"
     )
     lr_scheduler: LRSchedulerConfig = Field(
-        default_factory=lambda: LRSchedulerConfig(),
-        description="Learning rate scheduler",
+        default_factory=LRSchedulerConfig, description="Learning rate scheduler"
     )
     early_stopping: bool = Field(True, description="Whether to use early stopping")
     patience: int = Field(10, description="Epochs to wait for improvement")
@@ -142,9 +116,9 @@ class TrainingConfig(BaseModel):
         return self
 
 
-class ChemicalConfig(BaseModel):
-    representation: ChemicalRepresentation = Field(
-        ChemicalRepresentation.FINGERPRINT, description="Molecular representation type"
+class MolecularConfig(BaseModel):
+    representation: MolecularRepresentation = Field(
+        MolecularRepresentation.FINGERPRINT, description="Molecular representation type"
     )
     fingerprint_size: int = Field(
         2048, gt=0, description="Size of molecular fingerprints"
@@ -156,30 +130,61 @@ class ChemicalConfig(BaseModel):
         True, description="Whether to use stereochemical information"
     )
     use_features: bool = Field(
-        True, description="Whether to use additional chemical features"
+        True, description="Whether to use additional molecular features"
     )
     sanitize: bool = Field(True, description="Whether to sanitize molecules")
 
 
-class ExperimentConfig(BaseModel):
-    project_name: str = Field(
-        "multimodal_drug_response", description="Project name for experiment tracking"
+class ModelConfig(BaseModel):
+    transcriptomics_input_dim: int = Field(
+        ..., gt=0, description="Input dimension for transcriptomics data"
     )
-    run_name: Optional[str] = Field(
-        None, description="Run name for experiment tracking"
+    transcriptomics_hidden_dims: List[int] = Field(
+        ...,
+        min_items=1,
+        description="Hidden layer dimensions for transcriptomics encoder",
     )
-    track: bool = Field(True, description="Whether to track experiments")
-    tags: Optional[List[str]] = Field(None, description="Tags for experiment tracking")
-    version: str = Field("1.0.0", description="Configuration schema version")
-    save_checkpoints: bool = Field(
-        True, description="Whether to save model checkpoints"
+    transcriptomics_output_dim: int = Field(
+        ..., gt=0, description="Output dimension for transcriptomics encoder"
     )
-    checkpoint_freq: int = Field(
-        5, description="Frequency (in epochs) for saving checkpoints"
+    molecular_input_dim: int = Field(
+        ..., gt=0, description="Input dimension for molecular data"
+    )  # Renamed from chemical_input_dim
+    molecular_hidden_dims: List[int] = Field(
+        ..., min_items=1, description="Hidden layer dimensions for molecular encoder"
+    )  # Renamed
+    molecular_output_dim: int = Field(
+        ..., gt=0, description="Output dimension for molecular encoder"
+    )  # Renamed
+    fusion_output_dim: int = Field(
+        ..., gt=0, description="Output dimension after fusion"
     )
-    keep_n_checkpoints: int = Field(
-        3, description="Number of latest checkpoints to keep"
+    predictor_hidden_dims: List[int] = Field(
+        ..., min_items=1, description="Hidden layer dimensions for predictor"
     )
+    fusion_strategy: FusionStrategy = Field(
+        FusionStrategy.CONCAT, description="Feature fusion strategy"
+    )
+    activation: Activation = Field(Activation.RELU, description="Activation function")
+    dropout: float = Field(0.3, ge=0.0, le=1.0, description="Dropout probability")
+    normalize: bool = Field(True, description="Whether to normalize inputs")
+    use_batch_norm: bool = Field(True, description="Whether to use batch normalization")
+    layer_norm: bool = Field(True, description="Whether to use layer normalization")
+    residual_connections: bool = Field(
+        True, description="Whether to use residual connections"
+    )
+
+    @model_validator(mode="after")
+    def validate_fusion_output_dim(self):
+        if self.fusion_strategy == FusionStrategy.CONCAT:
+            expected_dim = self.transcriptomics_output_dim + self.molecular_output_dim
+            if self.fusion_output_dim != expected_dim:
+                raise ValueError(
+                    f"For concat fusion, fusion_output_dim should be equal to "
+                    f"transcriptomics_output_dim + molecular_output_dim "
+                    f"({self.transcriptomics_output_dim} + {self.molecular_output_dim} = {expected_dim})"
+                )
+        return self
 
 
 class EvaluationConfig(BaseModel):
@@ -212,35 +217,61 @@ class DeploymentConfig(BaseModel):
     )
 
 
+class ExperimentConfig(BaseModel):
+    project_name: str = Field(
+        "multimodal_drug_response", description="Project name for experiment tracking"
+    )
+    run_name: Optional[str] = Field(
+        None, description="Run name for experiment tracking"
+    )
+    track: bool = Field(True, description="Whether to track experiments")
+    tags: List[str] = Field(
+        ["multimodal", "drug-response"], description="Tags for experiment tracking"
+    )
+    version: str = Field("1.0.0", description="Configuration schema version")
+    save_checkpoints: bool = Field(
+        True, description="Whether to save model checkpoints"
+    )
+    checkpoint_freq: int = Field(
+        5, description="Frequency (in epochs) for saving checkpoints"
+    )
+    keep_n_checkpoints: int = Field(
+        3, description="Number of latest checkpoints to keep"
+    )
+    log_level: str = Field("WARNING", description="Logging level")
+
+
+class InterpretationConfig(BaseModel):
+    enabled: bool = Field(True, description="Whether to enable model interpretation")
+    attribution_methods: List[str] = Field(
+        ["integrated_gradients", "feature_ablation", "deep_lift"],
+        description="Attribution methods",
+    )
+    n_samples: int = Field(5, description="Number of samples for interpretation")
+    top_k: int = Field(20, description="Number of top features to highlight")
+    visualize_features: bool = Field(True, description="Whether to visualize features")
+    feature_naming: Dict[str, Optional[str]] = Field(
+        {"transcriptomics": "data/raw/LINCS/geneinfo_beta.txt", "molecular": None},
+        description="Paths to feature name mappings",
+    )
+    save_attributions: bool = Field(
+        True, description="Whether to save raw attribution values"
+    )
+    generate_figures: bool = Field(True, description="Whether to generate figures")
+
+
 class CompleteConfig(BaseModel):
+    paths: PathsConfig = Field(
+        default_factory=PathsConfig, description="Path configuration"
+    )
     data: DataConfig
-    model: ModelConfig
     training: TrainingConfig
-    chemical: ChemicalConfig
+    molecular: MolecularConfig
+    model: ModelConfig
     experiment: ExperimentConfig
-    paths: Optional[PathsConfig] = Field(
-        default_factory=lambda: PathsConfig(), description="Path configuration"
+    evaluation: Optional[EvaluationConfig] = Field(default_factory=EvaluationConfig)
+    inference: Optional[InferenceConfig] = Field(default_factory=InferenceConfig)
+    deployment: Optional[DeploymentConfig] = Field(default_factory=DeploymentConfig)
+    interpretation: Optional[InterpretationConfig] = Field(
+        default_factory=InterpretationConfig
     )
-    evaluation: Optional[EvaluationConfig] = Field(
-        default_factory=lambda: EvaluationConfig()
-    )
-    inference: Optional[InferenceConfig] = Field(
-        default_factory=lambda: InferenceConfig()
-    )
-    deployment: Optional[DeploymentConfig] = Field(
-        default_factory=lambda: DeploymentConfig()
-    )
-
-
-@model_validator(mode="after")
-def validate_model_dimensions(self):
-    """Validate that model dimensions are compatible."""
-    if self.fusion_strategy == FusionStrategy.CONCAT:
-        expected_dim = self.transcriptomics_output_dim + self.chemical_output_dim
-        if self.fusion_output_dim != expected_dim:
-            raise ValueError(
-                f"For concat fusion, fusion_output_dim should be equal to "
-                f"transcriptomics_output_dim + chemical_output_dim "
-                f"({self.transcriptomics_output_dim} + {self.chemical_output_dim} = {expected_dim})"
-            )
-    return self

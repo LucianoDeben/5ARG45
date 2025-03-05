@@ -18,9 +18,17 @@ from .schema import CompleteConfig
 logger = logging.getLogger(__name__)
 
 
-def setup_logging():
-    """Configure logging with default settings."""
-    logging.basicConfig(**LOGGING_CONFIG)
+def setup_logging(log_level: str = "INFO"):
+    """Configure logging with customizable log level."""
+    # Update LOGGING_CONFIG with the provided log_level
+    logging_config = LOGGING_CONFIG.copy()
+    logging_config["level"] = (
+        log_level.upper()
+    )  # Ensure uppercase (e.g., "INFO", "WARNING")
+
+    # Configure logging
+    logging.basicConfig(**logging_config)
+    logging.info(f"Logging configured with level: {log_level}")
 
 
 def resolve_path_variables(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -151,10 +159,10 @@ def merge_configs(
 def generate_run_name(config: Dict[str, Any]) -> str:
     """Generate a unique run name for the experiment."""
     model_type = config["model"]["fusion_strategy"]
-    chemical_rep = config["chemical"]["representation"]
+    molecular_rep = config["molecular"]["representation"]
     feature_space = config["data"]["feature_space"]
     unique_id = str(uuid.uuid4())[:8]
-    return f"{model_type}-{chemical_rep}-{feature_space}-{unique_id}"
+    return f"{model_type}-{molecular_rep}-{feature_space}-{unique_id}"
 
 
 def init_wandb(

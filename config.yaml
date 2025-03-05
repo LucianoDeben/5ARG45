@@ -25,12 +25,16 @@ data:
   random_seed: 42
   cache_data: true
   use_multiprocessing: true
-  num_workers: 4
+  num_workers: 0
   batch_size: 32
+  imputation_strategy: "mean"
+  handle_outliers: false
+  outlier_threshold: 3.0
 
 training:
   batch_size: 32
   epochs: 100
+  num_runs: 5
   learning_rate: 0.001
   optimizer: "adam" # Adjusted to match trainer.py (add "adamw" support if needed)
   loss: "mse"
@@ -52,7 +56,7 @@ training:
   weight_decay: 0.01
   label_smoothing: 0.1
 
-chemical:
+molecular:
   representation: "fingerprint"
   fingerprint_size: 1024
   radius: 2
@@ -64,13 +68,13 @@ model:
   transcriptomics_input_dim: 978
   transcriptomics_hidden_dims: [512, 256]
   transcriptomics_output_dim: 128
-  chemical_input_dim: 1025
-  chemical_hidden_dims: [256, 128]
-  chemical_output_dim: 128
+  molecular_input_dim: 1025 # Changed from chemical_input_dim
+  molecular_hidden_dims: [256, 128] # Changed from chemical_hidden_dims
+  molecular_output_dim: 128 # Changed from chemical_output_dim
   fusion_output_dim: 256
   predictor_hidden_dims: [128, 64]
   transcriptomics_encoder_type: "mlp"
-  chemical_encoder_type: "descriptors"
+  molecular_encoder_type: "descriptors" # Changed from chemical_encoder_type
   fusion_type: "simple"
   fusion_strategy: "concat"
   activation: "relu"
@@ -109,15 +113,15 @@ experiment:
 
 interpretation:
   enabled: true
-  attribution_methods: 
+  attribution_methods:
     - "integrated_gradients"
     - "feature_ablation"
     - "deep_lift"
-  n_samples: 5  # Number of samples to use for interpretation
-  top_k: 20     # Number of top features to highlight
+  n_samples: 5 # Number of samples to use for interpretation
+  top_k: 20 # Number of top features to highlight
   visualize_features: true
   feature_naming:
-    transcriptomics: "data/raw/LINCS/geneinfo_beta.txt"  # Path to gene name mapping
-    molecular: null  # No naming for molecular features
-  save_attributions: true  # Whether to save raw attribution values
+    transcriptomics: "data/raw/LINCS/geneinfo_beta.txt" # Path to gene name mapping
+    molecular: null # No naming for molecular features
+  save_attributions: true # Whether to save raw attribution values
   generate_figures: true

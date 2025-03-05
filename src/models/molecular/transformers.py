@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from deepchem.feat.smiles_tokenizer import SmilesTokenizer
 from transformers import AutoModel, AutoTokenizer
 
-from src.models.chemical.smiles_processing import PositionalEncoding
+from src.models.molecular.smiles_processing import PositionalEncoding
 
 logger = logging.getLogger(__name__)
 

@@ -1,9 +1,12 @@
 # src/models/model_configuration.py
 import logging
 
-from src.models.multimodal_models import MultimodalViabilityPredictor  # Adjust based on your model class
+from src.models.multimodal_models import (
+    MultimodalViabilityPredictor,
+)  # Adjust based on your model class
 
 logger = logging.getLogger(__name__)
+
 
 def configure_model(dataset, config: dict):
     """
@@ -26,8 +29,16 @@ def configure_model(dataset, config: dict):
         model_params = {
             "transcriptomics_input_dim": transcriptomics_dim,
             "molecular_input_dim": molecular_dim,
-            "hidden_dims": config["model"]["hidden_dims"],
+            "transcriptomics_hidden_dims": config["model"][
+                "transcriptomics_hidden_dims"
+            ],
+            "molecular_hidden_dims": config["model"]["molecular_hidden_dims"],
+            "transcriptomics_output_dim": config["model"]["transcriptomics_output_dim"],
+            "molecular_output_dim": config["model"]["molecular_output_dim"],
+            "fusion_strategy": config["model"]["fusion_strategy"],
+            "predictor_hidden_dims": config["model"]["predictor_hidden_dims"],
             "dropout": config["model"]["dropout"],
+            "activation": config["model"]["activation"],
         }
 
         # Step 3: Instantiate the model
