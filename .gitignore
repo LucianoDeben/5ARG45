@@ -188,3 +188,6 @@ models/
 /logs
 /$logs
 /results
+
+# Ignore the .github folder
+.github/

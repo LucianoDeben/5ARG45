@@ -58,6 +58,7 @@ class Normalization(str, Enum):
     ZSCORE = "zscore"
     MINMAX = "minmax"
     ROBUST = "robust"
+    NONE = "none"
 
 
 class Optimizer(str, Enum):

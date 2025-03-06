@@ -18,33 +18,34 @@ data:
   output_path: "data/processed/LINCS_CTRP_matched.gctx"
   matching_strategy: "parallel"
   max_workers: null
-  chunk_size: 10000
+  chunk_size: 1000
   feature_space: "landmark"
   nrows: 1000
-  normalize: "zscore"
+  normalize: "none"
   random_seed: 42
   cache_data: true
   use_multiprocessing: true
   num_workers: 0
-  batch_size: 32
   imputation_strategy: "mean"
   handle_outliers: false
   outlier_threshold: 3.0
 
 training:
-  batch_size: 32
-  epochs: 100
+  batch_size: 128
+  epochs: 10
   num_runs: 5
   learning_rate: 0.001
-  optimizer: "adam" # Adjusted to match trainer.py (add "adamw" support if needed)
+  optimizer: "adam" 
   loss: "mse"
-  test_size: 0.2
+  test_size: 0.4
   val_size: 0.1
   random_state: 42
-  group_by: null
-  stratify_by: null
+  group_by: "cell_mfc_name"
+  stratify_by: "viability"
   lr_scheduler:
-    type: "step" # Adjusted to match trainer.py (add "cosine" support if needed)
+    type: "step" 
+    warmup_epochs: 5
+    min_lr: 1e-6
     step_size: 10
     gamma: 0.1
   early_stopping: true
@@ -68,13 +69,13 @@ model:
   transcriptomics_input_dim: 978
   transcriptomics_hidden_dims: [512, 256]
   transcriptomics_output_dim: 128
-  molecular_input_dim: 1025 # Changed from chemical_input_dim
-  molecular_hidden_dims: [256, 128] # Changed from chemical_hidden_dims
-  molecular_output_dim: 128 # Changed from chemical_output_dim
+  molecular_input_dim: 1025 
+  molecular_hidden_dims: [256, 128] 
+  molecular_output_dim: 128 
   fusion_output_dim: 256
   predictor_hidden_dims: [128, 64]
   transcriptomics_encoder_type: "mlp"
-  molecular_encoder_type: "descriptors" # Changed from chemical_encoder_type
+  molecular_encoder_type: "descriptors"
   fusion_type: "simple"
   fusion_strategy: "concat"
   activation: "relu"
@@ -117,11 +118,11 @@ interpretation:
     - "integrated_gradients"
     - "feature_ablation"
     - "deep_lift"
-  n_samples: 5 # Number of samples to use for interpretation
-  top_k: 20 # Number of top features to highlight
+  n_samples: 5 
+  top_k: 20 
   visualize_features: true
   feature_naming:
     transcriptomics: "data/raw/LINCS/geneinfo_beta.txt" # Path to gene name mapping
-    molecular: null # No naming for molecular features
-  save_attributions: true # Whether to save raw attribution values
+    molecular: null 
+  save_attributions: true 
   generate_figures: true

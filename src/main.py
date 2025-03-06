@@ -171,22 +171,18 @@ def main():
     except Exception as e:
         logging.error(f"Error setting up experiment logging: {e}")
         return
-
-    # Prepare datasets (uses config['data'] and config['molecular'])
     try:
         train_loader, val_loader, test_loader = prepare_datasets(config)
     except Exception as e:
         logging.error(f"Failed to prepare datasets: {e}")
         return
 
-    # Configure model (uses config['model'] and possibly config['molecular'])
     try:
         model = configure_model(train_loader.dataset, config)
     except Exception as e:
         logging.error(f"Failed to configure model: {e}")
         return
 
-    # Setup training components from config['training']
     try:
         optimizer_class = get_optimizer_class(config["training"]["optimizer"])
         scheduler_factory = get_scheduler_class(

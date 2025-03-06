@@ -23,20 +23,17 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.data.loaders import GCTXDataLoader
-
-# Add the src directory to the path
-sys.path.append(str(Path(__file__).parent.parent))
+from .data.loaders import GCTXDataLoader
 
 # Import infrastructure components
-from config.config_utils import load_config, setup_logging
-from data.augmentation import create_augmentations
-from data.datasets import DatasetFactory, TranscriptomicsDataset
-from data.feature_transforms import create_feature_transform
-from data.preprocessing import LINCSCTRPDataProcessor
-from data.preprocessing_transforms import create_preprocessing_transform
-from utils.logging import ExperimentLogger
-from utils.storage import CacheManager, CheckpointManager, DatasetStorage
+from .config.config_utils import load_config, setup_logging
+from .data.augmentation import create_augmentations
+from .data.datasets import DatasetFactory, TranscriptomicsDataset
+from .data.feature_transforms import create_feature_transform
+from .data.preprocessing import LINCSCTRPDataProcessor
+from .data.preprocessing_transforms import create_preprocessing_transform
+from .utils.logging import ExperimentLogger
+from .utils.storage import CacheManager, CheckpointManager, DatasetStorage
 
 # Setup logging using config module
 setup_logging()
@@ -308,7 +305,7 @@ def main():
     parser.add_argument(
         "--gctx",
         type=str,
-        default="data/processed/LINCS_CTRP_matched.gctx",
+        default="data/processed/LINCS.gctx",
         help="Path to GCTX file",
     )
     parser.add_argument("--nrows", type=int, default=1000, help="Number of rows to use")
@@ -341,9 +338,9 @@ def main():
         config["data"].get("normalize", "scale")
     )
     molecular_transform = create_feature_transform(
-        config["chemical"]["representation"],
-        fingerprint_size=config["chemical"]["fingerprint_size"],
-        fingerprint_radius=config["chemical"]["radius"],
+        config["molecular"]["representation"],
+        fingerprint_size=config["molecular"]["fingerprint_size"],
+        fingerprint_radius=config["molecular"]["radius"],
     )
     aug_transform, _ = create_augmentations(
         transcriptomics_augment_type="noise", noise_args={"std": 0.05}

@@ -268,7 +268,7 @@ def parse_cli_overrides(args: Optional[List[str]] = None) -> Dict[str, Any]:
             try:
                 value = yaml.safe_load(value)
             except Exception:
-                pass  # Keep as string if conversion fails
+                pass  
             keys = path.split(".")
             current = overrides
             for key in keys[:-1]:

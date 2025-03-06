@@ -138,13 +138,13 @@ def create_preprocessing_transform(transform_type: str, **kwargs) -> Callable:
     Factory function to create preprocessing transformations.
 
     Args:
-        transform_type: Type of transformation ('normalize', 'scale', 'robust', 'compound')
+        transform_type: Type of transformation ('normalize', 'zscore', 'robust', 'compound', 'none')
         **kwargs: Additional arguments for the transformation
 
     Returns:
         A preprocessing transformation object
     """
-    valid_types = {"normalize", "scale", "robust", "compound"}
+    valid_types = {"normalize", "zscore", "robust", "compound", "none"}
     if transform_type not in valid_types:
         raise ValueError(
             f"Invalid preprocessing transform type: {transform_type}. Allowed: {valid_types}"
@@ -162,9 +162,10 @@ def create_preprocessing_transform(transform_type: str, **kwargs) -> Callable:
 
     transform_map = {
         "normalize": Normalizer(),
-        "scale": StandardScaler(),
+        "zscore": StandardScaler(),
         "robust": RobustScaler(
             quantile_range=kwargs.get("quantile_range", (25.0, 75.0))
         ),
+        "none": None,
     }
     return transform_map[transform_type]
