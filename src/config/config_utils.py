@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 import wandb
 
-from .constants import CURRENT_SCHEMA_VERSION, DEFAULT_PATHS, LOGGING_CONFIG
+from .constants import CURRENT_SCHEMA_VERSION, DEFAULT_PATHS, LOGGING_CONFIG, REQUIRED_CONFIG_SECTIONS
 from .default_config import get_default_config
 from .schema import CompleteConfig
 
@@ -20,13 +20,8 @@ logger = logging.getLogger(__name__)
 
 def setup_logging(log_level: str = "INFO"):
     """Configure logging with customizable log level."""
-    # Update LOGGING_CONFIG with the provided log_level
     logging_config = LOGGING_CONFIG.copy()
-    logging_config["level"] = (
-        log_level.upper()
-    )  # Ensure uppercase (e.g., "INFO", "WARNING")
-
-    # Configure logging
+    logging_config["level"] = log_level.upper()
     logging.basicConfig(**logging_config)
     logging.info(f"Logging configured with level: {log_level}")
 
@@ -61,59 +56,90 @@ def load_config(
     """Load configuration from a YAML file with validation."""
     config_path = Path(config_path)
     if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
+        logger.warning(f"Config file not found: {config_path}. Using default configuration.")
+        user_config = {}
+    else:
+        try:
+            with open(config_path) as f:
+                user_config = yaml.safe_load(f) or {}
+            logger.info(f"Loaded user configuration from {config_path}")
+        except yaml.YAMLError as e:
+            logger.error(f"Error parsing YAML: {e}")
+            raise
+    
+    # Get default configuration
+    default_config = get_default_config()
+    
+    # Load environment-specific config and secrets
+    env_config = load_environment_config()
+    
+    # Track which sections are using defaults
+    default_sections = set()
+    for section in REQUIRED_CONFIG_SECTIONS:
+        if section not in user_config:
+            default_sections.add(section)
+    
+    # Merge configurations with priority: default < env < file < cli
+    merged_config = merge_configs(default_config, env_config)
+    merged_config = merge_configs(merged_config, user_config)
+    
+    # Add CLI overrides
+    cli_overrides = parse_cli_overrides()
+    if cli_overrides:
+        merged_config = merge_configs(merged_config, cli_overrides)
+        
+    if resolve_paths:
+        merged_config = resolve_path_variables(merged_config)
+    
+    # Notify user about sections using defaults
+    if default_sections:
+        logger.warning(f"Using default configuration for sections: {', '.join(default_sections)}")
+        
     try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-        merged_config = merge_configs(get_default_config(), config)
-        if resolve_paths:
-            merged_config = resolve_path_variables(merged_config)
         validated_config = validate_config(merged_config)
-        logger.info(f"Loaded and validated config from {config_path}")
         return validated_config
-    except yaml.YAMLError as e:
-        logger.error(f"Error parsing YAML: {e}")
-        raise
     except ValidationError as e:
         logger.error(f"Configuration validation failed: {e}")
         raise
 
 
-def load_secrets() -> Dict[str, Any]:
-    """Load secrets from environment variables or secrets file."""
-    secrets = {}
-    secrets_path = Path("config/secrets.yaml")
-    if secrets_path.exists():
-        try:
-            with open(secrets_path) as f:
-                secrets.update(yaml.safe_load(f) or {})
-        except Exception as e:
-            logger.warning(f"Failed to load secrets file: {e}")
-
-    import re
-
-    pattern = re.compile(r"CONFIG_([A-Z0-9_]+)")
-    for env_var, value in os.environ.items():
-        if match := pattern.match(env_var):
-            path = match.group(1).lower().replace("_", ".")
-            keys = path.split(".")
-            current = secrets
-            for key in keys[:-1]:
-                current = current.setdefault(key, {})
-            current[keys[-1]] = value
-    return secrets
-
-
-def load_env_config() -> Dict[str, Any]:
-    """Load environment-specific configuration based on ENV variable."""
+def load_environment_config() -> Dict[str, Any]:
+    """Load environment-specific configuration and secrets."""
+    config = {}
+    
+    # Load environment-specific config
     env = os.environ.get("APP_ENV", "development")
     env_config_path = Path(f"config/environments/{env}.yaml")
     if env_config_path.exists():
         with open(env_config_path) as f:
-            return yaml.safe_load(f) or {}
-    logger.warning(f"No config for environment: {env}")
-    return {}
+            env_config = yaml.safe_load(f) or {}
+            config.update(env_config)
+    
+    # Load secrets
+    secrets_path = Path("config/secrets.yaml")
+    if secrets_path.exists():
+        try:
+            with open(secrets_path) as f:
+                secrets = yaml.safe_load(f) or {}
+                config.update(secrets)
+        except Exception as e:
+            logger.warning(f"Failed to load secrets file: {e}")
+    
+    # Parse environment variables with CONFIG_ prefix
+    import re
+    pattern = re.compile(r"CONFIG_([A-Z0-9_]+)")
+    env_config = {}
+    for env_var, value in os.environ.items():
+        if match := pattern.match(env_var):
+            path = match.group(1).lower().replace("_", ".")
+            keys = path.split(".")
+            current = env_config
+            for key in keys[:-1]:
+                current = current.setdefault(key, {})
+            current[keys[-1]] = value
+    
+    config.update(env_config)
+    return config
 
 
 def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -135,7 +161,6 @@ def merge_configs(
     allow_new_keys: bool = True,
 ) -> Dict[str, Any]:
     """Merge default and custom configurations with nested support."""
-
     def deep_merge(d1: Dict, d2: Dict, path=None) -> Dict:
         path = path or []
         result = d1.copy()
@@ -235,18 +260,8 @@ def check_compatibility(config: Dict[str, Any]) -> bool:
         return False
     return True
 
-
-def upgrade_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Upgrade configuration to current schema version."""
-    if check_compatibility(config):
-        return config
-    logger.info("Upgrading configuration to current schema version...")
-    upgraded_config = merge_configs(get_default_config(), config, allow_new_keys=True)
-    upgraded_config["experiment"]["version"] = CURRENT_SCHEMA_VERSION
-    logger.info(f"Configuration upgraded to version {CURRENT_SCHEMA_VERSION}")
-    return upgraded_config
-
-
+#TODO: Simplify this function by using argparse.ArgumentParser
+#TODO: Simplify this function for multiple overrides
 def parse_cli_overrides(args: Optional[List[str]] = None) -> Dict[str, Any]:
     """Parse command-line arguments for configuration overrides."""
     import argparse
@@ -257,10 +272,10 @@ def parse_cli_overrides(args: Optional[List[str]] = None) -> Dict[str, Any]:
         action="append",
         help="Override config value (e.g., 'training.batch_size=64')",
     )
-    args = parser.parse_args(args)
+    parsed_args = parser.parse_args(args)
     overrides = {}
-    if args.config_override:
-        for override in args.config_override:
+    if parsed_args.config_override:
+        for override in parsed_args.config_override:
             if "=" not in override:
                 logger.warning(f"Invalid override format: {override}")
                 continue

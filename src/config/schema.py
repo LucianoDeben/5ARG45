@@ -5,13 +5,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..config.constants import (
     Activation,
+    Device,
     FeatureSpace,
     FusionStrategy,
     ImputationStrategy,
+    LRScheduler,
     LossFunction,
     MolecularRepresentation,
     Normalization,
     Optimizer,
+    RegressionMetrics,
 )
 
 
@@ -55,15 +58,14 @@ class DataConfig(BaseModel):
     feature_space: Union[FeatureSpace, List[FeatureSpace]] = Field(
         FeatureSpace.LANDMARK, description="Gene feature space"
     )
-    nrows: Optional[int] = Field(None, description="Number of rows to load")
+    nrows: Optional[int] = Field(1000, description="Number of rows to load")
     normalize: Optional[Normalization] = Field(
-        None, description="Normalization strategy"
+        Normalization.NONE, description="Normalization strategy"
     )
     random_seed: int = Field(42, description="Random seed for reproducibility")
     cache_data: bool = Field(True, description="Whether to cache preprocessed data")
     use_multiprocessing: bool = Field(True, description="Use multiprocessing")
-    num_workers: int = Field(4, description="Number of worker processes")
-    batch_size: int = Field(32, description="Batch size for data loading")
+    num_workers: int = Field(0, description="Number of worker processes")
     imputation_strategy: ImputationStrategy = Field(
         ImputationStrategy.MEAN, description="Strategy for imputing missing values"
     )
@@ -72,7 +74,7 @@ class DataConfig(BaseModel):
 
 
 class LRSchedulerConfig(BaseModel):
-    type: str = Field("cosine", description="Learning rate scheduler type")
+    type: LRScheduler = Field(LRScheduler.COSINE, description="Learning rate scheduler type")
     warmup_epochs: int = Field(5, description="Number of warmup epochs")
     min_lr: float = Field(1e-6, description="Minimum learning rate")
     step_size: int = Field(10, description="Step size for StepLR scheduler")
@@ -80,22 +82,22 @@ class LRSchedulerConfig(BaseModel):
 
 
 class TrainingConfig(BaseModel):
-    batch_size: int = Field(32, gt=0, description="Training batch size")
-    epochs: int = Field(100, gt=0, description="Number of training epochs")
+    batch_size: int = Field(128, gt=0, description="Training batch size")
+    epochs: int = Field(10, gt=0, description="Number of training epochs")
     num_runs: int = Field(5, gt=0, description="Number of training runs")
     learning_rate: float = Field(0.001, gt=0.0, description="Initial learning rate")
     optimizer: Optimizer = Field(Optimizer.ADAM, description="Optimizer name")
     loss: LossFunction = Field(LossFunction.MSE, description="Loss function name")
-    test_size: float = Field(0.2, gt=0.0, lt=1.0, description="Proportion for testing")
+    test_size: float = Field(0.4, gt=0.0, lt=1.0, description="Proportion for testing")
     val_size: float = Field(
         0.1, gt=0.0, lt=1.0, description="Proportion for validation"
     )
     random_state: int = Field(42, description="Random seed for data splitting")
     group_by: Optional[str] = Field(
-        None, description="Column for group-based splitting"
+        "cell_mfc_name", description="Column for group-based splitting"
     )
     stratify_by: Optional[str] = Field(
-        None, description="Column for stratified splitting"
+        "viability", description="Column for stratified splitting"
     )
     lr_scheduler: LRSchedulerConfig = Field(
         default_factory=LRSchedulerConfig, description="Learning rate scheduler"
@@ -121,7 +123,7 @@ class MolecularConfig(BaseModel):
         MolecularRepresentation.FINGERPRINT, description="Molecular representation type"
     )
     fingerprint_size: int = Field(
-        2048, gt=0, description="Size of molecular fingerprints"
+        1024, gt=0, description="Size of molecular fingerprints"
     )
     radius: int = Field(
         2, ge=0, le=5, description="Radius for Morgan/ECFP fingerprints"
@@ -137,37 +139,36 @@ class MolecularConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     transcriptomics_input_dim: int = Field(
-        ..., gt=0, description="Input dimension for transcriptomics data"
+        978, gt=0, description="Input dimension for transcriptomics data"
     )
     transcriptomics_hidden_dims: List[int] = Field(
-        ...,
+        [512, 256],
         min_items=1,
         description="Hidden layer dimensions for transcriptomics encoder",
     )
     transcriptomics_output_dim: int = Field(
-        ..., gt=0, description="Output dimension for transcriptomics encoder"
+        128, gt=0, description="Output dimension for transcriptomics encoder"
     )
     molecular_input_dim: int = Field(
-        ..., gt=0, description="Input dimension for molecular data"
-    )  # Renamed from chemical_input_dim
+        1025, gt=0, description="Input dimension for molecular data"
+    )  
     molecular_hidden_dims: List[int] = Field(
-        ..., min_items=1, description="Hidden layer dimensions for molecular encoder"
-    )  # Renamed
+        [256, 128], min_items=1, description="Hidden layer dimensions for molecular encoder"
+    )  
     molecular_output_dim: int = Field(
-        ..., gt=0, description="Output dimension for molecular encoder"
-    )  # Renamed
+        128, gt=0, description="Output dimension for molecular encoder"
+    )  
     fusion_output_dim: int = Field(
-        ..., gt=0, description="Output dimension after fusion"
+        256, gt=0, description="Output dimension after fusion"
     )
     predictor_hidden_dims: List[int] = Field(
-        ..., min_items=1, description="Hidden layer dimensions for predictor"
+        [128, 64], min_items=1, description="Hidden layer dimensions for predictor"
     )
     fusion_strategy: FusionStrategy = Field(
         FusionStrategy.CONCAT, description="Feature fusion strategy"
     )
     activation: Activation = Field(Activation.RELU, description="Activation function")
     dropout: float = Field(0.3, ge=0.0, le=1.0, description="Dropout probability")
-    normalize: bool = Field(True, description="Whether to normalize inputs")
     use_batch_norm: bool = Field(True, description="Whether to use batch normalization")
     layer_norm: bool = Field(True, description="Whether to use layer normalization")
     residual_connections: bool = Field(
@@ -189,9 +190,9 @@ class ModelConfig(BaseModel):
 
 class EvaluationConfig(BaseModel):
     metrics: List[str] = Field(
-        ["r2", "rmse", "mae", "pearson"], description="Evaluation metrics"
+        [RegressionMetrics.R2, RegressionMetrics.RMSE,RegressionMetrics.MAE, RegressionMetrics.PEARSON], description="Evaluation metrics"
     )
-    loss: str = Field("mse", description="Evaluation loss function")
+    loss: str = Field(LossFunction.MSE, description="Evaluation loss function")
     output_dir: str = Field(
         "results/eval", description="Directory for evaluation results"
     )
@@ -240,6 +241,20 @@ class ExperimentConfig(BaseModel):
     )
     log_level: str = Field("WARNING", description="Logging level")
 
+class InferenceConfig(BaseModel):
+    device: str = Field(Device.GPU, description="Inference device")
+    max_ensemble: int = Field(5, description="Maximum ensemble models")
+    output_path: str = Field(
+        "results/predictions.csv", description="Output predictions path"
+    )
+    export_formats: List[str] = Field(
+        ["pytorch", "onnx", "torchscript"], description="Model export formats"
+    )
+
+class DeploymentConfig(BaseModel):
+    quantization: List[str] = Field(
+        ["static", "dynamic"], description="Quantization strategies"
+    )
 
 class InterpretationConfig(BaseModel):
     enabled: bool = Field(True, description="Whether to enable model interpretation")
