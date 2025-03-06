@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from ..config.config_utils import load_config
 from ..utils.data_validation import validate_batch
-from ..utils.logging import ExperimentLogger
+from ..utils.experiment_tracker import ExperimentTracker  # Updated import
 from ..utils.loss import create_criterion
 from ..utils.metrics import compute_metrics
 from ..utils.storage import CheckpointManager
@@ -190,7 +190,7 @@ class ModelCheckpointCallback(TrainingCallback):
             monitor: Metric to determine best model.
             mode: 'min' or 'max' for metric direction.
             save_top_k: Number of best checkpoints to keep.
-            save_last: Whether to save the last epoch’s checkpoint.
+            save_last: Whether to save the last epoch's checkpoint.
             save_weights_only: Save only model weights (excludes optimizer/scheduler).
             period: Save every this many epochs.
         """
@@ -252,7 +252,7 @@ class Trainer:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         criterion: Optional[Callable] = None,
         device: Optional[str] = None,
-        exp_logger: Optional[ExperimentLogger] = None,
+        experiment_tracker: Optional[ExperimentTracker] = None,  # Renamed parameter
         callbacks: Optional[List[TrainingCallback]] = None,
         config: Optional[Dict] = None,
         mixed_precision: bool = False,
@@ -268,7 +268,7 @@ class Trainer:
             scheduler: Optional LR scheduler (defaults to config if None).
             criterion: Optional loss function (defaults to config if None).
             device: Device ('cuda', 'cpu', or None for auto-detection).
-            exp_logger: ExperimentLogger instance for tracking.
+            experiment_tracker: ExperimentTracker instance for tracking.
             callbacks: List of TrainingCallback instances.
             config: Configuration dictionary (loads default if None).
             mixed_precision: Enable mixed precision training if True.
@@ -278,7 +278,7 @@ class Trainer:
         self.val_loader = val_loader
         self.config = config or load_config("config.yaml")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.exp_logger = exp_logger or ExperimentLogger()
+        self.experiment_tracker = experiment_tracker or ExperimentTracker()  # Renamed attribute
         self.callbacks = callbacks or []
         self.mixed_precision = mixed_precision
 
@@ -296,9 +296,9 @@ class Trainer:
         self.current_epoch = 0
         self.history = {"train": {}, "val": {}}
 
-        if self.exp_logger:
-            self.exp_logger.log_model_summary(self.model)
-            self.exp_logger.log_config(self.config)
+        if self.experiment_tracker:
+            self.experiment_tracker.log_model_summary(self.model)
+            self.experiment_tracker.log_config(self.config)
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer from config."""
@@ -330,11 +330,26 @@ class Trainer:
             return optim.lr_scheduler.StepLR(
                 self.optimizer, step_size=step_size, gamma=gamma
             )
-        elif sch_type == "reduce_on_plateau":
+        elif sch_type == "reduce_on_plateau" or sch_type == "plateau":
             patience = train_cfg.get("patience", 5)
             factor = train_cfg.get("factor", 0.1)
             return optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer, patience=patience, factor=factor
+            )
+        elif sch_type == "cosine":
+            T_max = train_cfg.get("epochs", 50)
+            eta_min = train_cfg.get("min_lr", 1e-6)
+            return optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=T_max, eta_min=eta_min
+            )
+        elif sch_type == "exponential":
+            gamma = train_cfg.get("gamma", 0.9)
+            return optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=gamma)
+        elif sch_type == "multi_step":
+            milestones = train_cfg.get("milestones", [10, 20, 30])
+            gamma = train_cfg.get("gamma", 0.1)
+            return optim.lr_scheduler.MultiStepLR(
+                self.optimizer, milestones=milestones, gamma=gamma
             )
         else:
             raise ValueError(f"Unsupported scheduler: {sch_type}")
@@ -352,25 +367,42 @@ class Trainer:
         all_targets, all_outputs = [], []
 
         for batch_idx, batch in enumerate(self.train_loader):
-            validate_batch(batch)  # Assuming this checks batch validity
-            inputs = {
-                k: v.to(self.device) for k, v in batch.items() if k != "viability"
-            }
-            targets = batch["viability"].to(self.device)
+            try:
+                validate_batch(batch)  # Validate batch format
+                
+                # Handle different batch formats
+                if isinstance(batch, (tuple, list)):
+                    inputs, targets = batch[0].to(self.device), batch[1].to(self.device)
+                else:  # Dictionary format
+                    inputs = {
+                        k: v.to(self.device) for k, v in batch.items() if k != "viability"
+                    }
+                    targets = batch["viability"].to(self.device)
 
-            self.optimizer.zero_grad()
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, targets)
-            loss.backward()
-            self.optimizer.step()
+                self.optimizer.zero_grad()
+                
+                # Use the appropriate format for model input
+                if isinstance(batch, (tuple, list)):
+                    outputs = self.model(inputs)
+                else:
+                    outputs = self.model(batch)
 
-            train_loss += loss.item() * targets.size(0)
-            all_targets.append(targets.detach().cpu().numpy())
-            all_outputs.append(outputs.detach().cpu().numpy())
+                loss = self.criterion(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
 
-            # Optional: Log batch-level loss separately if desired
-            # if self.exp_logger and batch_idx % 10 == 0:  # Log every 10 batches
-            #     self.exp_logger.log_metric("batch_loss", loss.item(), step=batch_idx, phase="train_batch")
+                train_loss += loss.item() * targets.size(0)
+                all_targets.append(targets.detach().cpu().numpy())
+                all_outputs.append(outputs.detach().cpu().numpy())
+                
+            except Exception as e:
+                logger.error(f"Error processing batch {batch_idx}: {e}")
+                continue
+
+        # Check if we have any valid results
+        if not all_targets or not all_outputs:
+            logger.warning("No valid batches processed during training")
+            return {"loss": float('inf')}
 
         train_loss /= num_samples
         all_targets = np.concatenate(all_targets)
@@ -392,18 +424,38 @@ class Trainer:
 
         with torch.no_grad():
             for batch in self.val_loader:
-                validate_batch(batch)
-                inputs = {
-                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
-                }
-                targets = batch["viability"].to(self.device)
+                try:
+                    validate_batch(batch)
+                    
+                    # Handle different batch formats
+                    if isinstance(batch, (tuple, list)):
+                        inputs, targets = batch[0].to(self.device), batch[1].to(self.device)
+                    else:  # Dictionary format
+                        inputs = {
+                            k: v.to(self.device) for k, v in batch.items() if k != "viability"
+                        }
+                        targets = batch["viability"].to(self.device)
 
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets)
-                val_loss += loss.item() * targets.size(0)
+                    # Use the appropriate format for model input
+                    if isinstance(batch, (tuple, list)):
+                        outputs = self.model(inputs)
+                    else:
+                        outputs = self.model(batch)
+                        
+                    loss = self.criterion(outputs, targets)
+                    val_loss += loss.item() * targets.size(0)
 
-                all_targets.append(targets.cpu().numpy())
-                all_outputs.append(outputs.cpu().numpy())
+                    all_targets.append(targets.cpu().numpy())
+                    all_outputs.append(outputs.cpu().numpy())
+                    
+                except Exception as e:
+                    logger.error(f"Error processing validation batch: {e}")
+                    continue
+
+        # Check if we have any valid results
+        if not all_targets or not all_outputs:
+            logger.warning("No valid batches processed during validation")
+            return {"loss": float('inf')}
 
         val_loss /= num_samples
         all_targets = np.concatenate(all_targets)
@@ -427,7 +479,12 @@ class Trainer:
         if use_evaluator:
             from ..evaluation.evaluator import Evaluator
 
-            evaluator = Evaluator(self.model, self.device, self.exp_logger, self.config)
+            evaluator = Evaluator(
+                self.model, 
+                self.device, 
+                self.experiment_tracker,
+                self.config
+            )
             return evaluator.evaluate(test_loader, prefix="test_")
 
         self.model.eval()
@@ -437,19 +494,43 @@ class Trainer:
 
         with torch.no_grad():
             for batch in test_loader:
-                validate_batch(batch)
-                inputs = {
-                    k: v.to(self.device) for k, v in batch.items() if k != "viability"
-                }
-                targets = batch["viability"].to(self.device).float()
+                try:
+                    validate_batch(batch)
+                    
+                    # Handle different batch formats
+                    if isinstance(batch, (tuple, list)):
+                        inputs, targets = batch[0].to(self.device), batch[1].to(self.device)
+                    else:  # Dictionary format
+                        inputs = {
+                            k: v.to(self.device) for k, v in batch.items() if k != "viability"
+                        }
+                        targets = batch["viability"].to(self.device)
 
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets)
-                test_loss += loss.item() * targets.size(0)
+                    # Use the appropriate format for model input
+                    if isinstance(batch, (tuple, list)):
+                        outputs = self.model(inputs)
+                    else:
+                        outputs = self.model(batch)
+                    
+                    # Ensure target shape matches output shape
+                    if outputs.dim() > targets.dim():
+                        targets = targets.view(-1, 1)
+                    
+                    loss = self.criterion(outputs, targets)
+                    
+                    test_loss += loss.item() * targets.size(0)
+                    all_targets.append(targets.cpu().numpy())
+                    all_outputs.append(outputs.cpu().numpy())
+                    
+                except Exception as e:
+                    logger.error(f"Error processing test batch: {e}")
+                    continue
 
-                all_targets.append(targets.cpu().numpy())
-                all_outputs.append(outputs.cpu().numpy())
-
+        # Check if we have any valid results
+        if not all_targets or not all_outputs:
+            logger.warning("No valid batches processed during testing")
+            return {"loss": float('inf')}
+            
         test_loss /= num_samples
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
@@ -458,8 +539,8 @@ class Trainer:
         )
         metrics["loss"] = test_loss
 
-        if self.exp_logger:
-            self.exp_logger.log_metrics(metrics, step=0, phase="test")
+        if self.experiment_tracker:
+            self.experiment_tracker.log_metrics(metrics, step=0, phase="test")
 
         if verbose > 0:
             logger.info(
@@ -483,9 +564,9 @@ class Trainer:
             val_metrics = self._validate_epoch()
 
             # Log metrics with epoch as step
-            if self.exp_logger:
-                self.exp_logger.log_metrics(train_metrics, step=epoch, phase="train")
-                self.exp_logger.log_metrics(val_metrics, step=epoch, phase="val")
+            if self.experiment_tracker:
+                self.experiment_tracker.log_metrics(train_metrics, step=epoch, phase="train")
+                self.experiment_tracker.log_metrics(val_metrics, step=epoch, phase="val")
 
             # Combine metrics for logging and callbacks
             logs = {"train": train_metrics, "val": val_metrics}
@@ -516,8 +597,8 @@ class Trainer:
         # Final evaluation on test set if provided
         if hasattr(self, "test_loader") and self.test_loader:
             test_metrics = self.evaluate(self.test_loader, verbose=1)
-            if self.exp_logger:
-                self.exp_logger.log_metrics(test_metrics, step=epochs, phase="test")
+            if self.experiment_tracker:
+                self.experiment_tracker.log_metrics(test_metrics, step=epochs, phase="test")
 
     def predict(
         self, data_loader: DataLoader, return_targets: bool = False
@@ -597,7 +678,7 @@ class MultiRunTrainer:
         scheduler_class: Optional[type] = None,
         criterion: Optional[Callable] = None,
         device: Optional[str] = None,
-        exp_logger: Optional[ExperimentLogger] = None,
+        experiment_tracker: Optional[ExperimentTracker] = None, 
         callbacks: Optional[List[TrainingCallback]] = None,
         config: Optional[Dict] = None,
         mixed_precision: bool = False,
@@ -618,7 +699,7 @@ class MultiRunTrainer:
             scheduler_class: Optional LR scheduler class
             criterion: Optional loss function (defaults to config if None)
             device: Device ('cuda', 'cpu', or None for auto-detection)
-            exp_logger: ExperimentLogger instance for tracking
+            experiment_tracker: ExperimentTracker instance for tracking
             callbacks: List of TrainingCallback instances
             config: Configuration dictionary (loads default if None)
             mixed_precision: Enable mixed precision training if True
@@ -635,7 +716,7 @@ class MultiRunTrainer:
         self.scheduler_class = scheduler_class
         self.criterion = criterion
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.exp_logger = exp_logger
+        self.experiment_tracker = experiment_tracker  # Renamed attribute
         self.callbacks = callbacks or []
         self.config = config or load_config("config.yaml")
         self.mixed_precision = mixed_precision
@@ -667,7 +748,6 @@ class MultiRunTrainer:
 
         optimizer = self.optimizer_class(
             model.parameters(),
-            lr=self.config.get("training", {}).get("learning_rate", 0.001),
         )
 
         scheduler = None
@@ -683,13 +763,13 @@ class MultiRunTrainer:
             run_callbacks.append(checkpoint_callback)
 
         run_logger = (
-            self.exp_logger.clone_with_run_name(f"run_{run_id}")
-            if self.exp_logger and hasattr(self.exp_logger, "clone_with_run_name")
-            else self.exp_logger
+            self.experiment_tracker.clone_with_run_name(f"run_{run_id}")
+            if self.experiment_tracker and hasattr(self.experiment_tracker, "clone_with_run_name")
+            else self.experiment_tracker
         )
-        if run_logger == self.exp_logger and self.exp_logger:
+        if run_logger == self.experiment_tracker and self.experiment_tracker:
             logger.warning(
-                "ExperimentLogger does not support cloning. Using default logger."
+                "ExperimentTracker does not support cloning. Using default logger."
             )
 
         return Trainer(
@@ -700,7 +780,7 @@ class MultiRunTrainer:
             scheduler=scheduler,
             criterion=self.criterion,
             device=self.device,
-            exp_logger=run_logger,
+            experiment_tracker=run_logger,
             callbacks=run_callbacks,
             config=self.config,
             mixed_precision=self.mixed_precision,
@@ -726,7 +806,7 @@ class MultiRunTrainer:
             Evaluator(
                 self.model_class(**self.model_kwargs),
                 self.device,
-                self.exp_logger,
+                self.experiment_tracker,
                 self.config,
             )
             if use_evaluator

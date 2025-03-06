@@ -91,7 +91,7 @@ def get_default_config() -> Dict[str, Any]:
         "experiment": {
             "project_name": "multimodal_drug_response",
             "run_name": None,
-            "track": True,
+            "track": False,
             "tags": ["multimodal", "drug-response"],
             "version": "1.0.0",
             "save_checkpoints": True,

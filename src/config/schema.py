@@ -225,7 +225,7 @@ class ExperimentConfig(BaseModel):
     run_name: Optional[str] = Field(
         None, description="Run name for experiment tracking"
     )
-    track: bool = Field(True, description="Whether to track experiments")
+    track: bool = Field(False, description="Whether to track experiments")
     tags: List[str] = Field(
         ["multimodal", "drug-response"], description="Tags for experiment tracking"
     )

@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from ..config.config_utils import load_config
 from ..utils.data_validation import validate_batch
-from ..utils.logging import ExperimentLogger
+from ..utils.experiment_tracker import ExperimentTracker
 from ..utils.loss import create_criterion
 from ..utils.metrics import compute_metrics
 from ..utils.visualization import plot_boxplot
@@ -33,7 +33,7 @@ class Evaluator:
     Attributes:
         model: PyTorch model instance.
         device: Device for computation ('cuda' or 'cpu').
-        exp_logger: ExperimentLogger for tracking results.
+        experiment_tracker: ExperimentTracker for tracking results.
         config: Configuration dictionary for evaluation parameters.
     """
 
@@ -41,7 +41,7 @@ class Evaluator:
         self,
         model: nn.Module,
         device: Optional[str] = None,
-        exp_logger: Optional[ExperimentLogger] = None,
+        experiment_tracker: Optional[ExperimentTracker] = None, 
         config: Optional[Dict] = None,
     ):
         """
@@ -50,13 +50,13 @@ class Evaluator:
         Args:
             model: PyTorch model to evaluate.
             device: Device to use ('cuda', 'cpu', or None for auto-detection).
-            exp_logger: Optional ExperimentLogger for tracking results.
+            experiment_tracker: Optional ExperimentTracker for tracking results.
             config: Configuration dictionary (loads default if None).
         """
         self.model = model
         self.config = config or load_config("config.yaml")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.exp_logger = exp_logger or ExperimentLogger()
+        self.experiment_tracker = experiment_tracker  
 
         self.model.to(self.device).eval()
 
@@ -119,8 +119,8 @@ class Evaluator:
         results = {"loss": avg_loss}
         results.update(compute_metrics(all_targets, all_outputs, metrics))
 
-        if self.exp_logger:
-            self.exp_logger.log_metrics(results, step=0, phase=f"{prefix}eval")
+        if self.experiment_tracker:
+            self.experiment_tracker.log_metrics(results, step=0, phase=f"{prefix}eval")
 
         if output_dir:
             self._save_results(results, all_targets, all_outputs, output_dir, prefix)
@@ -364,8 +364,8 @@ class Evaluator:
             aggregate_results[f"{metric}_min"] = float(np.min(values))
             aggregate_results[f"{metric}_max"] = float(np.max(values))
 
-        if self.exp_logger:
-            self.exp_logger.log_metrics(aggregate_results, step=0, phase=f"{prefix}cv")
+        if self.experiment_tracker:
+            self.experiment_tracker.log_metrics(aggregate_results, step=0, phase=f"{prefix}cv")
 
         if output_dir:
             self._save_cv_results(aggregate_results, results, output_dir, prefix)
@@ -712,9 +712,9 @@ class Evaluator:
             except Exception as save_error:
                 logger.error(f"Error saving multi-run results: {save_error}")
 
-        if self.exp_logger:
+        if self.experiment_tracker:
             try:
-                self.exp_logger.log_metrics(
+                self.experiment_tracker.log_metrics(
                     aggregate_metrics, step=0, phase=f"{prefix}multi_run"
                 )
             except Exception as log_error:
@@ -732,7 +732,7 @@ class MultiDatasetEvaluator:
         self,
         model: nn.Module,
         device: Optional[str] = None,
-        exp_logger: Optional[ExperimentLogger] = None,
+        experiment_tracker: Optional[ExperimentTracker] = None,
         config: Optional[Dict] = None,
     ):
         """
@@ -741,16 +741,16 @@ class MultiDatasetEvaluator:
         Args:
             model: PyTorch model to evaluate.
             device: Device to use ('cuda', 'cpu', or None for auto-detection).
-            exp_logger: Optional ExperimentLogger for tracking results.
+            experiment_tracker: Optional ExperimentTracker for tracking results.
             config: Configuration dictionary (loads default if None).
         """
         self.model = model
         self.config = config or load_config("config.yaml")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.exp_logger = exp_logger or ExperimentLogger()
+        self.experiment_tracker = experiment_tracker or ExperimentTracker()
 
         self.model.to(self.device).eval()
-        self.evaluator = Evaluator(model, device, exp_logger, config)
+        self.evaluator = Evaluator(model, device, self.experiment_tracker, config)
 
     def evaluate_dataset(
         self,

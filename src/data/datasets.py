@@ -9,10 +9,6 @@ from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from src.data.feature_transforms import (
-    BasicSmilesDescriptorTransform,
-    MorganFingerprintTransform,
-)
 from src.data.loaders import GCTXDataLoader
 
 logger = logging.getLogger(__name__)

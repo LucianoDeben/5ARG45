@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from rdkit.DataStructs import FoldFingerprint
 from torch_geometric.data import Data
 
 logger = logging.getLogger(__name__)
@@ -63,7 +62,6 @@ class RobustSmilesDescriptorTransform:
             output_dim: Dimension of the output representation
         """
         self.output_dim = output_dim
-        self.logger = logging.getLogger(__name__)
 
     def validate_smiles(self, smiles: str) -> bool:
         """
@@ -118,7 +116,7 @@ class RobustSmilesDescriptorTransform:
         for i, smiles in enumerate(smiles_list):
             # Basic validation
             if not self.validate_smiles(smiles):
-                self.logger.warning(f"Invalid SMILES at index {i}: {smiles}")
+                logger.warning(f"Invalid SMILES at index {i}: {smiles}")
                 continue
 
             # Extract simple character-based features
@@ -161,7 +159,7 @@ class RobustSmilesDescriptorTransform:
                         features[i, j] = 0.0
 
             except Exception as e:
-                self.logger.warning(
+                logger.warning(
                     f"Error extracting features for SMILES {smiles}: {e}"
                 )
                 valid_mask[i] = False
@@ -169,12 +167,12 @@ class RobustSmilesDescriptorTransform:
         # Return only valid data
         if np.any(valid_mask):
             result = np.hstack([features[valid_mask], dosage[valid_mask]])
-            self.logger.info(
+            logger.info(
                 f"Processed {np.sum(valid_mask)}/{len(smiles_list)} valid SMILES strings"
             )
             return result
         else:
-            self.logger.error("No valid SMILES found in batch")
+            logger.error("No valid SMILES found in batch")
             # Return at least one row of zeros to prevent shape errors
             return np.zeros((1, self.output_dim), dtype=np.float32)
 

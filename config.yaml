@@ -18,9 +18,9 @@ data:
   output_path: "data/processed/LINCS_CTRP_matched.gctx"
   matching_strategy: "parallel"
   max_workers: null
-  chunk_size: 1000
+  chunk_size: 10000
   feature_space: "landmark"
-  nrows: 1000
+  nrows: null
   normalize: "none"
   random_seed: 42
   cache_data: true
@@ -104,7 +104,7 @@ deployment:
 experiment:
   project_name: "lincs_ctrp_prediction"
   run_name: "${RUN_NAME:-run_${timestamp}}"
-  track: false
+  track: true
   tags: ["multimodal", "drug-response"]
   version: "1.0.0"
   save_checkpoints: true

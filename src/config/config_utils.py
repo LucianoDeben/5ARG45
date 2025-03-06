@@ -18,12 +18,49 @@ from .schema import CompleteConfig
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_level: str = "INFO"):
-    """Configure logging with customizable log level."""
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
+    """
+    Configure logging system with customizable log level and optional file output.
+    
+    This is the central configuration point for all logging in the application.
+    
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_file: Optional path to log file
+    """
     logging_config = LOGGING_CONFIG.copy()
     logging_config["level"] = log_level.upper()
-    logging.basicConfig(**logging_config)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging_config["level"])
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Add console handler
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(logging_config["format"])
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+    
+    # Add file handler if specified
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(console_formatter)
+        root_logger.addHandler(file_handler)
+    
+    # Add any other handlers from config
+    for handler in logging_config.get("handlers", []):
+        if isinstance(handler, logging.Handler):
+            root_logger.addHandler(handler)
+    
+    # Confirm logging is configured
     logging.info(f"Logging configured with level: {log_level}")
+    
+    return root_logger
 
 
 def resolve_path_variables(config: Dict[str, Any]) -> Dict[str, Any]:

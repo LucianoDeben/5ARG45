@@ -48,6 +48,7 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         train_ds, val_ds, test_ds = DatasetFactory.create_and_split_multimodal(
             gctx_loader=gctx_loader,
             feature_space=config["data"]["feature_space"],
+            nrows=config["data"].get("nrows"),
             test_size=config["training"]["test_size"],
             val_size=config["training"]["val_size"],
             random_state=config["data"]["random_seed"],
@@ -55,7 +56,13 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
             stratify_by=config["training"]["stratify_by"],
             transform_transcriptomics=None,
             transform_molecular=transform_molecular,
+            chunk_size=config["data"].get("chunk_size"),
         )
+        
+        # Log the dataset sizes
+        logger.info(f"Training dataset size: {len(train_ds)}")
+        logger.info(f"Validation dataset size: {len(val_ds)}") 
+        logger.info(f"Test dataset size: {len(test_ds)}")
 
         # Step 5: Create PyTorch DataLoaders
         train_loader = DataLoader(

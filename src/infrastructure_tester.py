@@ -32,7 +32,7 @@ from .data.datasets import DatasetFactory, TranscriptomicsDataset
 from .data.feature_transforms import create_feature_transform
 from .data.preprocessing import LINCSCTRPDataProcessor
 from .data.preprocessing_transforms import create_preprocessing_transform
-from .utils.logging import ExperimentLogger
+from .utils.experiment_tracker import ExperimentTracker
 from .utils.storage import CacheManager, CheckpointManager, DatasetStorage
 
 # Setup logging using config module
@@ -80,7 +80,7 @@ def train_ridge_regression(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    logger: ExperimentLogger,
+    logger: ExperimentTracker,
 ) -> Ridge:
     """Train a Ridge regression model and log results."""
     logger.log_metric("data_size/train", len(X_train), 0, "info")
@@ -111,7 +111,7 @@ def train_fcnn(
     val_loader: DataLoader,
     input_dim: int,
     hidden_dims: list,
-    logger: ExperimentLogger,
+    logger: ExperimentTracker,
     checkpoint_mgr: CheckpointManager,
     device: torch.device,
     epochs: int = 20,
@@ -205,7 +205,7 @@ def evaluate_models(
     ridge_model: Ridge,
     fcnn_model: nn.Module,
     test_ds: TranscriptomicsDataset,
-    logger: ExperimentLogger,
+    logger: ExperimentTracker,
     device: torch.device,
     batch_size: int = 32,
 ):
@@ -321,7 +321,7 @@ def main():
         dir_path.mkdir(parents=True, exist_ok=True)
 
     # Setup experiment logger
-    experiment_logger = ExperimentLogger(
+    experiment_logger = ExperimentTracker(
         experiment_name="infrastructure_test",
         config=config,
         log_dir=str(log_dir),
