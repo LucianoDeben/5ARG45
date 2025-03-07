@@ -27,18 +27,14 @@ from .data.loaders import GCTXDataLoader
 
 # Import infrastructure components
 from .config.config_utils import load_config, setup_logging
-from .data.augmentation import create_augmentations
 from .data.datasets import DatasetFactory, TranscriptomicsDataset
 from .data.feature_transforms import create_feature_transform
-from .data.preprocessing import LINCSCTRPDataProcessor
 from .data.preprocessing_transforms import create_preprocessing_transform
 from .utils.experiment_tracker import ExperimentTracker
 from .utils.storage import CacheManager, CheckpointManager, DatasetStorage
 
 # Setup logging using config module
-setup_logging()
-logger = logging.getLogger(__name__)
-
+logger = setup_logging()
 
 class FCNN(nn.Module):
     """Simple fully-connected neural network for drug response prediction."""
@@ -342,18 +338,6 @@ def main():
         fingerprint_size=config["molecular"]["fingerprint_size"],
         fingerprint_radius=config["molecular"]["radius"],
     )
-    aug_transform, _ = create_augmentations(
-        transcriptomics_augment_type="noise", noise_args={"std": 0.05}
-    )
-
-    # Preprocess data
-    preprocessor = LINCSCTRPDataProcessor(
-        gctx_file=args.gctx,
-        feature_space=config["data"]["feature_space"],
-        nrows=args.nrows or config["data"]["nrows"],
-        transform_transcriptomics=transcriptomics_transform,
-    )
-    transcriptomics, metadata = preprocessor.preprocess()
 
     # Create and split datasets with chunking
     with GCTXDataLoader(args.gctx) as loader:
@@ -364,7 +348,6 @@ def main():
             test_size=config["training"]["test_size"],
             val_size=config["training"]["val_size"],
             random_state=config["training"]["random_state"],
-            transform=aug_transform,
             chunk_size=10000,
         )
 

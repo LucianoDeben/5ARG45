@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader
 from src.data.datasets import DatasetFactory
 from src.data.feature_transforms import create_feature_transform
 from src.data.loaders import GCTXDataLoader
-from src.data.preprocessing import LINCSCTRPDataProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -26,25 +25,14 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
         # Step 1: Load data using GCTXDataLoader
         gctx_loader = GCTXDataLoader(config["data"]["gctx_file"])
 
-        # Step 2: Preprocess data using LINCSCTRPDataProcessor
-        processor = LINCSCTRPDataProcessor(
-            gctx_file=config["data"]["gctx_file"],
-            feature_space=config["data"]["feature_space"],
-            nrows=config["data"].get("nrows"),
-            imputation_strategy=config["data"].get("imputation_strategy", "mean"),
-            handle_outliers=config["data"].get("handle_outliers", False),
-            outlier_threshold=config["data"].get("outlier_threshold", 3.0),
-        )
-        transcriptomics, metadata = processor.preprocess()
-
-        # Step 3: Create feature transform for molecular data
+        # Step 2: Create feature transform for molecular data
         transform_molecular = create_feature_transform(
             config["molecular"].get("transform_molecular", "fingerprint"),
             fingerprint_size=config["molecular"].get("fingerprint_size", 1024),
             fingerprint_radius=config["molecular"].get("fingerprint_radius", 2),
         )
 
-        # Step 4: Create and split datasets using DatasetFactory
+        # Step 3: Create and split datasets using DatasetFactory
         train_ds, val_ds, test_ds = DatasetFactory.create_and_split_multimodal(
             gctx_loader=gctx_loader,
             feature_space=config["data"]["feature_space"],
@@ -59,11 +47,6 @@ def prepare_datasets(config: dict) -> Tuple[DataLoader, DataLoader, DataLoader]:
             chunk_size=config["data"].get("chunk_size"),
         )
         
-        # Log the dataset sizes
-        logger.info(f"Training dataset size: {len(train_ds)}")
-        logger.info(f"Validation dataset size: {len(val_ds)}") 
-        logger.info(f"Test dataset size: {len(test_ds)}")
-
         # Step 5: Create PyTorch DataLoaders
         train_loader = DataLoader(
             train_ds,

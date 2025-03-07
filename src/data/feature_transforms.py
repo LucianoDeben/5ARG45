@@ -247,58 +247,6 @@ class MorganFingerprintTransform:
         valid_indices = np.array(valid_indices)
         return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
 
-
-# class MorganFingerprintTransform:
-#     """Generate Morgan fingerprints from SMILES."""
-
-#     def __init__(self, radius: int = 2, size: int = 1024):
-#         self.radius = radius
-#         self.size = size
-
-#     def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
-#         smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
-#         dosage = (
-#             np.array(mol_input["dosage"]).reshape(-1, 1)
-#             if isinstance(mol_input, dict) and "dosage" in mol_input
-#             else np.zeros((len(smiles_list), 1))
-#         )
-
-#         fingerprints = np.zeros((len(smiles_list), self.size), dtype=np.float32)
-#         valid_indices = []
-
-#         for i, smiles in enumerate(smiles_list):
-#             # Skip invalid SMILES strings
-#             if not isinstance(smiles, str) or not smiles.strip():
-#                 logger.warning(f"Invalid SMILES at index {i}: {smiles}")
-#                 continue
-
-#             try:
-#                 # Try to parse the SMILES
-#                 mol = Chem.MolFromSmiles(smiles)
-#                 if mol is None:
-#                     logger.warning(f"Failed to parse SMILES at index {i}: {smiles}")
-#                     continue
-
-#                 # Generate fingerprint
-#                 fp = AllChem.GetMorganFingerprintAsBitVect(
-#                     mol, self.radius, nBits=self.size
-#                 )
-#                 fingerprints[i] = np.array(fp)
-#                 valid_indices.append(i)
-#             except Exception as e:
-#                 logger.warning(
-#                     f"Error processing SMILES at index {i} ({smiles}): {str(e)}"
-#                 )
-#                 continue
-
-#         if not valid_indices:
-#             logger.error("No valid SMILES found in batch, returning empty arrays")
-#             return np.zeros((0, self.size + 1), dtype=np.float32)
-
-#         valid_indices = np.array(valid_indices)
-#         return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
-
-
 class MolecularGraphTransform:
     """Generate tensor-ready graph representations from SMILES for GNNs."""
 

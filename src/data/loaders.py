@@ -13,13 +13,24 @@ logger = logging.getLogger(__name__)
 class GCTXDataLoader:
     """Data loader for GCTX files with chunked loading and progress feedback."""
 
-    def __init__(self, gctx_file: str, preload_metadata: bool = True):
+    def __init__(self, gctx_file: str, preload_metadata: bool = True, validate_on_init: bool = False):
         self.gctx_file = gctx_file
         self.f = None
         self._n_rows, self._n_cols = None, None
         self._col_metadata = None
-        self._row_metadata_cache = None
+        self._row_metadata = None 
         self._metadata_attrs = None
+        
+        # Optional validation
+        if validate_on_init:
+            validation_results = self.validate()
+            if not all(validation_results.values()):
+                issues = [k for k, v in validation_results.items() if not v]
+                logger.warning(f"Validation issues detected: {issues}")
+                if not validation_results["file_accessible"]:
+                    raise IOError(f"Cannot access GCTX file: {self.gctx_file}")
+                if not validation_results["correct_format"]:
+                    raise ValueError(f"Invalid GCTX file format: {self.gctx_file}")
 
         # Preload metadata during initialization
         if preload_metadata:
@@ -27,8 +38,10 @@ class GCTXDataLoader:
                 with h5py.File(self.gctx_file, "r") as f:
                     self._n_rows, self._n_cols = f["0/DATA/0/matrix"].shape
                     self._col_metadata = self._load_column_metadata(f)
+                    self._row_metadata = self._load_row_metadata(f)
+                    self._metadata_attrs = self._load_metadata_attributes(f)
                     logger.debug(
-                        f"Preloaded column metadata with {len(self._col_metadata)} genes."
+                        f"Preloaded metadata with {len(self._col_metadata)} genes and {len(self._row_metadata)} samples."
                     )
             except Exception as e:
                 logger.warning(f"Failed to preload metadata: {str(e)}")
@@ -59,6 +72,62 @@ class GCTXDataLoader:
         finally:
             if close_file and "f" in locals():
                 f.close()
+                
+    def _load_row_metadata(self, f=None) -> pd.DataFrame:
+        """
+        Load row metadata, with option to pass an open file handle.
+
+        Args:
+            f: Optional open h5py File object
+
+        Returns:
+            DataFrame with row metadata
+        """
+        close_file = f is None
+        try:
+            if f is None:
+                f = h5py.File(self.gctx_file, "r")
+
+            meta_row_grp = f["0/META/ROW"]
+            row_dict = {key: meta_row_grp[key][:] for key in meta_row_grp.keys()}
+            for key, data in row_dict.items():
+                if data.dtype.kind == "S":
+                    row_dict[key] = [s.decode("utf-8", errors="ignore") for s in data]
+
+            return pd.DataFrame(row_dict)
+
+        finally:
+            if close_file and "f" in locals():
+                f.close()
+                
+    def _load_metadata_attributes(self, f=None) -> Dict:
+        """
+        Load file metadata attributes.
+        
+        Args:
+            f: Optional open h5py File object
+            
+        Returns:
+            Dictionary of metadata attributes
+        """
+        close_file = f is None
+        try:
+            if f is None:
+                f = h5py.File(self.gctx_file, "r")
+                
+            attrs = {
+                key: (
+                    value.decode("utf-8", errors="ignore")
+                    if isinstance(value, bytes)
+                    else value
+                )
+                for key, value in f.attrs.items()
+            }
+            return attrs
+            
+        finally:
+            if close_file and "f" in locals():
+                f.close()
 
     def __enter__(self):
         """Context manager entry."""
@@ -79,8 +148,11 @@ class GCTXDataLoader:
         if self._col_metadata is None:
             self._col_metadata = self._load_column_metadata(self.f)
 
-        if self._row_metadata_cache is None:
-            self._row_metadata_cache = self.get_row_metadata()
+        if self._row_metadata is None:
+            self._row_metadata = self._load_row_metadata(self.f)
+            
+        if self._metadata_attrs is None:
+            self._metadata_attrs = self._load_metadata_attributes(self.f)
 
         return self
 
@@ -89,45 +161,113 @@ class GCTXDataLoader:
         if self.f is not None:
             self.f.close()
             self.f = None
-
+            
+    @property
+    def n_rows(self) -> int:
+        """Get the number of rows in the data matrix."""
+        if self._n_rows is None:
+            with h5py.File(self.gctx_file, "r") as f:
+                self._n_rows = f["0/DATA/0/matrix"].shape[0]
+        return self._n_rows
+    
+    @property
+    def n_cols(self) -> int:
+        """Get the number of columns in the data matrix."""
+        if self._n_cols is None:
+            with h5py.File(self.gctx_file, "r") as f:
+                self._n_cols = f["0/DATA/0/matrix"].shape[1]
+        return self._n_cols
+        
+    @property
+    def row_metadata(self) -> pd.DataFrame:
+        """Get the full row metadata as a DataFrame."""
+        if self._row_metadata is None:
+            self._row_metadata = self._load_row_metadata()
+        return self._row_metadata
+        
+    @property
+    def col_metadata(self) -> pd.DataFrame:
+        """Get the full column metadata as a DataFrame."""
+        if self._col_metadata is None:
+            self._col_metadata = self._load_column_metadata()
+        return self._col_metadata
+        
+    @property
+    def metadata_attrs(self) -> Dict:
+        """Get metadata attributes."""
+        if self._metadata_attrs is None:
+            self._metadata_attrs = self._load_metadata_attributes()
+        return self._metadata_attrs
+    
+    def get_row_metadata_keys(self) -> List[str]:
+        """
+        Get the keys/column names of the row metadata.
+        
+        Returns:
+            List of row metadata column names
+        """
+        with h5py.File(self.gctx_file, "r") as f:
+            return list(f["0/META/ROW"].keys())
+    
+    def get_column_metadata_keys(self) -> List[str]:
+        """
+        Get the keys/column names of the column metadata.
+        
+        Returns:
+            List of column metadata column names
+        """
+        with h5py.File(self.gctx_file, "r") as f:
+            return list(f["0/META/COL"].keys())
+        
     def _convert_to_indices(
         self, selection: Union[slice, list, np.ndarray, None], max_size: int
     ) -> Union[slice, list]:
         """
         Convert various index types to a consistent format.
-
+        
         Args:
             selection: Input selection (slice, list, numpy array, or None)
             max_size: Maximum number of rows/columns
-
+            
         Returns:
             Slice or list of indices
         """
         if selection is None:
             return slice(None)
-
+            
         # Convert numpy array to list
         if isinstance(selection, np.ndarray):
             selection = selection.tolist()
-
+            
         # Handle slice
         if isinstance(selection, slice):
+            # Validate slice bounds
+            start = 0 if selection.start is None else selection.start
+            stop = max_size if selection.stop is None else selection.stop
+            
+            if start < 0 or (stop is not None and stop > max_size):
+                raise IndexError(f"Slice indices out of bounds (0 to {max_size-1})")
+                
             return selection
-
+            
         # Handle list of indices
         if isinstance(selection, list):
+            # Handle empty list
+            if not selection:
+                return []
+                
             # Convert to integer indices if not already
             selection = [int(i) for i in selection]
-
+            
             # Check bounds
             if any(i < 0 or i >= max_size for i in selection):
                 raise IndexError(f"Indices out of bounds (0 to {max_size-1})")
-
+                
             return selection
-
+            
         # If we've reached here, it's an unsupported type
         raise TypeError(
-            "Selection must be None, a slice, list, or numpy array of indices"
+            f"Selection must be None, a slice, list, or numpy array of indices, got {type(selection)}"
         )
 
     def get_gene_indices_for_feature_space(
@@ -211,7 +351,7 @@ class GCTXDataLoader:
                         return full_data[rows, :][:, cols]
 
                 # Handle chunked loading for list-based row selection
-                if isinstance(row_selection, list):
+                if isinstance(row_selection, list) and len(row_selection) > chunk_size:
                     data = []
                     for chunk in tqdm(
                         [
@@ -222,8 +362,27 @@ class GCTXDataLoader:
                     ):
                         chunk_data = select_data(chunk, col_selection)
                         data.append(chunk_data)
-
+                    
                     return np.concatenate(data, axis=0)
+                # For slice-based selection that might be too large
+                elif isinstance(row_selection, slice):
+                    start = 0 if row_selection.start is None else row_selection.start
+                    stop = self._n_rows if row_selection.stop is None else row_selection.stop
+                    step = 1 if row_selection.step is None else row_selection.step
+                    
+                    # If slice covers a large range, process in chunks
+                    if (stop - start) > chunk_size:
+                        data = []
+                        for chunk_start in tqdm(
+                            range(start, stop, chunk_size), 
+                            desc="Loading expression chunks"
+                        ):
+                            chunk_stop = min(chunk_start + chunk_size, stop)
+                            chunk_slice = slice(chunk_start, chunk_stop, step)
+                            chunk_data = select_data(chunk_slice, col_selection)
+                            data.append(chunk_data)
+                        
+                        return np.concatenate(data, axis=0)
 
                 # Direct data selection
                 return select_data(row_selection, col_selection)
@@ -231,6 +390,45 @@ class GCTXDataLoader:
         except Exception as e:
             logger.error(f"Error retrieving expression data: {e}")
             raise
+    
+    def invalidate_cache(self):
+        """Clear all cached metadata to force reload on next access."""
+        self._row_metadata = None 
+        self._col_metadata = None
+        self._metadata_attrs = None
+        logger.info("Cache invalidated")
+        
+    def validate(self) -> Dict[str, bool]:
+        """
+        Validate the current state of the loader.
+        
+        Returns:
+            Dictionary with validation results
+        """
+        results = {
+            "file_accessible": False,
+            "correct_format": False,
+            "metadata_loaded": False
+        }
+        
+        try:
+            with h5py.File(self.gctx_file, "r") as f:
+                results["file_accessible"] = True
+                
+                # Check for required paths
+                required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL"]
+                results["correct_format"] = all(path in f for path in required)
+                
+            # Check metadata status
+            results["metadata_loaded"] = (
+                self._col_metadata is not None and 
+                self._row_metadata is not None
+            )
+            
+            return results
+        except Exception as e:
+            logger.error(f"Validation failed: {str(e)}")
+            return results
 
     def get_row_metadata(
         self,
@@ -238,11 +436,11 @@ class GCTXDataLoader:
         columns: Optional[Union[str, List[str]]] = None,
     ) -> Union[pd.DataFrame, pd.Series]:
         if (
-            self._row_metadata_cache is not None
+            self._row_metadata is not None
             and row_slice is None
             and columns is None
         ):
-            return self._row_metadata_cache
+            return self._row_metadata
         row_selection = self._convert_to_indices(row_slice, self._n_rows)
         available_keys = list(self.f["0/META/ROW"].keys())
         columns = columns if columns else available_keys
@@ -305,18 +503,18 @@ class GCTXDataLoader:
         return self.get_column_metadata(col_slice=indices, columns=columns)
 
     def get_metadata_attributes(self) -> Dict:
+        """
+        Get metadata attributes from the file.
+        
+        Returns:
+            Dictionary of metadata attributes
+        """
         if self._metadata_attrs is not None:
             return self._metadata_attrs
-        attrs = {
-            key: (
-                value.decode("utf-8", errors="ignore")
-                if isinstance(value, bytes)
-                else value
-            )
-            for key, value in self.f.attrs.items()
-        }
-        self._metadata_attrs = attrs
-        return attrs
+            
+        # Load attributes if not already cached
+        self._metadata_attrs = self._load_metadata_attributes()
+        return self._metadata_attrs
 
     def get_data_with_metadata(
         self,

@@ -4,11 +4,12 @@ import logging
 import h5py
 import numpy as np
 import pandas as pd
+from src.config.config_utils import setup_logging
 
-logger = logging.getLogger(__name__)
+logger = setup_logging()
 
 # Update the path to your generated .gctx file.
-h5_file = "../data/processed/LINCS2.gctx"
+h5_file = "./data/processed/LINCS_CTRP_matched.gctx"
 
 with h5py.File(h5_file, "r") as f:
     # 1. Check that expected groups exist.
