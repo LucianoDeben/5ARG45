@@ -4,6 +4,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union, Any, TypeVar
 
 import numpy as np
 import pandas as pd
+from src.data.feature_transforms import MorganFingerprintTransform
 import torch
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch.utils.data import Dataset
@@ -135,15 +136,19 @@ class ChemicalDataset(Dataset):
     def __len__(self) -> int:
         return len(self.smiles)
 
-    def __getitem__(self, idx: int) -> Dict[str, Union[str, torch.Tensor]]:
-        sample = {
-            "smiles": self.smiles[idx],
+    #TODO: Optimal to never have SMILES strings in the dataset, but rather the processed molecular data, check if this can be enforced
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        # Convert SMILES to a tensor or representation immediately
+        smiles = self.smiles[idx]
+        molecular = None
+        if self.transform_molecular:
+            molecular = self.transform_molecular(smiles)
+        
+        return {
+            "molecular": molecular,
             "dosage": torch.tensor(self.dosage[idx], dtype=torch.float32),
             "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
         }
-        if self.transform_molecular:
-            sample["molecular"] = self.transform_molecular(sample["smiles"])
-        return sample
 
 #TODO: Confirm that the factory actually selectes the correct metadata based on the data matrix used for both efficiency and correctness
 class DatasetFactory:
@@ -224,7 +229,6 @@ class DatasetFactory:
         random_state: int = 42,
         group_by: Optional[str] = None,
         stratify_by: Optional[str] = None,
-        chunk_size: int = 10000,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Split indices based on metadata with support for large datasets.
@@ -237,7 +241,6 @@ class DatasetFactory:
             random_state: Random seed for reproducibility
             group_by: Column to use for group-based splitting
             stratify_by: Column to use for stratified splitting
-            chunk_size: Size of chunks for processing large datasets
 
         Returns:
             Tuple of train, validation, and test indices
@@ -520,103 +523,6 @@ class DatasetFactory:
         return required_cols
 
     @staticmethod
-    def _create_split_datasets(
-        gctx_loader: GCTXDataLoader,
-        dataset_class: type,
-        dataset_args: Dict[str, Any],
-        train_idx: List[int],
-        val_idx: List[int],
-        test_idx: List[int],
-        feature_space: Union[str, List[str]] = "landmark",
-        metadata: Optional[pd.DataFrame] = None,
-    ) -> Tuple[Dataset, Dataset, Dataset]:
-        """
-        Create split datasets for a specific dataset class using indices.
-        
-        Args:
-            gctx_loader: GCTX data loader
-            dataset_class: Dataset class to instantiate
-            dataset_args: Arguments for dataset initialization
-            train_idx: Training set indices
-            val_idx: Validation set indices
-            test_idx: Test set indices
-            feature_space: Gene feature space
-            metadata: Preprocessed metadata DataFrame
-            
-        Returns:
-            Tuple of train, validation, and test datasets
-        """
-        # Create train, val, and test datasets
-        if dataset_class == TranscriptomicsDataset:
-            train_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=train_idx, feature_space=feature_space
-                ),
-                viability=metadata.iloc[train_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-            val_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=val_idx, feature_space=feature_space
-                ),
-                viability=metadata.iloc[val_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-            test_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=test_idx, feature_space=feature_space
-                ),
-                viability=metadata.iloc[test_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-        elif dataset_class == ChemicalDataset:
-            train_ds = dataset_class(
-                smiles=metadata.iloc[train_idx]["canonical_smiles"].values,
-                dosage=metadata.iloc[train_idx]["pert_dose_log2"].values,
-                viability=metadata.iloc[train_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-            val_ds = dataset_class(
-                smiles=metadata.iloc[val_idx]["canonical_smiles"].values,
-                dosage=metadata.iloc[val_idx]["pert_dose_log2"].values,
-                viability=metadata.iloc[val_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-            test_ds = dataset_class(
-                smiles=metadata.iloc[test_idx]["canonical_smiles"].values,
-                dosage=metadata.iloc[test_idx]["pert_dose_log2"].values,
-                viability=metadata.iloc[test_idx]["viability_clipped"].values,
-                **dataset_args
-            )
-        elif dataset_class == MultimodalDrugDataset:
-            train_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=train_idx, feature_space=feature_space
-                ),
-                metadata=metadata.iloc[train_idx].reset_index(drop=True),
-                **dataset_args
-            )
-            val_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=val_idx, feature_space=feature_space
-                ),
-                metadata=metadata.iloc[val_idx].reset_index(drop=True),
-                **dataset_args
-            )
-            test_ds = dataset_class(
-                transcriptomics_data=gctx_loader.get_expression_data(
-                    row_slice=test_idx, feature_space=feature_space
-                ),
-                metadata=metadata.iloc[test_idx].reset_index(drop=True),
-                **dataset_args
-            )
-        else:
-            raise ValueError(f"Unsupported dataset class: {dataset_class}")
-            
-        logger.info(f"Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
-        return train_ds, val_ds, test_ds
-
-    @staticmethod
     def create_and_split_datasets(
         gctx_loader: GCTXDataLoader,
         dataset_type: str = "multimodal",
@@ -628,10 +534,9 @@ class DatasetFactory:
         group_by: Optional[str] = None,
         stratify_by: Optional[str] = None,
         transform_transcriptomics: Optional[Callable] = None,
-        transform_molecular: Optional[Callable] = None,
-        transform: Optional[Callable] = None,
+        transform_molecular: Optional[Callable] = MorganFingerprintTransform(),
         chunk_size: int = 10000,
-    ) -> Tuple[Dataset, Dataset, Dataset]:
+    ) -> Tuple[T, T, T]:
         """
         Create and split datasets based on dataset type.
         
@@ -647,7 +552,6 @@ class DatasetFactory:
             stratify_by: Column to use for stratified splitting
             transform_transcriptomics: Transform for transcriptomics data
             transform_molecular: Transform for molecular data
-            transform: General transform for single-modality datasets
             chunk_size: Size of chunks for processing large datasets
             
         Returns:
@@ -694,12 +598,12 @@ class DatasetFactory:
         elif dataset_type == "transcriptomics":
             dataset_class = TranscriptomicsDataset
             dataset_args = {
-                "transform_transcriptomics": transform if transform else transform_transcriptomics,
+                "transform_transcriptomics": transform_transcriptomics,
             }
         elif dataset_type == "chemical":
             dataset_class = ChemicalDataset
             dataset_args = {
-                "transform_molecular": transform if transform else transform_molecular,
+                "transform_molecular": transform_molecular,
             }
         else:
             raise ValueError(f"Unsupported dataset type: {dataset_type}")
@@ -892,7 +796,7 @@ class DatasetFactory:
         return DatasetFactory.create_and_split_datasets(
             gctx_loader=gctx_loader,
             dataset_type="chemical",
-            feature_space="landmark",  # Not used for chemical datasets
+            feature_space="landmark", 
             nrows=nrows,
             test_size=test_size,
             val_size=val_size,

@@ -47,51 +47,6 @@ class BasicSmilesDescriptorTransform:
 
         return np.hstack([features, dosage])
 
-
-class RobustSmilesDescriptorTransform:
-    """
-    Generate simple descriptors from SMILES strings without requiring RDKit parsing.
-    This is a fallback for when RDKit fingerprinting fails.
-    """
-
-    def __init__(self, output_dim: int = 64):
-        """
-        Initialize the robust SMILES descriptor transform.
-
-        Args:
-            output_dim: Dimension of the output representation
-        """
-        self.output_dim = output_dim
-
-    def validate_smiles(self, smiles: str) -> bool:
-        """
-        Perform basic validation on SMILES strings without using RDKit.
-
-        Args:
-            smiles: SMILES string to validate
-
-        Returns:
-            True if the SMILES string passes basic validation
-        """
-        if not isinstance(smiles, str):
-            return False
-
-        if len(smiles) < 2:  # Too short to be valid
-            return False
-
-        # Check for basic balancing of brackets
-        if smiles.count("(") != smiles.count(")"):
-            return False
-
-        if smiles.count("[") != smiles.count("]"):
-            return False
-
-        # Check for common problematic patterns
-        if "1PS" in smiles:  # From your error message
-            return False
-
-        return True
-
     def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
         """
         Convert SMILES to simple numerical descriptors without RDKit parsing.

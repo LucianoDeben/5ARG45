@@ -435,64 +435,112 @@ class GCTXDataLoader:
         row_slice: Union[slice, list, None] = None,
         columns: Optional[Union[str, List[str]]] = None,
     ) -> Union[pd.DataFrame, pd.Series]:
+        # Return cached metadata if available
         if (
             self._row_metadata is not None
             and row_slice is None
             and columns is None
         ):
             return self._row_metadata
-        row_selection = self._convert_to_indices(row_slice, self._n_rows)
-        available_keys = list(self.f["0/META/ROW"].keys())
-        columns = columns if columns else available_keys
-        columns = [columns] if isinstance(columns, str) else columns
-        if not isinstance(columns, list):
-            raise TypeError("columns must be None, a string, or a list of strings")
-        missing_cols = [col for col in columns if col not in available_keys]
-        if missing_cols:
-            raise KeyError(f"Columns {missing_cols} not found in row metadata")
-        row_meta = {
-            key: (
-                [
-                    s.decode("utf-8", errors="ignore")
-                    for s in self.f["0/META/ROW"][key][row_selection]
-                ]
-                if self.f["0/META/ROW"][key].dtype.kind == "S"
-                else self.f["0/META/ROW"][key][row_selection]
-            )
-            for key in columns
-        }
-        df = pd.DataFrame(row_meta)
-        return df[columns[0]] if len(columns) == 1 else df
+        
+        # Determine if we need to manage the file handle ourselves
+        need_to_open_file = self.f is None
+        
+        try:
+            # Open file if not already open
+            if need_to_open_file:
+                f = h5py.File(self.gctx_file, "r")
+            else:
+                f = self.f
+            
+            # Load metadata from file
+            row_selection = self._convert_to_indices(row_slice, self._n_rows)
+            available_keys = list(f["0/META/ROW"].keys())
+            columns = columns if columns else available_keys
+            columns = [columns] if isinstance(columns, str) else columns
+            
+            # Validate column selection
+            if not isinstance(columns, list):
+                raise TypeError("columns must be None, a string, or a list of strings")
+            missing_cols = [col for col in columns if col not in available_keys]
+            if missing_cols:
+                raise KeyError(f"Columns {missing_cols} not found in row metadata")
+            
+            # Extract metadata
+            row_meta = {
+                key: (
+                    [
+                        s.decode("utf-8", errors="ignore")
+                        for s in f["0/META/ROW"][key][row_selection]
+                    ]
+                    if f["0/META/ROW"][key].dtype.kind == "S"
+                    else f["0/META/ROW"][key][row_selection]
+                )
+                for key in columns
+            }
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(row_meta)
+            return df[columns[0]] if len(columns) == 1 else df
+            
+        finally:
+            # Close file if we opened it
+            if need_to_open_file and 'f' in locals():
+                f.close()
 
     def get_column_metadata(
         self,
         col_slice: Union[slice, list, None] = None,
         columns: Optional[Union[str, List[str]]] = None,
     ) -> Union[pd.DataFrame, pd.Series]:
+        # Return cached metadata if available
         if self._col_metadata is not None and col_slice is None and columns is None:
             return self._col_metadata
-        col_indices = self._convert_to_indices(col_slice, self._n_cols)
-        available_keys = list(self.f["0/META/COL"].keys())
-        columns = columns or available_keys
-        columns = [columns] if isinstance(columns, str) else columns
-        if not isinstance(columns, list):
-            raise TypeError("columns must be None, a string, or a list of strings")
-        missing_cols = [col for col in columns if col not in available_keys]
-        if missing_cols:
-            raise KeyError(f"Columns {missing_cols} not found in column metadata")
-        col_meta = {
-            key: (
-                [
-                    s.decode("utf-8", errors="ignore")
-                    for s in self.f["0/META/COL"][key][col_indices]
-                ]
-                if self.f["0/META/COL"][key].dtype.kind == "S"
-                else self.f["0/META/COL"][key][col_indices]
-            )
-            for key in columns
-        }
-        df = pd.DataFrame(col_meta)
-        return df[columns[0]] if len(columns) == 1 else df
+        
+        # Determine if we need to manage the file handle ourselves
+        need_to_open_file = self.f is None
+        
+        try:
+            # Open file if not already open
+            if need_to_open_file:
+                f = h5py.File(self.gctx_file, "r")
+            else:
+                f = self.f
+            
+            # Load metadata from file
+            col_indices = self._convert_to_indices(col_slice, self._n_cols)
+            available_keys = list(f["0/META/COL"].keys())
+            columns = columns or available_keys
+            columns = [columns] if isinstance(columns, str) else columns
+            
+            # Validate column selection
+            if not isinstance(columns, list):
+                raise TypeError("columns must be None, a string, or a list of strings")
+            missing_cols = [col for col in columns if col not in available_keys]
+            if missing_cols:
+                raise KeyError(f"Columns {missing_cols} not found in column metadata")
+            
+            # Extract metadata
+            col_meta = {
+                key: (
+                    [
+                        s.decode("utf-8", errors="ignore")
+                        for s in f["0/META/COL"][key][col_indices]
+                    ]
+                    if f["0/META/COL"][key].dtype.kind == "S"
+                    else f["0/META/COL"][key][col_indices]
+                )
+                for key in columns
+            }
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(col_meta)
+            return df[columns[0]] if len(columns) == 1 else df
+            
+        finally:
+            # Close file if we opened it
+            if need_to_open_file and 'f' in locals():
+                f.close()
 
     def get_column_metadata_for_feature_space(
         self,

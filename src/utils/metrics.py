@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Any
 import logging
 import numpy as np
 from scipy.stats import pearsonr
+import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,39 @@ def compute_metrics(
         logger.warning(f"Error calculating metrics: {e}")
     return results
 
+def aggregate_metrics(
+    metrics_dict: Dict[str, Any], 
+    reduce_op: str = 'mean'
+) -> Dict[str, Any]:
+    """
+    Aggregate metrics across multiple GPUs in distributed training.
+    
+    Args:
+        metrics_dict: Dictionary of metrics to aggregate
+        reduce_op: Reduction operation ('mean', 'sum', 'max', etc.)
+        
+    Returns:
+        Aggregated metrics dictionary
+    """
+    if not torch.distributed.is_initialized():
+        return metrics_dict
+        
+    aggregated = {}
+    for k, v in metrics_dict.items():
+        if isinstance(v, (int, float, torch.Tensor)):
+            tensor = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+            tensor = tensor.to(torch.cuda.current_device())
+            torch.distributed.all_reduce(tensor)
+            if reduce_op == 'mean':
+                tensor = tensor / torch.distributed.get_world_size()
+            aggregated[k] = tensor.item()
+        elif isinstance(v, dict):
+            # Recursively aggregate nested dictionaries
+            aggregated[k] = aggregate_metrics(v, reduce_op)
+        else:
+            # Non-numeric values are kept as is
+            aggregated[k] = v
+    return aggregated
 
 class MetricTracker:
     """

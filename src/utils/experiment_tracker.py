@@ -112,15 +112,23 @@ class ExperimentTracker:
 
     #TODO: Refactor this with the main implementation that also allows for multiple runs
     def _setup_wandb(self, project: Optional[str], entity: Optional[str]) -> None:
+        """Set up Weights & Biases tracking."""
         wandb_config = self.config or {}
-        wandb.init(
-            project=project or self.project_name,
-            entity=entity,
-            name=self.run_name or f"{self.experiment_name}_{self.timestamp}",
-            dir=str(self.experiment_dir),
-            config=wandb_config,
-            settings=wandb.Settings(start_method="thread"),
-        )
+        
+        # Check if wandb is already initialized to avoid re-initialization
+        if wandb.run is None:
+            wandb.init(
+                project=project or self.project_name,
+                entity=entity,
+                name=self.run_name or f"{self.experiment_name}_{self.timestamp}",
+                dir=str(self.experiment_dir),
+                config=wandb_config,
+                settings=wandb.Settings(start_method="thread"),
+            )
+        else:
+            # If already initialized, just update the config
+            wandb.config.update(wandb_config)
+            self.logger.info("Using existing wandb run")
 
     def log_config(self, config: Dict[str, Any]) -> None:
         self.logger.info("Configuration parameters:")
@@ -337,19 +345,19 @@ class ExperimentTracker:
         )
 
     def close(self) -> None:
-        """
-        Close the experiment tracker, cleaning up resources.
-        """
-        try:
-            if hasattr(self, "writer"):
+        """Close the experiment tracker, cleaning up resources."""
+        if hasattr(self, "writer"):
+            try:
                 self.writer.close()
-        except Exception as e:
-            self.logger.error(f"Error closing TensorBoard writer: {e}")
-            
-        try:
-            if self.use_wandb:
+                self.logger.info("TensorBoard writer closed successfully")
+            except Exception as e:
+                self.logger.error(f"Error closing TensorBoard writer: {e}")
+                
+        if self.use_wandb and wandb.run is not None:
+            try:
                 wandb.finish()
-        except Exception as e:
-            self.logger.error(f"Error finishing wandb: {e}")
-            
+                self.logger.info("wandb run finished successfully")
+            except Exception as e:
+                self.logger.error(f"Error finishing wandb: {e}")
+                
         self.logger.info(f"Experiment '{self.experiment_name}' completed")
