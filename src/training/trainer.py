@@ -358,6 +358,10 @@ class Trainer:
             }
             targets = batch["viability"].to(self.device)
 
+            # Log shapes
+            logger.info(f"Batch {batch_idx} - Inputs: {inputs['transcriptomics'].shape}")
+            logger.info(f"Batch {batch_idx} - Targets: {targets.shape}")
+            
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
             loss = self.criterion(outputs, targets)

@@ -15,22 +15,11 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from torch.utils.data import DataLoader, TensorDataset
 
-# Add parent directory to path to import from src
-sys.path.append(str(Path(__file__).parent.parent))
+from src.config.config_utils import load_config, merge_configs, validate_config
+from src.config.default_config import get_default_config
+from src.data.preprocessing import LINCSCTRPDataProcessor
+from src.data.feature_transforms import create_feature_transform
 
-from config.config_utils import load_config, merge_configs, validate_config
-from config.default_config import get_default_config
-from data.preprocessing import LINCSCTRPDataProcessor, create_transformations
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("unimodal_test_results.log"),
-    ],
-)
 logger = logging.getLogger(__name__)
 
 
@@ -523,7 +512,7 @@ def main():
         parser.add_argument(
             "--config",
             type=str,
-            default="../config.yaml",
+            default="./config.yaml",
             help="Path to configuration file",
         )
         parser.add_argument(

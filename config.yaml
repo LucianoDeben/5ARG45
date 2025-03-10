@@ -7,7 +7,7 @@ paths:
   checkpoint_dir: "models/saved/checkpoints"
 
 data:
-  gctx_file: "data/processed/LINCS.gctx"
+  gctx_file: "data/processed/LINCS_small.gctx"
   geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
   siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
   curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
