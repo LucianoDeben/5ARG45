@@ -74,6 +74,8 @@ def train_epoch(model, train_loader, criterion, optimizer, device, grad_clip=1.0
         inputs = inputs.to(device)
         targets = targets.to(device).float().view(-1, 1)
         
+        logger.info(f"Input shape: {inputs.shape}, Target shape: {targets.shape}")
+        
         # Forward pass
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -142,7 +144,7 @@ train_ds_lincs, val_ds_lincs, test_ds_lincs = DatasetFactory.create_and_split_da
     gctx_loader=lincs,
     dataset_type="transcriptomics",
     feature_space="landmark",
-    nrows=10000,
+    nrows=1000,
     test_size=0.1,
     val_size=0.1,
     random_state=42,
@@ -175,5 +177,37 @@ val_dl_lincs = DataLoader(val_ds_lincs, batch_size=batch_size, shuffle=False)
 test_dl_lincs = DataLoader(test_ds_lincs, batch_size=batch_size, shuffle=False)
 test_dl_mixseq = DataLoader(test_ds_mixseq, batch_size=batch_size, shuffle=False)
 
+# Training parameters
+num_epochs = 10
+lr = 1e-3
+grad_clip = 1.0
+
+# Model and optimizer
+model = ViabilityPredictor(input_dim=train_ds_lincs[0][0].shape[0]).to(device)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=lr)
+
+# Training loop
+logger.info("Starting training...")
+train_metrics = []
+val_metrics = []
+
+for epoch in range(num_epochs):
+    logger.info(f"Epoch {epoch + 1}/{num_epochs}")
+    
+    # Training
+    train_metrics.append(train_epoch(model, train_dl_lincs, criterion, optimizer, device, grad_clip))
+    
+    # Validation
+    val_metrics.append(evaluate(model, val_dl_lincs, criterion, device, phase="val")[0])
+    
+    logger.info(f"Train Loss: {train_metrics[-1]['loss']:.4f}, Val Loss: {val_metrics[-1]['loss']:.4f}")
+    
+# Evaluate on test set
+test_metrics_lincs, y_true_lincs, y_pred_lincs = evaluate(model, test_dl_lincs, criterion, device, phase="test")
+test_metrics_mixseq, y_true_mixseq, y_pred_mixseq = evaluate(model, test_dl_mixseq, criterion, device, phase="test")
+
+logger.info("LINCS Test Metrics:")
+logger.info(test_metrics_lincs)
 
         
