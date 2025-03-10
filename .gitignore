@@ -174,9 +174,16 @@ data/test
 *.tsv
 *.bin
 *.zip
+*.pk
+*.pkl
+/pk
 
 # Assets
 assets/
 
 # Models
 models/
+!src/models
+
+/logs
+/results

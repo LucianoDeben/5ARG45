@@ -1,30 +1,108 @@
-data_paths:
-  compoundinfo_file: "data/raw/compoundinfo.csv"
-  x_file: "data/raw/X.tsv"
-  y_file: "data/raw/Y.tsv"
-  rna_file: "data/raw/X_RNA.bin"
-  geneinfo_file: "data/raw/geneinfo_beta.txt"
-  preprocessed_tf_file: "data/processed/preprocessed_tf.csv"
-  preprocessed_landmark_file: "data/processed/preprocessed_landmark.csv"
-  preprocessed_gene_file: "data/processed/preprocessed_gene.csv"
-  preprocessed_best_inferred_file: "data/processed/preprocessed_best_inferred.csv"
-  preprocessed_merged_file: "data/processed/final_dataset.csv"
+# config.yaml
+paths:
+  data_dir: "data"
+  model_dir: "models/saved"
+  log_dir: "logs"
+  results_dir: "results"
+  checkpoint_dir: "models/saved/checkpoints"
 
-preprocess:
-  scale_features: true
-  train_ratio: 0.7
-  val_ratio: 0.2
-  test_ratio: 0.1
-  use_vt: false
-  vt_threshold_tf: 0.2
-  vt_threshold_best_inferred: 0.2
-  vt_threshold_landmark: 0.01
-  vt_threshold_gene: 0.01
-  use_pca: true
-  pca_var_tf: 0.99
-  pca_var_best_inferred: 0.99
-  pca_var_landmark: 0.99
-  pca_var_gene: 0.99
+data:
+  gctx_file: "data/processed/LINCS_small.gctx"
+  geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
+  siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
+  curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
+  per_cpd_post_qc: "data/raw/CTRP/v20.data.per_cpd_post_qc.txt"
+  per_experiment: "data/raw/CTRP/v20.meta.per_experiment.txt"
+  per_compound: "data/raw/CTRP/v20.meta.per_compound.txt"
+  per_cell_line: "data/raw/CTRP/v20.meta.per_cell_line.txt"
+  output_path: "data/processed/LINCS_CTRP_matched.gctx"
+  matching_strategy: "parallel"
+  max_workers: null
+  chunk_size: 10000
+  feature_space: "landmark"
+  nrows: 1000
+  normalize: "zscore"
+  random_seed: 42
+  cache_data: true
+  use_multiprocessing: true
+  num_workers: 4
+  batch_size: 32
 
 training:
-  cv_folds: 5
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: "adam" # Adjusted to match trainer.py (add "adamw" support if needed)
+  loss: "mse"
+  test_size: 0.2
+  val_size: 0.1
+  random_state: 42
+  group_by: null
+  stratify_by: null
+  lr_scheduler:
+    type: "step" # Adjusted to match trainer.py (add "cosine" support if needed)
+    step_size: 10
+    gamma: 0.1
+  early_stopping: true
+  patience: 10
+  min_delta: 0.001
+  clip_grad_norm: true
+  max_grad_norm: 1.0
+  use_amp: true
+  weight_decay: 0.01
+  label_smoothing: 0.1
+
+chemical:
+  representation: "fingerprint"
+  fingerprint_size: 1024
+  radius: 2
+  use_chirality: true
+  use_features: true
+  sanitize: true
+
+model:
+  transcriptomics_input_dim: 978
+  transcriptomics_hidden_dims: [512, 256]
+  transcriptomics_output_dim: 128
+  chemical_input_dim: 1025
+  chemical_hidden_dims: [256, 128]
+  chemical_output_dim: 128
+  fusion_output_dim: 256
+  predictor_hidden_dims: [128, 64]
+  transcriptomics_encoder_type: "mlp"
+  chemical_encoder_type: "descriptors"
+  fusion_type: "simple"
+  fusion_strategy: "concat"
+  activation: "relu"
+  dropout: 0.3
+  normalize: true
+  use_batch_norm: true
+  predictor_type: "standard"
+
+evaluation:
+  metrics: ["r2", "rmse", "mae", "pearson"]
+  loss: "mse"
+  output_dir: "results/eval"
+  visualization:
+    dpi: 300
+    figsize: [10, 8]
+
+inference:
+  device: "cuda"
+  max_ensemble: 5
+  output_path: "results/predictions.csv"
+  export_formats: ["pytorch", "onnx", "torchscript"]
+
+deployment:
+  quantization: ["static", "dynamic"]
+
+experiment:
+  project_name: "lincs_ctrp_prediction"
+  run_name: "${RUN_NAME:-run_${timestamp}}"
+  track: false
+  tags: ["multimodal", "drug-response"]
+  version: "1.0.0"
+  save_checkpoints: true
+  checkpoint_freq: 5
+  keep_n_checkpoints: 3
+  log_level: "INFO"
