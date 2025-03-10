@@ -58,14 +58,20 @@ class MultimodalDrugDataset(Dataset):
         smiles = row["canonical_smiles"]
         dosage = torch.tensor(row["pert_dose_log2"], dtype=torch.float32)
 
+        # molecular = None
+        # if self.transform_molecular:
+        #     mol_input = {"smiles": [smiles], "dosage": [dosage]}
+        #     molecular = self.transform_molecular(mol_input)
+        #     # Ensure we get the first element if transform returns a batch
+        #     if isinstance(molecular, list) and len(molecular) > 0:
+        #         molecular = molecular[0]
+        #     molecular = torch.from_numpy(molecular) if not isinstance(molecular, torch.Tensor) else molecular
+        
         molecular = None
         if self.transform_molecular:
             mol_input = {"smiles": [smiles], "dosage": [dosage]}
-            molecular = self.transform_molecular(mol_input)
-            # Ensure we get the first element if transform returns a batch
-            if isinstance(molecular, list) and len(molecular) > 0:
-                molecular = molecular[0]
-            molecular = torch.from_numpy(molecular) if not isinstance(molecular, torch.Tensor) else molecular
+            molecular = self.transform_molecular(mol_input)[0]
+            molecular = torch.from_numpy(molecular)
 
         viability = torch.tensor(row["viability_clipped"], dtype=torch.float32)
 
@@ -109,8 +115,8 @@ class TranscriptomicsDataset(Dataset):
         return x, y
 
 
-class ChemicalDataset(Dataset):
-    """Dataset for chemical-based drug response prediction."""
+class MolecularDataset(Dataset):
+    """Dataset for molecular-based drug response prediction."""
     
     def __init__(
         self,
@@ -510,7 +516,7 @@ class DatasetFactory:
         dataset_type: str, group_by: Optional[str] = None, stratify_by: Optional[str] = None
     ) -> List[str]:
         """Get required columns based on dataset type and splitting parameters."""
-        if dataset_type == "multimodal" or dataset_type == "chemical":
+        if dataset_type == "multimodal" or dataset_type == "molecular":
             required_cols = ["canonical_smiles", "pert_dose_log2", "viability_clipped"]
         else:  # transcriptomics
             required_cols = ["viability_clipped"]
@@ -564,7 +570,7 @@ class DatasetFactory:
         
         # Step 2: Validate required columns
         required_cols = []
-        if dataset_type in ["multimodal", "chemical"]:
+        if dataset_type in ["multimodal", "molecular"]:
             required_cols.extend(["canonical_smiles", "pert_dose_log2", "viability_clipped"])
         else:  # transcriptomics
             required_cols.append("viability_clipped")
@@ -601,7 +607,7 @@ class DatasetFactory:
                 "transform_transcriptomics": transform_transcriptomics,
             }
         elif dataset_type == "chemical":
-            dataset_class = ChemicalDataset
+            dataset_class = MolecularDataset
             dataset_args = {
                 "transform_molecular": transform_molecular,
             }
@@ -635,7 +641,7 @@ class DatasetFactory:
         metadata: pd.DataFrame,
         feature_space: Union[str, List[str]],
         dataset_type: str,
-    ) -> Tuple[Dataset, Dataset, Dataset]:
+    ) -> Tuple[T, T, T]:
         """
         Create dataset instances for each split.
         
@@ -697,7 +703,7 @@ class DatasetFactory:
                 viability=metadata.iloc[test_idx]["viability_clipped"].values,
                 **dataset_args
             )
-        elif dataset_type == "chemical":
+        elif dataset_type == "molecular":
             train_ds = dataset_class(
                 smiles=metadata.iloc[train_idx]["canonical_smiles"].values,
                 dosage=metadata.iloc[train_idx]["pert_dose_log2"].values,
@@ -791,11 +797,11 @@ class DatasetFactory:
         stratify_by: Optional[str] = None,
         transform: Optional[Callable] = None,
         chunk_size: int = 10000,
-    ) -> Tuple[ChemicalDataset, ChemicalDataset, ChemicalDataset]:
-        """Create and split chemical datasets."""
+    ) -> Tuple[MolecularDataset, MolecularDataset, MolecularDataset]:
+        """Create and split molecular datasets."""
         return DatasetFactory.create_and_split_datasets(
             gctx_loader=gctx_loader,
-            dataset_type="chemical",
+            dataset_type="molecular",
             feature_space="landmark", 
             nrows=nrows,
             test_size=test_size,

@@ -7,7 +7,7 @@ paths:
   checkpoint_dir: "models/saved/checkpoints"
 
 data:
-  gctx_file: "data/processed/LINCS_small.gctx"
+  gctx_file: "data/processed/LINCS_CTRP_matched.gctx"
   geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
   siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
   curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
@@ -41,7 +41,7 @@ training:
   val_size: 0.1
   random_state: 42
   group_by: "cell_mfc_name"
-  stratify_by: "viability"
+  stratify_by: "viability_clipped"
   lr_scheduler:
     type: "step" 
     warmup_epochs: 5
