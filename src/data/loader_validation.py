@@ -253,7 +253,7 @@ class DatasetComparator:
 def main():
     """Main function to run validation."""
     # File paths
-    lincs_file = "./data/processed/LINCS_CTRP_matched.gctx"
+    lincs_file = "./data/processed/LINCS_CTRP_QC.gctx"
     mixseq_file = "./data/processed/MixSeq.gctx"
     
     # Validate individual datasets

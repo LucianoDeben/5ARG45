@@ -41,6 +41,10 @@ class MultimodalDrugDataset(Dataset):
         self.metadata = metadata
         self.transform_transcriptomics = transform_transcriptomics
         self.transform_molecular = transform_molecular
+        
+        self.viability = self.metadata["viability_clipped"].values
+        self.smiles = self.metadata["canonical_smiles"].values
+        self.dosage = self.metadata["pert_dose_log2"].values
 
     def __len__(self) -> int:
         return len(self.metadata)
@@ -54,32 +58,25 @@ class MultimodalDrugDataset(Dataset):
             transcriptomics = self.transform_transcriptomics(transcriptomics)
 
         # Get molecular data
-        row = self.metadata.iloc[idx]
-        smiles = row["canonical_smiles"]
-        dosage = torch.tensor(row["pert_dose_log2"], dtype=torch.float32)
+        smiles = self.smiles[idx]
+        dosage = torch.tensor(self.dosage[idx], dtype=torch.float32)
 
-        # molecular = None
-        # if self.transform_molecular:
-        #     mol_input = {"smiles": [smiles], "dosage": [dosage]}
-        #     molecular = self.transform_molecular(mol_input)
-        #     # Ensure we get the first element if transform returns a batch
-        #     if isinstance(molecular, list) and len(molecular) > 0:
-        #         molecular = molecular[0]
-        #     molecular = torch.from_numpy(molecular) if not isinstance(molecular, torch.Tensor) else molecular
-        
         molecular = None
         if self.transform_molecular:
-            mol_input = {"smiles": [smiles], "dosage": [dosage]}
-            molecular = self.transform_molecular(mol_input)[0]
-            molecular = torch.from_numpy(molecular)
-
-        viability = torch.tensor(row["viability_clipped"], dtype=torch.float32)
-
+            try:
+                mol_input = {"smiles": [smiles], "dosage": [dosage]}
+                molecular = self.transform_molecular(mol_input)
+                if isinstance(molecular, list) and len(molecular) > 0:
+                    molecular = molecular[0]
+                molecular = torch.from_numpy(molecular) if isinstance(molecular, np.ndarray) else molecular
+            except Exception as e:
+                logger.error(f"Error transforming molecular data: {e}")
+        
         return {
             "transcriptomics": transcriptomics,
             "molecular": molecular,
             "dosage": dosage,
-            "viability": viability,
+            "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
         }
 
 
@@ -107,12 +104,19 @@ class TranscriptomicsDataset(Dataset):
     def __len__(self) -> int:
         return len(self.transcriptomics_data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = torch.tensor(self.transcriptomics_data[idx], dtype=torch.float32)
-        y = torch.tensor(self.viability[idx], dtype=torch.float32)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        # Get transcriptomics data
+        transcriptomics = torch.tensor(
+            self.transcriptomics_data[idx], dtype=torch.float32
+        )
         if self.transform_transcriptomics:
-            x = self.transform_transcriptomics(x)
-        return x, y
+            transcriptomics = self.transform_transcriptomics(transcriptomics)
+
+        return {
+            "transcriptomics": transcriptomics,
+            "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
+        }
 
 
 class MolecularDataset(Dataset):
@@ -142,17 +146,25 @@ class MolecularDataset(Dataset):
     def __len__(self) -> int:
         return len(self.smiles)
 
-    #TODO: Optimal to never have SMILES strings in the dataset, but rather the processed molecular data, check if this can be enforced
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        # Convert SMILES to a tensor or representation immediately
+        # Get molecular data
         smiles = self.smiles[idx]
+        dosage = self.dosage[idx]
+        
         molecular = None
         if self.transform_molecular:
-            molecular = self.transform_molecular(smiles)
+            try:
+                mol_input = {"smiles": [smiles], "dosage": [torch.tensor(dosage, dtype=torch.float32)]}
+                molecular = self.transform_molecular(mol_input)
+                if isinstance(molecular, list) and len(molecular) > 0:
+                    molecular = molecular[0]
+                molecular = torch.from_numpy(molecular) if isinstance(molecular, np.ndarray) else molecular
+            except Exception as e:
+                logger.error(f"Error transforming molecular data: {e}")
         
         return {
             "molecular": molecular,
-            "dosage": torch.tensor(self.dosage[idx], dtype=torch.float32),
+            "dosage": torch.tensor(dosage, dtype=torch.float32),
             "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
         }
 
@@ -768,7 +780,7 @@ class DatasetFactory:
         random_state: int = 42,
         group_by: Optional[str] = None,
         stratify_by: Optional[str] = None,
-        transform: Optional[Callable] = None,
+        transform_transcriptomics: Optional[Callable] = None,
         chunk_size: int = 10000,
     ) -> Tuple[TranscriptomicsDataset, TranscriptomicsDataset, TranscriptomicsDataset]:
         """Create and split transcriptomics datasets."""
@@ -782,7 +794,7 @@ class DatasetFactory:
             random_state=random_state,
             group_by=group_by,
             stratify_by=stratify_by,
-            transform=transform,
+            transform_transcriptomics=transform_transcriptomics,
             chunk_size=chunk_size,
         )
 
@@ -795,7 +807,7 @@ class DatasetFactory:
         random_state: int = 42,
         group_by: Optional[str] = None,
         stratify_by: Optional[str] = None,
-        transform: Optional[Callable] = None,
+        transform_molecular: Optional[Callable] = None,
         chunk_size: int = 10000,
     ) -> Tuple[MolecularDataset, MolecularDataset, MolecularDataset]:
         """Create and split molecular datasets."""
@@ -809,6 +821,6 @@ class DatasetFactory:
             random_state=random_state,
             group_by=group_by,
             stratify_by=stratify_by,
-            transform=transform,
+            transform_molecular=transform_molecular,
             chunk_size=chunk_size,
         )

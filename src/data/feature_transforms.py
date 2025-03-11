@@ -47,91 +47,6 @@ class BasicSmilesDescriptorTransform:
 
         return np.hstack([features, dosage])
 
-    def __call__(self, mol_input: Union[Dict, List[str]]) -> np.ndarray:
-        """
-        Convert SMILES to simple numerical descriptors without RDKit parsing.
-
-        Args:
-            mol_input: Dictionary with 'smiles' key or list of SMILES strings
-
-        Returns:
-            Array of numerical descriptors
-        """
-        smiles_list = mol_input["smiles"] if isinstance(mol_input, dict) else mol_input
-        dosage = (
-            np.array(mol_input["dosage"]).reshape(-1, 1)
-            if isinstance(mol_input, dict) and "dosage" in mol_input
-            else np.zeros((len(smiles_list), 1))
-        )
-
-        # Initialize output features
-        features = np.zeros((len(smiles_list), self.output_dim - 1), dtype=np.float32)
-        valid_mask = np.zeros(len(smiles_list), dtype=bool)
-
-        for i, smiles in enumerate(smiles_list):
-            # Basic validation
-            if not self.validate_smiles(smiles):
-                logger.warning(f"Invalid SMILES at index {i}: {smiles}")
-                continue
-
-            # Extract simple character-based features
-            valid_mask[i] = True
-
-            # Only compute features for valid SMILES
-            try:
-                # These are basic statistical features that don't require parsing
-                features[i, 0] = len(smiles)  # Length
-                features[i, 1] = smiles.count("C")  # Carbon count
-                features[i, 2] = smiles.count("N")  # Nitrogen count
-                features[i, 3] = smiles.count("O")  # Oxygen count
-                features[i, 4] = (
-                    smiles.count("F")
-                    + smiles.count("Cl")
-                    + smiles.count("Br")
-                    + smiles.count("I")
-                )  # Halogens
-                features[i, 5] = smiles.count("S") + smiles.count("P")  # S and P count
-                features[i, 6] = smiles.count("[")  # Special atoms
-                features[i, 7] = smiles.count("(")  # Branching
-                features[i, 8] = smiles.count("=")  # Double bonds
-                features[i, 9] = smiles.count("#")  # Triple bonds
-                features[i, 10] = smiles.count("@")  # Chirality
-
-                # Ring counts
-                for j in range(1, 10):
-                    idx = 10 + j
-                    if idx < self.output_dim - 1:
-                        features[i, idx] = smiles.count(str(j))
-
-                # Aromatic characters
-                aromatic_count = sum(smiles.count(c) for c in ["c", "n", "o", "s", "p"])
-                if 10 + 10 < self.output_dim - 1:
-                    features[i, 10 + 10] = aromatic_count
-
-                # Fill the rest with additional features or zeros
-                for j in range(10 + 11, self.output_dim - 1):
-                    if j < self.output_dim - 1:
-                        features[i, j] = 0.0
-
-            except Exception as e:
-                logger.warning(
-                    f"Error extracting features for SMILES {smiles}: {e}"
-                )
-                valid_mask[i] = False
-
-        # Return only valid data
-        if np.any(valid_mask):
-            result = np.hstack([features[valid_mask], dosage[valid_mask]])
-            logger.info(
-                f"Processed {np.sum(valid_mask)}/{len(smiles_list)} valid SMILES strings"
-            )
-            return result
-        else:
-            logger.error("No valid SMILES found in batch")
-            # Return at least one row of zeros to prevent shape errors
-            return np.zeros((1, self.output_dim), dtype=np.float32)
-
-
 class MorganFingerprintTransform:
     """Generate Morgan/ECFP fingerprints from SMILES using recommended RDKit API."""
 
@@ -194,10 +109,10 @@ class MorganFingerprintTransform:
                     f"Error processing SMILES at index {i} ({smiles}): {str(e)}"
                 )
                 continue
-
+            
         if not valid_indices:
-            logger.error("No valid SMILES found in batch, returning empty arrays")
-            return np.zeros((0, self.size + 1), dtype=np.float32)
+            logger.error("No valid SMILES found in batch, returning zeros")
+            return np.zeros((1, self.size + 1), dtype=np.float32) 
 
         valid_indices = np.array(valid_indices)
         return np.hstack([fingerprints[valid_indices], dosage[valid_indices]])
