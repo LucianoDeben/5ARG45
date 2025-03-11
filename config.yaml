@@ -7,7 +7,8 @@ paths:
   checkpoint_dir: "models/saved/checkpoints"
 
 data:
-  gctx_file: "data/processed/LINCS_CTRP_53068.gctx"
+  lincs_file: "data/processed/LINCS_CTRP_QC.gctx"
+  mixseq_file: "data/processed/MixSeq.gctx"
   geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
   siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
   curves_post_qc: "data/raw/CTRP/v20.data.curves_post_qc.txt"
@@ -25,7 +26,7 @@ data:
   random_seed: 42
   cache_data: true
   use_multiprocessing: true
-  num_workers: 0
+  num_workers: 4
   imputation_strategy: "mean"
   handle_outliers: false
   outlier_threshold: 3.0
