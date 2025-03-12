@@ -7,7 +7,7 @@ paths:
   checkpoint_dir: "models/saved/checkpoints"
 
 data:
-  lincs_file: "data/processed/LINCS_CTRP_QC.gctx"
+  lincs_file: "data/processed/LINCS_small_updated.gctx"
   mixseq_file: "data/processed/MixSeq.gctx"
   geneinfo_file: "data/raw/LINCS/geneinfo_beta.txt"
   siginfo_file: "data/raw/LINCS/siginfo_beta.txt"
@@ -34,7 +34,7 @@ data:
 training:
   batch_size: 128
   epochs: 10
-  num_runs: 5
+  num_runs: 3
   learning_rate: 0.001
   optimizer: "adam" 
   loss: "mse"
