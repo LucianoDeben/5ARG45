@@ -71,19 +71,19 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
     if "${RUN_NAME:-" in run_name:
         run_name = f"{model_prefix}_run_{timestamp}"
     
-    # Create datasets
-    logger.info("Creating LINCS dataset for training...")
-    train_ds, val_ds, test_ds = DatasetFactory.create_and_split_transcriptomics(
-        gctx_loader=lincs_loader,
-        feature_space=config["data"]["feature_space"],
-        nrows=config["data"]["nrows"],
-        test_size=config["training"]["test_size"],
-        val_size=config["training"]["val_size"],
-        random_state=config["training"]["random_state"],
-        chunk_size=config["data"]["chunk_size"],
-        group_by=config["training"]["group_by"],
-        stratify_by=config["training"]["stratify_by"],
-    )
+    # # Create datasets
+    # logger.info("Creating LINCS dataset for training...")
+    # train_ds, val_ds, test_ds = DatasetFactory.create_and_split_transcriptomics(
+    #     gctx_loader=lincs_loader,
+    #     feature_space=config["data"]["feature_space"],
+    #     nrows=config["data"]["nrows"],
+    #     test_size=config["training"]["test_size"],
+    #     val_size=config["training"]["val_size"],
+    #     random_state=config["training"]["random_state"],
+    #     chunk_size=config["data"]["chunk_size"],
+    #     group_by=config["training"]["group_by"],
+    #     stratify_by=config["training"]["stratify_by"],
+    # )
     
     logger.info("Creating MixSeq dataset for external testing...")
     _, _, test_ds_mixseq = DatasetFactory.create_and_split_transcriptomics(
@@ -99,23 +99,27 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
     )
     
     # Create DataLoaders
-    dataloader_kwargs = {
-        "batch_size": config["training"]["batch_size"],
-        "num_workers": config["data"]["num_workers"],
-        "shuffle": True,
-    }
-    train_loader = torch.utils.data.DataLoader(train_ds, **dataloader_kwargs)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
+    # train_loader = torch.utils.data.DataLoader(train_ds, **dataloader_kwargs)
+    # val_loader = torch.utils.data.DataLoader(val_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
+    # test_loader = torch.utils.data.DataLoader(test_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
     mixseq_loader_dl = torch.utils.data.DataLoader(test_ds_mixseq, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
+    
+    dataset_kwargs = {
+        "feature_space": config["data"]["feature_space"],
+        "nrows": config["data"]["nrows"],
+        "test_size": config["training"]["test_size"],
+        "val_size": config["training"]["val_size"],
+        "chunk_size": config["data"]["chunk_size"],
+        "group_by": config["training"]["group_by"],
+        "stratify_by": config["training"]["stratify_by"],
+    } 
     
     # Set up MultiRunTrainer with pre-created dataloaders
     trainer = MultiRunTrainer(
         module_class=DrugResponseModule,  # Updated to use base module
         module_kwargs=module_kwargs,
-        train_dataloader=train_loader,
-        val_dataloader=val_loader,
-        test_dataloader=test_loader,
+        gctx_loader=lincs_loader,
+        dataset_kwargs=dataset_kwargs,
         num_runs=config["training"]["num_runs"],
         max_epochs=config["training"]["epochs"],
         patience=config["training"]["patience"],
@@ -151,7 +155,6 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         "model_type": model_type,
         "results": results,
         "experiment_dir": trainer.experiment_dir,
-        "train_loader": train_loader,  # For uncertainty estimation in RidgeRegression
     }
 
 def compare_models(model_results, output_dir):

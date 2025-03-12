@@ -357,40 +357,46 @@ class MultiRunTrainer:
             else:
                 logger.warning("No best model checkpoint found, using current model state")
                 self.best_models.append(model)
+                
+            # Test model on internal test set for this run
+            logger.info(f"Testing model for run {run_id} on internal test set")
+            test_results = trainer.test(self.best_models[-1], dataloaders=test_loader)[0]
+            self.run_results.append(test_results)
             
-        # Test model on internal test set
-        logger.info(f"Testing model on internal test set")
-        test_results = trainer.test(self.best_models[-1], dataloaders=test_loader)[0]
-        self.run_results.append(test_results)
+            # Test on external test sets
+            for name, ext_loader in self.external_test_loaders.items():
+                logger.info(f"Testing model for run {run_id} on external test set: {name}")
+                ext_results = trainer.test(self.best_models[-1], dataloaders=ext_loader)[0]
+                self.external_test_results[name].append(ext_results)
 
-        # Store predictions and targets for visualization
-        if hasattr(self.best_models[-1], 'test_predictions') and hasattr(self.best_models[-1], 'test_targets'):
-            self.test_predictions.append(self.best_models[-1].test_predictions)
-            self.test_targets.append(self.best_models[-1].test_targets)
-            # Generate run-specific visualizations
-            self._generate_run_visualizations(run_id)
-        else:
-            # Try to extract from test_step_outputs if they exist
-            logger.info("Attempting to extract predictions from test results")
-            try:
-                # Get the test_step_outputs directly from the test results if available
-                if hasattr(self.best_models[-1], 'test_step_outputs') and self.best_models[-1].test_step_outputs:
-                    preds = torch.cat([x["preds"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
-                    targets = torch.cat([x["targets"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
-                    
-                    # Store for visualization
-                    self.test_predictions.append(preds)
-                    self.test_targets.append(targets)
-                    
-                    # Generate visualizations
-                    self._generate_run_visualizations(run_id)
-                else:
-                    logger.warning(f"Could not find predictions for run {run_id}, skipping visualizations")
-            except Exception as e:
-                logger.error(f"Error extracting predictions: {e}")
-            
-            # Add results to aggregated results
-            aggregated_results["runs"].append(test_results if test_loader else {})
+            # Store predictions and targets for visualization
+            if hasattr(self.best_models[-1], 'test_predictions') and hasattr(self.best_models[-1], 'test_targets'):
+                self.test_predictions.append(self.best_models[-1].test_predictions)
+                self.test_targets.append(self.best_models[-1].test_targets)
+                # Generate run-specific visualizations
+                self._generate_run_visualizations(run_id)
+            else:
+                # Try to extract from test_step_outputs if they exist
+                logger.info("Attempting to extract predictions from test results")
+                try:
+                    # Get the test_step_outputs directly from the test results if available
+                    if hasattr(self.best_models[-1], 'test_step_outputs') and self.best_models[-1].test_step_outputs:
+                        preds = torch.cat([x["preds"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
+                        targets = torch.cat([x["targets"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
+                        
+                        # Store for visualization
+                        self.test_predictions.append(preds)
+                        self.test_targets.append(targets)
+                        
+                        # Generate visualizations
+                        self._generate_run_visualizations(run_id)
+                    else:
+                        logger.warning(f"Could not find predictions for run {run_id}, skipping visualizations")
+                except Exception as e:
+                    logger.error(f"Error extracting predictions: {e}")
+                
+                # Add results to aggregated results
+                aggregated_results["runs"].append(test_results if test_loader else {})
         
         # Calculate aggregate statistics
         self._calculate_aggregate_statistics(aggregated_results)
