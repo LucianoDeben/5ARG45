@@ -358,26 +358,36 @@ class MultiRunTrainer:
                 logger.warning("No best model checkpoint found, using current model state")
                 self.best_models.append(model)
             
-            # Test model on internal test set
-            if test_loader:
-                logger.info(f"Testing model on internal test set")
-                test_results = trainer.test(self.best_models[-1], dataloaders=test_loader)[0]
-                self.run_results.append(test_results)
-                
-                # Store predictions and targets for visualization if they exist
-                if hasattr(self.best_models[-1], 'test_predictions') and hasattr(self.best_models[-1], 'test_targets'):
-                    self.test_predictions.append(self.best_models[-1].test_predictions)
-                    self.test_targets.append(self.best_models[-1].test_targets)
-            
-            # Test on external test sets if provided
-            for name, ext_test_loader in self.external_test_loaders.items():
-                logger.info(f"Testing model on external test set: {name}")
-                ext_results = trainer.test(self.best_models[-1], dataloaders=ext_test_loader)[0]
-                self.external_test_results[name].append(ext_results)
-            
-            # Generate run-specific visualizations if we have predictions
-            if hasattr(self.best_models[-1], 'test_predictions') and hasattr(self.best_models[-1], 'test_targets'):
-                self._generate_run_visualizations(run_id)
+        # Test model on internal test set
+        logger.info(f"Testing model on internal test set")
+        test_results = trainer.test(self.best_models[-1], dataloaders=test_loader)[0]
+        self.run_results.append(test_results)
+
+        # Store predictions and targets for visualization
+        if hasattr(self.best_models[-1], 'test_predictions') and hasattr(self.best_models[-1], 'test_targets'):
+            self.test_predictions.append(self.best_models[-1].test_predictions)
+            self.test_targets.append(self.best_models[-1].test_targets)
+            # Generate run-specific visualizations
+            self._generate_run_visualizations(run_id)
+        else:
+            # Try to extract from test_step_outputs if they exist
+            logger.info("Attempting to extract predictions from test results")
+            try:
+                # Get the test_step_outputs directly from the test results if available
+                if hasattr(self.best_models[-1], 'test_step_outputs') and self.best_models[-1].test_step_outputs:
+                    preds = torch.cat([x["preds"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
+                    targets = torch.cat([x["targets"] for x in self.best_models[-1].test_step_outputs]).cpu().numpy()
+                    
+                    # Store for visualization
+                    self.test_predictions.append(preds)
+                    self.test_targets.append(targets)
+                    
+                    # Generate visualizations
+                    self._generate_run_visualizations(run_id)
+                else:
+                    logger.warning(f"Could not find predictions for run {run_id}, skipping visualizations")
+            except Exception as e:
+                logger.error(f"Error extracting predictions: {e}")
             
             # Add results to aggregated results
             aggregated_results["runs"].append(test_results if test_loader else {})
@@ -435,7 +445,7 @@ class MultiRunTrainer:
                 aggregated_results["min"][metric_name] = float(values_array.min())
                 aggregated_results["max"][metric_name] = float(values_array.max())
     
-# Helper methods for individual visualizations (per-run)
+    # Helper methods for individual visualizations (per-run)
     def _plot_run_predictions(self, run_id: int, y_true: np.ndarray, y_pred: np.ndarray, title: str, output_path: str) -> None:
         """Plot predictions vs targets for a specific run."""
         self._plot_predictions(y_true, y_pred, title, output_path)
@@ -487,27 +497,6 @@ class MultiRunTrainer:
         plt.tight_layout()
         plt.savefig(os.path.join(run_dir, "error_distribution.png"))
         plt.close()
-
-    def _plot_feature_importance(self, run_id: int, run_dir: str) -> None:
-        """Plot feature importance for a specific run."""
-        if hasattr(self.best_models[-1], 'compute_feature_importance'):
-            importance_dict = self.best_models[-1].compute_feature_importance(dataloader=self.test_dataloader, subset_size=100)
-            if importance_dict:
-                plt.figure(figsize=(12, 6))
-                for modality, importances in importance_dict.items():
-                    if importances:
-                        top_n = 20
-                        importances = dict(sorted(importances.items(), key=lambda x: x[1], reverse=True)[:top_n])
-                        plt.bar(importances.keys(), importances.values(), alpha=0.7, label=modality.capitalize())
-                plt.xlabel("Feature")
-                plt.ylabel("Normalized Importance")
-                plt.title(f"Run {run_id} Feature Importance (Top 20)")
-                plt.xticks(rotation=45)
-                plt.legend()
-                plt.grid(alpha=0.3)
-                plt.tight_layout()
-                plt.savefig(os.path.join(run_dir, "feature_importance.png"))
-                plt.close()
 
     # Helper methods for individual visualizations (aggregated)
     def _plot_boxplot(self) -> None:
@@ -654,9 +643,6 @@ class MultiRunTrainer:
         if "error_distribution" in self.visualizations_to_generate and has_preds:
             self._plot_error_distribution(run_id, run_dir, self.test_targets[-1], self.test_predictions[-1])
 
-        if "feature_importance" in self.visualizations_to_generate:
-            self._plot_feature_importance(run_id, run_dir)
-
     def _generate_final_visualizations(self) -> None:
         """Generate final visualizations aggregating all runs based on user selection."""
         has_preds = self.test_predictions and self.test_targets
@@ -672,10 +658,6 @@ class MultiRunTrainer:
 
         if "calibration" in self.visualizations_to_generate and has_preds:
             self._plot_calibration()
-
-        if "prediction_intervals" in self.visualizations_to_generate and has_preds:
-            self._plot_prediction_intervals()
-            
     
     def _plot_predictions(self, y_true, y_pred, title, output_path):
         """Plot true vs predicted values and save the figure."""

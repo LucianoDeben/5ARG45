@@ -21,7 +21,7 @@ data:
   max_workers: null
   chunk_size: 10000
   feature_space: "landmark"
-  nrows: null
+  nrows: 1000
   normalize: "none"
   random_seed: 42
   cache_data: true

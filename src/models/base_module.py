@@ -3,8 +3,10 @@ import torch
 import pytorch_lightning as pl
 import torchmetrics
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
-from captum.attr import IntegratedGradients
+from typing import Dict, Any, Optional, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DrugResponseModule(pl.LightningModule):
     def __init__(
@@ -44,7 +46,11 @@ class DrugResponseModule(pl.LightningModule):
         self.validation_step_outputs = []
         self.test_step_outputs = []
         
-        # Store feature names for interpretability
+        # Explicitly initialize attributes that will be set later
+        self.test_predictions = None
+        self.test_targets = None
+        
+        # Store feature names for future use
         self.transcriptomics_feature_names = transcriptomics_feature_names or []
         self.chemical_feature_names = chemical_feature_names or []
         
@@ -122,83 +128,75 @@ class DrugResponseModule(pl.LightningModule):
         self.validation_step_outputs.append(output)
         return output
     
-    def predict_with_uncertainty(self, inputs, n_samples: int = 10) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Perform Monte Carlo Dropout to estimate prediction uncertainty.
-        
-        Args:
-            inputs: Input data (dict or tensor).
-            n_samples: Number of Monte Carlo samples.
-        
-        Returns:
-            Tuple of (mean predictions, standard deviation of predictions).
-        """
-        if hasattr(self, 'uncertainty_method') and self.uncertainty_method == "ridge":
-            # For Ridge regression, use the training data for uncertainty estimation
-            return self.model.predict_with_uncertainty(inputs, X_train=self.cached_training_data)
-        else:
-            self.train()  # Enable dropout during inference
-            preds = []
-            for _ in range(n_samples):
-                with torch.no_grad():
-                    pred = self(inputs)
-                preds.append(pred)
-            preds = torch.stack(preds)
-            mean_preds = preds.mean(dim=0)
-            std_preds = preds.std(dim=0)
-            self.eval()  # Return to evaluation mode
-            return mean_preds, std_preds
-    
     def test_step(self, batch, batch_idx):
-            # Process batch to get inputs and targets
-            inputs, targets = self._process_batch(batch)
-            
-            # Perform prediction with uncertainty
-            mean_preds, std_preds = self.predict_with_uncertainty(inputs)
-            loss = self.criterion(mean_preds, targets)
-            
-            # Log loss
-            self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-            
-            # Update metrics
-            metric_outputs = self.test_metrics(mean_preds, targets)
-            self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True)
-            
-            # Store outputs, targets, and uncertainties for later analysis
-            return {
-                "loss": loss,
-                "preds": mean_preds.detach(),
-                "targets": targets.detach(),
-                "uncertainties": std_preds.detach()
-            }
+        # Process batch to get inputs and targets
+        inputs, targets = self._process_batch(batch)
+        
+        # Forward pass
+        outputs = self(inputs)
+        loss = self.criterion(outputs, targets)
+        
+        # Log loss
+        self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Update metrics
+        metric_outputs = self.test_metrics(outputs, targets)
+        self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True)
+        
+        # Store outputs and targets for later analysis
+        self.test_step_outputs.append({
+            "loss": loss,
+            "preds": outputs.detach(),
+            "targets": targets.detach()
+        })
+        
+        return {
+            "loss": loss,
+            "preds": outputs.detach(),
+            "targets": targets.detach()
+        }
     
     def on_train_epoch_end(self):
         # Store predictions for visualization if needed
         if self.training_step_outputs:
-            preds = torch.cat([x["preds"] for x in self.training_step_outputs])
-            targets = torch.cat([x["targets"] for x in self.training_step_outputs])
-            self.train_predictions = preds.cpu().numpy().flatten()
-            self.train_targets = targets.cpu().numpy().flatten()
-            self.training_step_outputs.clear()  # Free memory
+            try:
+                preds = torch.cat([x["preds"] for x in self.training_step_outputs])
+                targets = torch.cat([x["targets"] for x in self.training_step_outputs])
+                self.train_predictions = preds.cpu().numpy().flatten()
+                self.train_targets = targets.cpu().numpy().flatten()
+            except Exception as e:
+                logger.warning(f"Error processing training outputs: {e}")
+            finally:
+                self.training_step_outputs.clear()  # Free memory
     
     def on_validation_epoch_end(self):
         # Store predictions for visualization if needed
         if self.validation_step_outputs:
-            preds = torch.cat([x["preds"] for x in self.validation_step_outputs])
-            targets = torch.cat([x["targets"] for x in self.validation_step_outputs])
-            self.val_predictions = preds.cpu().numpy().flatten()
-            self.val_targets = targets.cpu().numpy().flatten()
-            self.validation_step_outputs.clear()  # Free memory
+            try:
+                preds = torch.cat([x["preds"] for x in self.validation_step_outputs])
+                targets = torch.cat([x["targets"] for x in self.validation_step_outputs])
+                self.val_predictions = preds.cpu().numpy().flatten()
+                self.val_targets = targets.cpu().numpy().flatten()
+            except Exception as e:
+                logger.warning(f"Error processing validation outputs: {e}")
+            finally:
+                self.validation_step_outputs.clear()  # Free memory
     
     def on_test_epoch_end(self):
-            # Store predictions, targets, and uncertainties for visualization
-            if self.test_step_outputs:
+        # Store predictions and targets for visualization
+        if self.test_step_outputs:
+            try:
                 preds = torch.cat([x["preds"] for x in self.test_step_outputs])
                 targets = torch.cat([x["targets"] for x in self.test_step_outputs])
-                uncertainties = torch.cat([x["uncertainties"] for x in self.test_step_outputs])
+                
+                # Store as numpy arrays on the module itself
                 self.test_predictions = preds.cpu().numpy().flatten()
                 self.test_targets = targets.cpu().numpy().flatten()
-                self.test_uncertainties = uncertainties.cpu().numpy().flatten()
+                
+                logger.info(f"Test results stored: {len(self.test_predictions)} predictions")
+            except Exception as e:
+                logger.error(f"Error processing test outputs: {e}")
+            finally:
                 self.test_step_outputs.clear()  # Free memory
     
     def configure_optimizers(self):
@@ -245,75 +243,3 @@ class DrugResponseModule(pl.LightningModule):
             "lr_scheduler": scheduler,
             "monitor": "val_loss"
         }
-    
-    def compute_feature_importance(self, dataloader: torch.utils.data.DataLoader, n_steps: int = 50) -> Dict[str, Dict[str, float]]:
-        """
-        Compute feature importance using Captum's Integrated Gradients.
-        
-        Args:
-            dataloader: DataLoader containing test data.
-            n_steps: Number of steps for integrated gradients approximation.
-        
-        Returns:
-            Dict mapping modality ('transcriptomics', 'chemical') to feature importance dicts.
-        """
-        self.eval()  # Set model to evaluation mode
-        ig = IntegratedGradients(self)
-
-        feature_importance = {
-            "transcriptomics": {},
-            "chemical": {}
-        }
-
-        # Process one batch for simplicity (can extend to multiple batches)
-        batch = next(iter(dataloader))
-        inputs, targets = self._process_batch(batch)
-
-        # Ensure inputs are on the correct device and require gradients
-        if isinstance(inputs, dict):
-            # Handle multimodal inputs
-            baselines = {}
-            for modality in inputs:
-                if modality in ["transcriptomics", "chemical"]:
-                    inputs[modality] = inputs[modality].to(self.device).requires_grad_(True)
-                    # Use zero baseline (common for biological and chemical data)
-                    baselines[modality] = torch.zeros_like(inputs[modality]).to(self.device)
-        else:
-            raise ValueError("Feature importance computation requires dict inputs with 'transcriptomics' and/or 'chemical' keys")
-
-        # Compute attributions using Integrated Gradients
-        if "transcriptomics" in inputs:
-            attributions = ig.attribute(
-                inputs["transcriptomics"],
-                baselines=baselines["transcriptomics"],
-                target=0,  # For regression, attribute to the output scalar
-                n_steps=n_steps,
-                additional_forward_args=(inputs["chemical"] if "chemical" in inputs else None)
-            )
-            # Average attributions across samples and normalize
-            attr_mean = attributions.abs().mean(dim=0).cpu().numpy()
-            attr_sum = attr_mean.sum()
-            if attr_sum > 0:
-                attr_mean /= attr_sum  # Normalize to sum to 1
-            # Map to feature names if provided, otherwise use indices
-            feature_names = self.transcriptomics_feature_names if self.transcriptomics_feature_names else [f"feat_{i}" for i in range(len(attr_mean))]
-            feature_importance["transcriptomics"] = dict(zip(feature_names, attr_mean))
-
-        if "chemical" in inputs:
-            attributions = ig.attribute(
-                inputs["chemical"],
-                baselines=baselines["chemical"],
-                target=0,  # For regression, attribute to the output scalar
-                n_steps=n_steps,
-                additional_forward_args=(inputs["transcriptomics"] if "transcriptomics" in inputs else None)
-            )
-            # Average attributions across samples and normalize
-            attr_mean = attributions.abs().mean(dim=0).cpu().numpy()
-            attr_sum = attr_mean.sum()
-            if attr_sum > 0:
-                attr_mean /= attr_sum  # Normalize to sum to 1
-            # Map to feature names if provided, otherwise use indices
-            feature_names = self.chemical_feature_names if self.chemical_feature_names else [f"feat_{i}" for i in range(len(attr_mean))]
-            feature_importance["chemical"] = dict(zip(feature_names, attr_mean))
-
-        return feature_importance

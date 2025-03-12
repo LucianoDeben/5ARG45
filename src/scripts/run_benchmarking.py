@@ -22,14 +22,15 @@ from src.models.base_module import DrugResponseModule  # Updated to use base mod
 from src.models.unimodal.flexible_fcnn import FlexibleFCNN
 from src.models.unimodal.ridge_regression import RidgeRegression
 
+logger = logging.getLogger(__name__)
+
 def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir):
     """Run training for a specific model type and return results."""
-    logger = logging.getLogger(__name__)
     
     # Get the input dimension and feature names from config or data
     input_dim = config["model"]["transcriptomics_input_dim"]
     #TODO: Allow for feature extraction by adding it to the datasets itself!
-    # feature_names = config.get("data", {}).get("feature_names", [f"feat_{i}" for i in range(input_dim)])
+    feature_names = config.get("data", {}).get("feature_names", [f"feat_{i}" for i in range(input_dim)])
     logger.info(f"Creating {model_type.upper()} model with input dimension: {input_dim}")
 
     # Create model based on model_type
@@ -43,14 +44,14 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
             residual=False,
             norm_type="batchnorm" if config["model"]["use_batch_norm"] else "none",
             weight_init="kaiming",
-            # feature_names=feature_names,
+            feature_names=feature_names,
         )
     elif model_type.lower() == "ridge":
         model = RidgeRegression(
             input_dim=input_dim,
             output_dim=1,
             alpha=config["model"].get("alpha", 1.0),  # Allow alpha from config
-            # feature_names=feature_names,
+            feature_names=feature_names,
         )
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
@@ -62,9 +63,6 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         "weight_decay": config["training"]["weight_decay"] if model_type.lower() != "ridge" else 0.0,
         "grad_clip": config["training"]["max_grad_norm"] if config["training"]["clip_grad_norm"] else None,
     }
-    
-    if model_type.lower() == "ridge":
-        module_kwargs["uncertainty_method"] = "ridge" 
     
     # Create timestamp and run name for experiment
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -126,11 +124,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         base_seed=config["training"]["random_state"],
         gpu_if_available=(config["inference"]["device"] == "cuda"),
         external_test_loaders={"mixseq": mixseq_loader_dl},
-        visualizations_to_generate=[
-    "predictions", "learning_curves", "residual", "error_distribution", 
-    "feature_importance", "boxplot", "violinplot", "calibration", 
-    "prediction_intervals"
-]
+        visualizations_to_generate=["predictions", "boxplot", "feature_importance", "prediction_intervals"],  # Selective visualizations
     )
     
     # Run training
@@ -162,7 +156,6 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
 
 def compare_models(model_results, output_dir):
     """Generate comparison visualizations and reports for multiple models."""
-    logger = logging.getLogger(__name__)
     logger.info("Generating model comparison...")
     
     # Create comparison directory
@@ -273,7 +266,7 @@ def compare_models(model_results, output_dir):
 
 def main(config_path=None, models_to_run=None):
     """Run benchmarking experiments for specified models."""
-    logger = setup_logging()
+    # logger = setup_logging()
     
     # Load configuration
     config = yaml.safe_load(open(config_path, 'r')) if config_path and os.path.exists(config_path) else get_default_config()
