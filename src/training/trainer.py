@@ -54,8 +54,10 @@ class MultiRunTrainer:
         experiment_name: str = "drug_response",
         base_seed: int = 42,
         gpu_if_available: bool = True,
+        gradient_accumulation_steps: int = 1,
         custom_callbacks: Optional[List[pl.Callback]] = None,
         external_test_loaders: Optional[Dict[str, DataLoader]] = None,
+        visualizations_to_generate: Optional[List[str]] = None,
     ):
         """
         Initialize the MultiRunTrainer.
@@ -88,6 +90,7 @@ class MultiRunTrainer:
             gpu_if_available: Whether to use GPU if available
             custom_callbacks: Additional Lightning callbacks
             external_test_loaders: Additional named test loaders for evaluation
+            visualizations_to_generate: List of visualizations to generate
         """
         self.module_class = module_class
         self.module_kwargs = module_kwargs
@@ -120,8 +123,15 @@ class MultiRunTrainer:
         self.patience = patience
         self.base_seed = base_seed
         self.gpu_if_available = gpu_if_available
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.custom_callbacks = custom_callbacks or []
         self.external_test_loaders = external_test_loaders or {}
+        
+        # Visualization parameters
+        self.visualizations_to_generate = visualizations_to_generate or [
+            "predictions", "learning_curves", "residual", "error_distribution", "feature_importance",
+            "boxplot", "violinplot", "calibration", "prediction_intervals"
+        ]
         
         # Set experiment output directory with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,13 +227,60 @@ class MultiRunTrainer:
             callbacks=callbacks,
             logger=[tb_logger, csv_logger],
             accelerator="gpu" if torch.cuda.is_available() and self.gpu_if_available else "cpu",
-            devices=1,
+            devices="auto" if torch.cuda.is_available() and self.gpu_if_available else 1,  # Use all available GPUs
+            strategy="ddp" if torch.cuda.device_count() > 1 else "auto",  # Add DDP strategy for multi-GPU
             log_every_n_steps=10,
             deterministic=True,
             enable_progress_bar=True,
+            accumulate_grad_batches=self.gradient_accumulation_steps,
         )
         
         return trainer, checkpoint_callback
+    
+    # TODO: Implement hyperparameter optimization methods with Optuna or other libary
+    def suggest_hyperparameters(self, trial):
+        """
+        Suggest hyperparameters for optimization with Optuna.
+        
+        Args:
+            trial: Optuna trial object
+            
+        Returns:
+            Dictionary of hyperparameter suggestions
+        """
+        # Example parameters to tune
+        suggested_params = {
+            "learning_rate": trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True),
+            "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+            "hidden_size": trial.suggest_categorical("hidden_size", [64, 128, 256, 512]),
+        }
+        
+        return suggested_params
+    
+    def create_ensemble(self):
+        """
+        Create an ensemble model from all trained models.
+        
+        Returns:
+            Function that takes input data and returns ensemble prediction
+        """
+        def ensemble_predict(inputs):
+            # Make predictions with each model
+            all_preds = []
+            for model in self.best_models:
+                model.eval()
+                with torch.no_grad():
+                    preds = model(inputs)
+                all_preds.append(preds)
+            
+            # Stack and average predictions
+            stacked_preds = torch.stack(all_preds)
+            mean_preds = torch.mean(stacked_preds, dim=0)
+            std_preds = torch.std(stacked_preds, dim=0)
+            
+            return mean_preds, std_preds
+        
+        return ensemble_predict
     
     def train(self):
         """
@@ -236,7 +293,7 @@ class MultiRunTrainer:
         if self.test_dataloader:
             all_targets = []
             for batch in self.test_dataloader:
-                _, _, y = batch  # Assuming batch format
+                _, y = batch["transcriptomics"], batch["viability"]
                 all_targets.append(y.cpu().numpy())
             all_targets = np.concatenate(all_targets)
             plt.figure(figsize=(10, 8))
@@ -259,7 +316,7 @@ class MultiRunTrainer:
         }
         
         # Run training for each run
-        for run_id in range(self.num_runs):
+        for run_id in tqdm(range(self.num_runs), desc="Training runs"):
             run_seed = self.base_seed + run_id
             logger.info(f"Starting run {run_id+1}/{self.num_runs} with seed {run_seed}")
             

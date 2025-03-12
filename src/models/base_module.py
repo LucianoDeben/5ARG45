@@ -133,17 +133,21 @@ class DrugResponseModule(pl.LightningModule):
         Returns:
             Tuple of (mean predictions, standard deviation of predictions).
         """
-        self.train()  # Enable dropout during inference
-        preds = []
-        for _ in range(n_samples):
-            with torch.no_grad():
-                pred = self(inputs)
-            preds.append(pred)
-        preds = torch.stack(preds)
-        mean_preds = preds.mean(dim=0)
-        std_preds = preds.std(dim=0)
-        self.eval()  # Return to evaluation mode
-        return mean_preds, std_preds
+        if hasattr(self, 'uncertainty_method') and self.uncertainty_method == "ridge":
+            # For Ridge regression, use the training data for uncertainty estimation
+            return self.model.predict_with_uncertainty(inputs, X_train=self.cached_training_data)
+        else:
+            self.train()  # Enable dropout during inference
+            preds = []
+            for _ in range(n_samples):
+                with torch.no_grad():
+                    pred = self(inputs)
+                preds.append(pred)
+            preds = torch.stack(preds)
+            mean_preds = preds.mean(dim=0)
+            std_preds = preds.std(dim=0)
+            self.eval()  # Return to evaluation mode
+            return mean_preds, std_preds
     
     def test_step(self, batch, batch_idx):
             # Process batch to get inputs and targets

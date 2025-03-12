@@ -32,8 +32,8 @@ data:
   outlier_threshold: 3.0
 
 training:
-  batch_size: 128
-  epochs: 10
+  batch_size: 256
+  epochs: 50
   num_runs: 3
   learning_rate: 0.001
   optimizer: "adam" 
