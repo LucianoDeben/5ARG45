@@ -367,6 +367,8 @@ class MultiRunTrainer:
         
         plt.xlabel('True Values')
         plt.ylabel('Predicted Values')
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
         plt.title('Aggregated Test Predictions Across All Runs')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -385,6 +387,8 @@ class MultiRunTrainer:
         
         plt.xlabel('True Values')
         plt.ylabel('Predicted Values')
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
         plt.title(title)
         
         # Add metrics to plot

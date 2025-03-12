@@ -1,3 +1,4 @@
+from typing import Dict, Union
 import torch 
 import torch.nn as nn
 
@@ -64,20 +65,29 @@ class FlexibleFCNN(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
-        out = x
+    def forward(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
+        """Forward pass handling both tensor and dictionary inputs."""
+        # Handle dictionary inputs similar to RidgeRegression
+        if isinstance(x, dict):
+            if "transcriptomics" in x and "chemical" in x:
+                processed_x = torch.cat([x["transcriptomics"], x["chemical"]], dim=1)
+            elif "transcriptomics" in x:
+                processed_x = x["transcriptomics"]
+            elif "chemical" in x:
+                processed_x = x["chemical"]
+            else:
+                raise ValueError("Input dict must contain 'transcriptomics' and/or 'chemical' keys")
+        else:
+            processed_x = x
+            
+        # Existing forward pass logic
+        out = processed_x
         for layer, norm in zip(self.layers, self.norms):
-            identity = out  # Save for residual
-
-            # Main path
+            identity = out
             out = layer(out)
             out = norm(out)
-
-            # Optional residual
             if self.residual and (out.shape == identity.shape):
                 out = out + identity
-
             out = self.activation(out)
             out = self.dropout(out)
-
         return self.output(out)
