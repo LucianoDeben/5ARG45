@@ -50,7 +50,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         model = RidgeRegression(
             input_dim=input_dim,
             output_dim=1,
-            alpha=config["model"].get("alpha", 1.0),  # Allow alpha from config
+            alpha=1.0,  
             feature_names=feature_names,
         )
     else:

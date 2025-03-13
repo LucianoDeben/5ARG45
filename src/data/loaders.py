@@ -137,7 +137,7 @@ class GCTXDataLoader:
         self.f = h5py.File(self.gctx_file, "r")
 
         # Validate file structure
-        required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL"]
+        required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL", "0/META/ROW/id", "0/META/COL/id"]
         for path in required:
             if path not in self.f:
                 raise ValueError(f"Invalid .gctx file: missing {path}")
@@ -416,7 +416,7 @@ class GCTXDataLoader:
                 results["file_accessible"] = True
                 
                 # Check for required paths
-                required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL"]
+                required = ["0/DATA/0/matrix", "0/META/ROW", "0/META/COL", "0/META/ROW/id", "0/META/COL/id"]
                 results["correct_format"] = all(path in f for path in required)
                 
             # Check metadata status
