@@ -97,6 +97,37 @@ class GCTXLoader:
         self._matrix_cache[key] = data
         self._matrix_cache_access_times[key] = time.time()
         logger.debug(f"Cached matrix with key: {key}, shape: {data.shape}")
+        
+    def _handle_unordered_indices(self, indices):
+        """
+        Handle unordered indices for H5py which requires ascending order.
+        
+        Args:
+            indices: Original indices, potentially unordered
+            
+        Returns:
+            Tuple of (sorted_indices, restore_order) where restore_order is a list
+            that can be used to restore the original order after fetching data
+        """
+        if indices is None or isinstance(indices, slice):
+            return indices, None
+            
+        # Convert to numpy array if it's a list
+        if isinstance(indices, list):
+            indices = np.array(indices)
+            
+        # Check if indices are already sorted
+        if np.all(np.diff(indices) >= 0):
+            return indices, None
+            
+        # Create sorting index and its inverse for restoring original order
+        sorting_idx = np.argsort(indices)
+        sorted_indices = indices[sorting_idx]
+        
+        # This mapping will restore original order: result[restore_order] = fetched_data
+        restore_order = np.argsort(sorting_idx)
+        
+        return sorted_indices, restore_order
     
     def _validate_file(self) -> None:
         """Validate GCTX file structure."""
@@ -356,36 +387,40 @@ class GCTXLoader:
             
         chunk_size = chunk_size or self.chunk_size
         
+        # Sort indices if needed for h5py
+        rows, row_restore_order = self._handle_unordered_indices(row_indices)
+        cols, col_restore_order = self._handle_unordered_indices(col_indices)
+        
         with h5py.File(self.gctx_file, "r") as f:
             matrix = f["0/DATA/0/matrix"]
-            rows = self._get_indices(row_indices, self.n_rows)
-            cols = self._get_indices(col_indices, self.n_cols)
+            h5py_rows = self._get_indices(rows, self.n_rows)
+            h5py_cols = self._get_indices(cols, self.n_cols)
             
             # For simple slice operations, direct access is fastest
-            if isinstance(rows, slice) and isinstance(cols, slice):
-                data = matrix[rows, cols]
+            if isinstance(h5py_rows, slice) and isinstance(h5py_cols, slice):
+                data = matrix[h5py_rows, h5py_cols]
                 
             # Chunked loading for large list selections
-            elif isinstance(rows, list) and len(rows) > chunk_size:
-                chunks = [rows[i:i+chunk_size] for i in range(0, len(rows), chunk_size)]
+            elif isinstance(h5py_rows, list) and len(h5py_rows) > chunk_size:
+                chunks = [h5py_rows[i:i+chunk_size] for i in range(0, len(h5py_rows), chunk_size)]
                 data_chunks = []
                 
                 for chunk in tqdm(chunks, desc="Loading data chunks"):
-                    if isinstance(cols, list):
+                    if isinstance(h5py_cols, list):
                         # Need to load rows then select columns
-                        chunk_data = matrix[chunk][:][:, cols]
+                        chunk_data = matrix[chunk][:][:, h5py_cols]
                     else:
                         # Can select columns directly
-                        chunk_data = matrix[chunk, cols]
+                        chunk_data = matrix[chunk, h5py_cols]
                     data_chunks.append(chunk_data)
                     
                 data = np.vstack(data_chunks)
                 
             # Handle large slices by converting to chunks
-            elif isinstance(rows, slice):
-                start = 0 if rows.start is None else rows.start
-                stop = self.n_rows if rows.stop is None else rows.stop
-                step = 1 if rows.step is None else rows.step
+            elif isinstance(h5py_rows, slice):
+                start = 0 if h5py_rows.start is None else h5py_rows.start
+                stop = self.n_rows if h5py_rows.stop is None else h5py_rows.stop
+                step = 1 if h5py_rows.step is None else h5py_rows.step
                 
                 if (stop - start) > chunk_size:
                     chunks = list(range(start, stop, chunk_size))
@@ -396,31 +431,37 @@ class GCTXLoader:
                         chunk_slice = slice(chunk_start, chunk_stop, step)
                         
                         if isinstance(cols, list):
-                            chunk_data = matrix[chunk_slice][:][:, cols]
+                            chunk_data = matrix[chunk_slice][:][:, h5py_cols]
                         else:
-                            chunk_data = matrix[chunk_slice, cols]
+                            chunk_data = matrix[chunk_slice, h5py_cols]
                             
                         data_chunks.append(chunk_data)
                         
                     data = np.vstack(data_chunks)
                 else:
                     # Small slice, handle directly
-                    if isinstance(cols, list):
-                        data = matrix[rows][:][:, cols]
+                    if isinstance(h5py_cols, list):
+                        data = matrix[h5py_rows][:][:, h5py_cols]
                     else:
-                        data = matrix[rows, cols]
+                        data = matrix[h5py_rows, h5py_cols]
             
             # Handle remaining cases (small lists or single indices)
             else:
-                if isinstance(cols, list):
+                if isinstance(h5py_cols, list):
                     data = matrix[rows][:][:, cols]
                 else:
                     data = matrix[rows, cols]
+                    
+            # Restore original order if needed
+            if row_restore_order is not None:
+                data = data[row_restore_order]
+            if col_restore_order is not None:
+                data = data[:, col_restore_order]
         
         # Cache the result if caching is enabled (after we have the data)
         if use_cache and self.enable_lru_cache and cache_key is not None:
             self._cache_matrix(cache_key, data)
-        
+            
         return data
             
     def get_cache_stats(self):
@@ -475,13 +516,21 @@ class GCTXLoader:
             if missing:
                 raise KeyError(f"Columns not found: {', '.join(missing)}")
                 
+            # Sort indices if needed for h5py
+            indices, restore_order = self._handle_unordered_indices(row_indices)
+            
             # Convert row selection to valid indices
-            indices = self._get_indices(row_indices, self.n_rows)
+            h5py_indices = self._get_indices(indices, self.n_rows)
             
             # Extract requested metadata
             meta_dict = {}
             for key in columns:
-                data = meta_group[key][indices]
+                data = meta_group[key][h5py_indices]
+                
+                # Restore original order if needed
+                if restore_order is not None:
+                    data = data[restore_order]
+                    
                 if data.dtype.kind == "S":
                     data = [s.decode("utf-8", errors="ignore") for s in data]
                 meta_dict[key] = data

@@ -71,20 +71,6 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
     if "${RUN_NAME:-" in run_name:
         run_name = f"{model_prefix}_run_{timestamp}"
     
-    # # Create datasets
-    # logger.info("Creating LINCS dataset for training...")
-    # train_ds, val_ds, test_ds = DatasetFactory.create_and_split_transcriptomics(
-    #     gctx_loader=lincs_loader,
-    #     feature_space=config["data"]["feature_space"],
-    #     nrows=config["data"]["nrows"],
-    #     test_size=config["training"]["test_size"],
-    #     val_size=config["training"]["val_size"],
-    #     random_state=config["training"]["random_state"],
-    #     chunk_size=config["data"]["chunk_size"],
-    #     group_by=config["training"]["group_by"],
-    #     stratify_by=config["training"]["stratify_by"],
-    # )
-    
     logger.info("Creating MixSeq dataset for external testing...")
     _, _, test_ds_mixseq = DatasetFactory.create_and_split_transcriptomics(
         gctx_loader=mixseq_loader,
@@ -98,10 +84,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         stratify_by=config["training"]["stratify_by"],
     )
     
-    # Create DataLoaders
-    # train_loader = torch.utils.data.DataLoader(train_ds, **dataloader_kwargs)
-    # val_loader = torch.utils.data.DataLoader(val_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
-    # test_loader = torch.utils.data.DataLoader(test_ds, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
+    # Create MixSeq DataLoader
     mixseq_loader_dl = torch.utils.data.DataLoader(test_ds_mixseq, batch_size=config["training"]["batch_size"], shuffle=False, num_workers=config["data"]["num_workers"])
     
     dataset_kwargs = {
