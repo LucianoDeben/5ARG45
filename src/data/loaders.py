@@ -109,7 +109,11 @@ class GCTXLoader:
             Tuple of (sorted_indices, restore_order) where restore_order is a list
             that can be used to restore the original order after fetching data
         """
-        if indices is None or isinstance(indices, slice):
+        if indices is None:
+            return slice(None), None
+        if isinstance(indices, slice):
+            return indices, None
+        if isinstance(indices, slice):
             return indices, None
             
         # Convert to numpy array if it's a list
@@ -124,7 +128,7 @@ class GCTXLoader:
         sorting_idx = np.argsort(indices)
         sorted_indices = indices[sorting_idx]
         
-        # This mapping will restore original order: result[restore_order] = fetched_data
+        # This mapping will restore original order: fetched_data[restore_order] = result
         restore_order = np.argsort(sorting_idx)
         
         return sorted_indices, restore_order
@@ -610,12 +614,12 @@ class GCTXLoader:
         Returns:
             List of row IDs
         """
-        if self.enable_lru_cache and row_indices is None:
-            # Use cached version for complete dataset
-            return self._lru_get_row_ids(None)
+        # if self.enable_lru_cache and row_indices is None:
+        #     # Use cached version for complete dataset
+        #     return self._lru_get_row_ids(None)
         
         # Fall back to standard implementation
-        return self.get_row_metadata(row_indices, "id").tolist()
+        return self.get_row_metadata(row_indices, "id").values.flatten().tolist()
     
     def get_gene_symbols(self, 
         col_indices: Union[slice, list, np.ndarray, None] = None,
@@ -629,13 +633,8 @@ class GCTXLoader:
             
         Returns:
             List of gene symbols
-        """
-        if self.enable_lru_cache and col_indices is None and feature_space is None:
-            # Use cached version for complete dataset
-            return self._lru_get_gene_symbols(None, None)
-        
-        # Fall back to standard implementation
-        return self.get_column_metadata(col_indices, "id", feature_space).tolist()
+        """        
+        return self.get_column_metadata(col_indices, "id", feature_space).values.flatten().tolist()
     
     def get_complete_dataset(self,
                             row_indices: Union[slice, list, np.ndarray, None] = None,
