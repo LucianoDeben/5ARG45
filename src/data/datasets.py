@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union, Any, TypeVar
 import time
 import hashlib
 import pickle
-
+import decoupler as dc
 import numpy as np
 import pandas as pd
 from src.data.feature_transforms import MorganFingerprintTransform
@@ -32,7 +32,7 @@ class MultimodalDrugDataset(Dataset):
         transcriptomics_data: np.ndarray,
         metadata: pd.DataFrame,
         row_ids: List[str],
-        gene_symbols: List[str],
+        feature_names: List[str],  # Renamed parameter for clarity
         transform_transcriptomics: Optional[Callable] = None,
         transform_molecular: Optional[Callable] = None,
     ):
@@ -40,17 +40,25 @@ class MultimodalDrugDataset(Dataset):
         Initialize the multimodal dataset.
         
         Args:
-            transcriptomics_data: Array of gene expression values
+            transcriptomics_data: Array of gene expression values (or TF activity scores)
             metadata: DataFrame with drug and experiment metadata
             row_ids: List of experiment IDs corresponding to transcriptomics_data rows
-            gene_symbols: List of gene symbols corresponding to transcriptomics_data columns
+            feature_names: List of gene/TF symbols corresponding to transcriptomics_data columns
             transform_transcriptomics: Optional transform for transcriptomics data
             transform_molecular: Optional transform for molecular data
         """
         self.transcriptomics_data = transcriptomics_data
         self.metadata = metadata
         self.row_ids = row_ids
-        self.gene_symbols = gene_symbols
+        self.feature_names = feature_names
+        
+        # Verify data dimensions match feature names
+        if transcriptomics_data.shape[1] != len(feature_names):
+            logger.warning(
+                f"Feature dimension mismatch: data has {transcriptomics_data.shape[1]} "
+                f"features but {len(feature_names)} feature names provided"
+            )
+        
         self.transform_transcriptomics = transform_transcriptomics
         self.transform_molecular = transform_molecular
         
@@ -90,7 +98,14 @@ class MultimodalDrugDataset(Dataset):
             "dosage": dosage,
             "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
             "row_id": self.row_ids[idx],
-            "gene_symbols": self.gene_symbols,  # All gene symbols are the same for each item
+        }
+        
+    def get_feature_info(self) -> Dict[str, Any]:
+        """Return dataset-level feature information."""
+        return {
+            "feature_names": self.feature_names,
+            "feature_count": len(self.feature_names),
+            "feature_hash": hashlib.md5(",".join(self.feature_names).encode()).hexdigest()[:8]
         }
 
 
@@ -102,23 +117,23 @@ class TranscriptomicsDataset(Dataset):
         transcriptomics_data: np.ndarray,
         viability: np.ndarray,
         row_ids: List[str],
-        gene_symbols: List[str],
+        feature_names: List[str],
         transform_transcriptomics: Optional[Callable] = None,
     ):
         """
         Initialize the transcriptomics dataset.
         
         Args:
-            transcriptomics_data: Array of gene expression values
+            transcriptomics_data: Array of gene expression values (or TF activity scores)
             viability: Array of cell viability values
             row_ids: List of experiment IDs corresponding to transcriptomics_data rows
-            gene_symbols: List of gene symbols corresponding to transcriptomics_data columns
+            feature_names: List of gene/TF symbols corresponding to transcriptomics_data columns
             transform_transcriptomics: Optional transform for transcriptomics data
         """
         self.transcriptomics_data = transcriptomics_data
         self.viability = viability
         self.row_ids = row_ids
-        self.gene_symbols = gene_symbols
+        self.feature_names = feature_names
         self.transform_transcriptomics = transform_transcriptomics
 
     def __len__(self) -> int:
@@ -131,12 +146,19 @@ class TranscriptomicsDataset(Dataset):
         )
         if self.transform_transcriptomics:
             transcriptomics = self.transform_transcriptomics(transcriptomics)
-
+            
         return {
             "transcriptomics": transcriptomics,
             "viability": torch.tensor(self.viability[idx], dtype=torch.float32),
             "row_id": self.row_ids[idx],
-            "gene_symbols": self.gene_symbols,  # All gene symbols are the same for each item
+        }
+        
+    def get_feature_info(self) -> Dict[str, Any]:
+        """Return dataset-level feature information."""
+        return {
+            "feature_names": self.feature_names,
+            "feature_count": len(self.feature_names),
+            "feature_hash": hashlib.md5(",".join(self.feature_names).encode()).hexdigest()[:8]
         }
 
 
@@ -215,10 +237,24 @@ class DatasetFactory:
         os.makedirs(DatasetFactory.CACHE_DIR, exist_ok=True)
     
     @staticmethod
-    def _get_cache_key(gctx_file, dataset_type, feature_space, nrows, random_state, group_by, stratify_by):
-        """Generate a cache key based on dataset parameters."""
+    def _get_cache_key(gctx_file, dataset_type, feature_space, nrows, random_state, group_by, stratify_by, feature_names=None, tf_transform=None):
+        """Generate a cache key that includes feature ordering and TF inference parameters."""
         # Create a hash of the essential parameters
         key_data = f"{gctx_file}_{dataset_type}_{feature_space}_{nrows}_{random_state}_{group_by}_{stratify_by}"
+        
+        # Add a feature ordering hash if available
+        if feature_names is not None:
+            # Use first, last, length and hash of feature names to ensure ordering consistency
+            if len(feature_names) > 0:
+                feature_hash = hashlib.md5(",".join(feature_names[:20]).encode()).hexdigest()[:8]
+                key_data += f"_features_{feature_hash}_{len(feature_names)}"
+        
+        # Add TF transform parameters if present
+        if tf_transform is not None:
+            # Add a hash of the network and methods used
+            tf_params = f"_tf_{tf_transform.method}_{tf_transform.min_n}_{tf_transform.consensus}"
+            key_data += tf_params
+            
         return hashlib.md5(key_data.encode()).hexdigest()
     
     @staticmethod
@@ -620,6 +656,7 @@ class DatasetFactory:
             logger.warning(f"Not all indices are used in the split. Expected {n_samples}, got {len(all_indices_set)}")
         
         return train_idx, val_idx, test_idx
+    
 
     @staticmethod
     def _get_required_columns(
@@ -640,7 +677,7 @@ class DatasetFactory:
 
     @staticmethod
     def create_and_split_datasets(
-        gctx_loader: GCTXLoader,
+        data_loader: GCTXLoader,
         dataset_type: str = "multimodal",
         feature_space: Union[str, List[str]] = "landmark",
         nrows: Optional[int] = None,
@@ -654,69 +691,38 @@ class DatasetFactory:
         tf_inference_transform: Optional[TFInferenceTransform] = None,
         chunk_size: int = 10000,
         use_cache: bool = True,
+        validate_feature_order: bool = True,  # New parameter
     ) -> Tuple[T, T, T]:
         """
         Create and split datasets based on dataset type, with caching support.
         
         Args:
             gctx_loader: GCTX data loader
-            dataset_type: Type of dataset to create ('multimodal', 'transcriptomics', or 'molecular')
-            feature_space: Gene feature space
-            nrows: Number of rows to load
+            dataset_type: Type of dataset to create ("multimodal", "transcriptomics", or "molecular")
+            feature_space: Feature space to use ("landmark", "best inferred", "inferred", or "all")
+            nrows: Number of rows to load (None for all)
             test_size: Proportion of data to use for testing
             val_size: Proportion of data to use for validation
             random_state: Random seed for reproducibility
             group_by: Column to use for group-based splitting
             stratify_by: Column to use for stratified splitting
-            transform_transcriptomics: Transform for transcriptomics data
-            transform_molecular: Transform for molecular data
-            chunk_size: Size of chunks for processing large datasets
-            use_cache: Whether to use caching
+            transform_transcriptomics: Optional transform for transcriptomics data
+            transform_molecular: Optional transform for molecular data
+            tf_inference_transform: Optional transform for TF inference
+            chunk_size: Size of chunks for loading large data
+            use_cache: Whether to use cache for this request
+            validate_feature_order: Whether to validate and log feature ordering
             
         Returns:
-            Tuple of train, validation, and test datasets
+            Tuple of (train_dataset, val_dataset, test_dataset)
         """
         logger.info(f"Creating and splitting {dataset_type} datasets...")
         
-        # Check if the dataset is already in memory cache
-        if use_cache:
-            cache_key = DatasetFactory._get_cache_key(
-                gctx_loader.gctx_file, dataset_type, feature_space, nrows, random_state, group_by, stratify_by
-            )
-            
-            # Check memory cache first (faster access)
-            if cache_key in DatasetFactory._memory_cache:
-                DatasetFactory._memory_cache_hits += 1
-                DatasetFactory._memory_cache_timestamps[cache_key] = time.time()
-                logger.info(f"Using datasets from memory cache (key: {cache_key})")
-                return DatasetFactory._memory_cache[cache_key]
-                
-            # Then check disk cache
-            cached_datasets = DatasetFactory._load_from_cache(cache_key)
-            if cached_datasets is not None:
-                # Also add to memory cache for faster access next time
-                DatasetFactory._add_to_memory_cache(cache_key, cached_datasets)
-                DatasetFactory._memory_cache_hits += 1
-                logger.info(f"Using datasets from disk cache (key: {cache_key})")
-                return cached_datasets
-                
-            DatasetFactory._memory_cache_misses += 1
-            
         # Step 1: Load metadata
-        metadata = DatasetFactory._load_metadata(gctx_loader, nrows, chunk_size)
+        metadata = DatasetFactory._load_metadata(data_loader, nrows, chunk_size)
         
         # Step 2: Validate required columns
-        required_cols = []
-        if dataset_type in ["multimodal", "molecular"]:
-            required_cols.extend(["canonical_smiles", "pert_dose_log2", "viability_clipped"])
-        else:  # transcriptomics
-            required_cols.append("viability_clipped")
-            
-        if group_by:
-            required_cols.append(group_by)
-        if stratify_by:
-            required_cols.append(stratify_by)
-            
+        required_cols = DatasetFactory._get_required_columns(dataset_type, group_by, stratify_by)
         DatasetFactory._validate_required_columns(metadata, required_cols)
         
         # Step 3: Split the data
@@ -729,29 +735,125 @@ class DatasetFactory:
             stratify_by=stratify_by,
         )
         
-        # Step 4: Create the datasets based on type
-        gene_symbols = None
-        if dataset_type in ["multimodal", "transcriptomics"]:
-            gene_symbols = gctx_loader.get_gene_symbols(feature_space=feature_space)
+        # Step 4: Determine feature names (gene symbols)
+        gene_symbols = data_loader.get_gene_symbols(feature_space=feature_space)
         
-        # Step 5: Create the datasets
+        # Validate and log feature information for debugging
+        if validate_feature_order and len(gene_symbols) > 0:
+            logger.info(f"Feature space: {feature_space}")
+            logger.info(f"Feature count: {len(gene_symbols)}")
+            logger.info(f"First 5 features: {gene_symbols[:5]}")
+            logger.info(f"Last 5 features: {gene_symbols[-5:]}")
+            feature_hash = hashlib.md5(",".join(gene_symbols[:20]).encode()).hexdigest()[:8]
+            logger.info(f"Feature hash: {feature_hash}")
+        
+        # Check if the dataset is already in memory cache
+        if use_cache:
+            # Create a more specific cache key that includes feature ordering
+            feature_key = ""
+            if len(gene_symbols) > 0:
+                # Add a compact representation of gene ordering to the cache key
+                feature_hash = hashlib.md5(",".join(gene_symbols[:20]).encode()).hexdigest()[:8]
+                feature_key = f"_ftr{feature_hash}_{len(gene_symbols)}"
+                
+            # Add TF inference parameters if present
+            tf_params = ""
+            if tf_inference_transform is not None:
+                tf_params = f"_tf_{tf_inference_transform.method}_{tf_inference_transform.min_n}_{tf_inference_transform.consensus}"
+            
+            cache_key = DatasetFactory._get_cache_key(
+                data_loader.gctx_file, dataset_type, feature_space, nrows, random_state, 
+                group_by, stratify_by
+            ) + feature_key + tf_params
+            
+            # Check for cache hits
+            if cache_key in DatasetFactory._memory_cache:
+                DatasetFactory._memory_cache_hits += 1
+                DatasetFactory._memory_cache_timestamps[cache_key] = time.time()
+                logger.info(f"Using datasets from memory cache (key: {cache_key})")
+                return DatasetFactory._memory_cache[cache_key]
+                
+            # Check disk cache
+            cached_datasets = DatasetFactory._load_from_cache(cache_key)
+            if cached_datasets is not None:
+                DatasetFactory._add_to_memory_cache(cache_key, cached_datasets)
+                DatasetFactory._memory_cache_hits += 1
+                logger.info(f"Using datasets from disk cache (key: {cache_key})")
+                return cached_datasets
+                
+            DatasetFactory._memory_cache_misses += 1
+        
+        # Step 5: Load all expression data at once if needed for TF inference
+        if dataset_type in ["multimodal", "transcriptomics"] and tf_inference_transform is not None:
+            logger.info("Loading complete expression matrix for TF inference")
+            # Load the complete expression matrix for efficiency
+            all_expr = data_loader.get_data_matrix(feature_space=feature_space)
+            
+            # Apply TF inference to the entire dataset at once
+            from src.utils.tf_inference import apply_tf_inference
+            all_expr, new_feature_names = apply_tf_inference(
+                data=all_expr,
+                gene_symbols=gene_symbols,
+                network=tf_inference_transform.network,
+                method=tf_inference_transform.method,
+                min_n=tf_inference_transform.min_n,
+                use_raw=tf_inference_transform.use_raw,
+                consensus=tf_inference_transform.consensus
+            )
+            
+            # Log feature transformation details
+            if validate_feature_order and len(new_feature_names) > 0:
+                logger.info(f"TF inference completed: {all_expr.shape[1]} features")
+                logger.info(f"Original feature count: {len(gene_symbols)}")
+                logger.info(f"New feature count: {len(new_feature_names)}")
+                logger.info(f"First 5 new features: {new_feature_names[:5]}")
+                logger.info(f"Last 5 new features: {new_feature_names[-5:]}")
+                new_feature_hash = hashlib.md5(",".join(new_feature_names[:20]).encode()).hexdigest()[:8]
+                logger.info(f"New feature hash: {new_feature_hash}")
+            
+            # Use the transformed data for each split
+            train_expr = all_expr[train_idx]
+            val_expr = all_expr[val_idx]
+            test_expr = all_expr[test_idx]
+            
+            # Use the new feature names
+            gene_symbols = new_feature_names
+            
+            logger.info(f"TF inference completed for all data: shape {all_expr.shape}")
+        else:
+            # For other cases, load data for each split separately
+            train_expr = None
+            val_expr = None
+            test_expr = None
+            
+            if dataset_type in ["multimodal", "transcriptomics"]:
+                # Log loading process
+                logger.info(f"Loading expression data for {len(train_idx)} train, {len(val_idx)} val, {len(test_idx)} test samples")
+                
+                train_expr = data_loader.get_data_matrix(row_indices=train_idx, feature_space=feature_space)
+                val_expr = data_loader.get_data_matrix(row_indices=val_idx, feature_space=feature_space)
+                test_expr = data_loader.get_data_matrix(row_indices=test_idx, feature_space=feature_space)
+                
+                # Verify data loaded correctly
+                if validate_feature_order:
+                    logger.info(f"Loaded expression data - Train: {train_expr.shape}, Val: {val_expr.shape}, Test: {test_expr.shape}")
+                    
+                    # Verify feature dimensions match
+                    if train_expr.shape[1] != len(gene_symbols):
+                        logger.warning(f"Feature dimension mismatch: data has {train_expr.shape[1]} features but {len(gene_symbols)} feature names")
+        
+        # Step 6: Load row IDs
+        train_row_ids = data_loader.get_row_ids(row_indices=train_idx)
+        val_row_ids = data_loader.get_row_ids(row_indices=val_idx)
+        test_row_ids = data_loader.get_row_ids(row_indices=test_idx)
+        
+        # Step 7: Create the datasets based on type
         if dataset_type == "multimodal":
-            # Load row IDs for all sets
-            train_row_ids = gctx_loader.get_row_ids(row_indices=train_idx)
-            val_row_ids = gctx_loader.get_row_ids(row_indices=val_idx)
-            test_row_ids = gctx_loader.get_row_ids(row_indices=test_idx)
-            
-            # Get expression data for all sets
-            train_expr = gctx_loader.get_data_matrix(row_indices=train_idx, feature_space=feature_space)
-            val_expr = gctx_loader.get_data_matrix(row_indices=val_idx, feature_space=feature_space)
-            test_expr = gctx_loader.get_data_matrix(row_indices=test_idx, feature_space=feature_space)
-            
-            # Create datasets
             train_ds = MultimodalDrugDataset(
                 transcriptomics_data=train_expr,
                 metadata=metadata.iloc[train_idx].reset_index(drop=True),
                 row_ids=train_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  # Pass correct feature names
                 transform_transcriptomics=transform_transcriptomics,
                 transform_molecular=transform_molecular,
             )
@@ -760,7 +862,7 @@ class DatasetFactory:
                 transcriptomics_data=val_expr,
                 metadata=metadata.iloc[val_idx].reset_index(drop=True),
                 row_ids=val_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  # Consistent feature names
                 transform_transcriptomics=transform_transcriptomics,
                 transform_molecular=transform_molecular,
             )
@@ -769,28 +871,17 @@ class DatasetFactory:
                 transcriptomics_data=test_expr,
                 metadata=metadata.iloc[test_idx].reset_index(drop=True),
                 row_ids=test_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  # Consistent feature names
                 transform_transcriptomics=transform_transcriptomics,
                 transform_molecular=transform_molecular,
             )
             
         elif dataset_type == "transcriptomics":
-            # Load row IDs for all sets
-            train_row_ids = gctx_loader.get_row_ids(row_indices=train_idx)
-            val_row_ids = gctx_loader.get_row_ids(row_indices=val_idx)
-            test_row_ids = gctx_loader.get_row_ids(row_indices=test_idx)
-            
-            # Get expression data for all sets
-            train_expr = gctx_loader.get_data_matrix(row_indices=train_idx, feature_space=feature_space)
-            val_expr = gctx_loader.get_data_matrix(row_indices=val_idx, feature_space=feature_space)
-            test_expr = gctx_loader.get_data_matrix(row_indices=test_idx, feature_space=feature_space)
-            
-            # Create datasets
             train_ds = TranscriptomicsDataset(
                 transcriptomics_data=train_expr,
                 viability=metadata.iloc[train_idx]["viability_clipped"].values,
                 row_ids=train_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  
                 transform_transcriptomics=transform_transcriptomics,
             )
             
@@ -798,7 +889,7 @@ class DatasetFactory:
                 transcriptomics_data=val_expr,
                 viability=metadata.iloc[val_idx]["viability_clipped"].values,
                 row_ids=val_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  # Consistent name and parameter
                 transform_transcriptomics=transform_transcriptomics,
             )
             
@@ -806,17 +897,11 @@ class DatasetFactory:
                 transcriptomics_data=test_expr,
                 viability=metadata.iloc[test_idx]["viability_clipped"].values,
                 row_ids=test_row_ids,
-                gene_symbols=gene_symbols,
+                feature_names=gene_symbols,  # Consistent name and parameter
                 transform_transcriptomics=transform_transcriptomics,
             )
             
         elif dataset_type == "molecular":
-            # Load row IDs for all sets
-            train_row_ids = gctx_loader.get_row_ids(row_indices=train_idx)
-            val_row_ids = gctx_loader.get_row_ids(row_indices=val_idx)
-            test_row_ids = gctx_loader.get_row_ids(row_indices=test_idx)
-            
-            # Create datasets
             train_ds = MolecularDataset(
                 smiles=metadata.iloc[train_idx]["canonical_smiles"].values,
                 dosage=metadata.iloc[train_idx]["pert_dose_log2"].values,
@@ -844,6 +929,11 @@ class DatasetFactory:
         else:
             raise ValueError(f"Unsupported dataset type: {dataset_type}")
         
+        # Verify dataset sizes match expected values
+        if validate_feature_order:
+            logger.info(f"Created datasets - Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+            logger.info(f"Expected sizes - Train: {len(train_idx)}, Val: {len(val_idx)}, Test: {len(test_idx)}")
+        
         # Cache the results if requested
         if use_cache:
             datasets = (train_ds, val_ds, test_ds)
@@ -852,97 +942,5 @@ class DatasetFactory:
             # Also save to disk cache
             DatasetFactory._save_to_cache(cache_key, datasets)
             
-        logger.info(f"Created datasets - Train: {len(train_ds)}, Val: {len(val_ds)}, Test: {len(test_ds)}")
+        logger.info(f"Dataset creation complete")
         return train_ds, val_ds, test_ds
-
-    # Specialized convenience methods
-    @staticmethod
-    def create_and_split_multimodal(
-        gctx_loader: GCTXLoader,
-        feature_space: Union[str, List[str]] = "landmark",
-        nrows: Optional[int] = None,
-        test_size: float = 0.2,
-        val_size: float = 0.1,
-        random_state: int = 42,
-        group_by: Optional[str] = None,
-        stratify_by: Optional[str] = None,
-        transform_transcriptomics: Optional[Callable] = None,
-        transform_molecular: Optional[Callable] = None,
-        chunk_size: int = 10000,
-        use_cache: bool = True,
-    ) -> Tuple[MultimodalDrugDataset, MultimodalDrugDataset, MultimodalDrugDataset]:
-        """Create and split multimodal datasets with caching."""
-        return DatasetFactory.create_and_split_datasets(
-            gctx_loader=gctx_loader,
-            dataset_type="multimodal",
-            feature_space=feature_space,
-            nrows=nrows,
-            test_size=test_size,
-            val_size=val_size,
-            random_state=random_state,
-            group_by=group_by,
-            stratify_by=stratify_by,
-            transform_transcriptomics=transform_transcriptomics,
-            transform_molecular=transform_molecular,
-            chunk_size=chunk_size,
-            use_cache=use_cache,
-        )
-
-    @staticmethod
-    def create_and_split_transcriptomics(
-        gctx_loader: GCTXLoader,
-        feature_space: Union[str, List[str]] = "landmark",
-        nrows: Optional[int] = None,
-        test_size: float = 0.2,
-        val_size: float = 0.1,
-        random_state: int = 42,
-        group_by: Optional[str] = None,
-        stratify_by: Optional[str] = None,
-        transform_transcriptomics: Optional[Callable] = None,
-        chunk_size: int = 10000,
-        use_cache: bool = True,
-    ) -> Tuple[TranscriptomicsDataset, TranscriptomicsDataset, TranscriptomicsDataset]:
-        """Create and split transcriptomics datasets with caching."""
-        return DatasetFactory.create_and_split_datasets(
-            gctx_loader=gctx_loader,
-            dataset_type="transcriptomics",
-            feature_space=feature_space,
-            nrows=nrows,
-            test_size=test_size,
-            val_size=val_size,
-            random_state=random_state,
-            group_by=group_by,
-            stratify_by=stratify_by,
-            transform_transcriptomics=transform_transcriptomics,
-            chunk_size=chunk_size,
-            use_cache=use_cache,
-        )
-
-    @staticmethod
-    def create_and_split_chemical(
-        gctx_loader: GCTXLoader,
-        nrows: Optional[int] = None,
-        test_size: float = 0.2,
-        val_size: float = 0.1,
-        random_state: int = 42,
-        group_by: Optional[str] = None,
-        stratify_by: Optional[str] = None,
-        transform_molecular: Optional[Callable] = None,
-        chunk_size: int = 10000,
-        use_cache: bool = True,
-    ) -> Tuple[MolecularDataset, MolecularDataset, MolecularDataset]:
-        """Create and split molecular datasets with caching."""
-        return DatasetFactory.create_and_split_datasets(
-            gctx_loader=gctx_loader,
-            dataset_type="molecular",
-            feature_space="landmark",  
-            nrows=nrows,
-            test_size=test_size,
-            val_size=val_size,
-            random_state=random_state,
-            group_by=group_by,
-            stratify_by=stratify_by,
-            transform_molecular=transform_molecular,
-            chunk_size=chunk_size,
-            use_cache=use_cache,
-        )

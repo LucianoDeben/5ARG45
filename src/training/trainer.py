@@ -21,8 +21,8 @@ import seaborn as sns
 torch.set_float32_matmul_precision('medium')
 
 from torch.utils.data import DataLoader
+from src.data.loaders import GCTXLoader
 from src.data.datasets import DatasetFactory
-from src.data.loaders import GCTXDataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class MultiRunTrainer:
         module_class: pl.LightningModule,
         module_kwargs: Dict[str, Any],
         # Dataset creation approach
-        gctx_loader: Optional[GCTXDataLoader] = None,
+        gctx_loader: Optional[GCTXLoader] = None,
         dataset_kwargs: Optional[Dict[str, Any]] = None,
         dataloader_kwargs: Optional[Dict[str, Any]] = None,
         # Pre-created dataloader approach
@@ -155,8 +155,8 @@ class MultiRunTrainer:
         dataset_kwargs["random_state"] = run_seed
         
         # Create and split datasets
-        train_ds, val_ds, test_ds = DatasetFactory.create_and_split_transcriptomics(
-            gctx_loader=self.gctx_loader,
+        train_ds, val_ds, test_ds = DatasetFactory.create_and_split_datasets(
+            data_loader=self.gctx_loader,
             **dataset_kwargs
         )
         

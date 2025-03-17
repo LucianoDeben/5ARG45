@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import h5py
 from typing import Dict, List, Optional, Tuple, Union
-from src.data.loaders import GCTXDataLoader
+from src.data.loaders import GCTXLoader
 from src.config.config_utils import setup_logging
 
 # Setup logging
@@ -60,7 +60,7 @@ class GCTXValidator:
         
         try:
             if self.loader is None:
-                self.loader = GCTXDataLoader(self.gctx_file)
+                self.loader = GCTXLoader(self.gctx_file)
                 
             with self.loader:
                 # Check if matrix is not empty
@@ -69,7 +69,7 @@ class GCTXValidator:
                 
                 # Sample data to check for reasonable range
                 sample_rows = min(1000, self.loader.n_rows)
-                sample_data = self.loader.get_expression_data(row_slice=slice(0, sample_rows))
+                sample_data = self.loader.get_data_matrix(row_indices=slice(0, sample_rows))
                 
                 # Check reasonable value range
                 min_val = np.min(sample_data)
@@ -100,7 +100,7 @@ class GCTXValidator:
         
         try:
             if self.loader is None:
-                self.loader = GCTXDataLoader(self.gctx_file)
+                self.loader = GCTXLoader(self.gctx_file)
                 
             with self.loader:
                 # Check row metadata
@@ -182,8 +182,8 @@ class DatasetComparator:
         }
         
         try:
-            loader1 = GCTXDataLoader(self.dataset1_file)
-            loader2 = GCTXDataLoader(self.dataset2_file)
+            loader1 = GCTXLoader(self.dataset1_file)
+            loader2 = GCTXLoader(self.dataset2_file)
             
             with loader1, loader2:
                 # Check if both are valid
@@ -202,8 +202,8 @@ class DatasetComparator:
                     logger.info(f"Common genes: {len(common_genes)} ({results['common_gene_symbols']:.2%})")
                 
                 # Compare value ranges
-                sample1 = loader1.get_expression_data(row_slice=slice(0, min(1000, loader1.n_rows)))
-                sample2 = loader2.get_expression_data(row_slice=slice(0, min(1000, loader2.n_rows)))
+                sample1 = loader1.get_data_matrix(row_indices=slice(0, min(1000, loader1.n_rows)))
+                sample2 = loader2.get_data_matrix(row_indices=slice(0, min(1000, loader2.n_rows)))
                 
                 min1, max1 = np.min(sample1), np.max(sample1)
                 min2, max2 = np.min(sample2), np.max(sample2)
@@ -253,7 +253,7 @@ class DatasetComparator:
 def main():
     """Main function to run validation."""
     # File paths
-    lincs_file = "./data/processed/LINCS_CTRP_QC.gctx"
+    lincs_file = "./data/processed/LINCS_CTRP_QC2.gctx"
     mixseq_file = "./data/processed/MixSeq.gctx"
     
     # Validate individual datasets

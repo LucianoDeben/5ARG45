@@ -1,4 +1,4 @@
-# models/chemical/smiles_processing.py
+# models/molecular/smiles_processing.py
 import logging
 import math
 import os

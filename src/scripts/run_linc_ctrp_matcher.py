@@ -183,27 +183,61 @@ def convert_smile(smile):
 
 def create_gctx_file(data_dict, output_path="output_data.gctx"):
     """
-    Create a GCTX file with all genes (landmark, best_inferred, and inferred)
-    and appropriate metadata structure.
+    Create a GCTX file with all genes and appropriate metadata structure.
+    IMPORTANT: This function preserves the original gene order from the source GCTX file.
     
     Args:
         data_dict (dict): Dictionary containing processed data
         output_path (str): Path for the output GCTX file
     """
+    print("Creating GCTX file with proper gene ordering...")
+    
     # Extract necessary data from data_dict
-    siginfo = data_dict['siginfo']
-    all_genes = data_dict['all_genes']  # This is the matrix with all genes
+    siginfo = data_dict['siginfo'].copy()
     geneinfo_ordered = data_dict['geneinfo_ordered']
     all_genes_list = data_dict['all_genes_list']
     
-    # Prepare row metadata (samples/perturbations)
-    row_metadata = siginfo.reset_index(drop=True).copy()
+    # Keep track of signature IDs in the order they appear in siginfo
+    sig_ids_ordered = siginfo['sig_id'].tolist()
+    
+    # Extract signature indices from gctx_slice_indices
+    slice_1_idx = data_dict['gctx_indices_sigs_ids']['slice_1_idx']
+    slice_2_idx = data_dict['gctx_indices_sigs_ids']['slices_2_idx']
+    
+    # Create matrices for each slice with original gene ordering
+    print("Getting gene expression data in original gene order...")
+    matrix_slice_1 = matrix[slice_1_idx.index, :]
+    matrix_slice_2 = matrix[slice_2_idx.index, :]
+    
+    # Map signature IDs to their rows in the matrix slices
+    sig_id_to_row_idx = {}
+    for i, sig_id in enumerate(slice_1_idx.values):
+        sig_id_to_row_idx[sig_id] = (0, i)  # (slice_number, row_index)
+    
+    for i, sig_id in enumerate(slice_2_idx.values):
+        sig_id_to_row_idx[sig_id] = (1, i)  # (slice_number, row_index)
+    
+    # Build the matrix in the same order as siginfo
+    print("Reordering expression data to match signature order...")
+    reordered_matrix = np.zeros((len(sig_ids_ordered), matrix_slice_1.shape[1]), dtype=np.float32)
+    
+    for i, sig_id in enumerate(sig_ids_ordered):
+        slice_num, row_idx = sig_id_to_row_idx[sig_id]
+        if slice_num == 0:
+            reordered_matrix[i, :] = matrix_slice_1[row_idx, :]
+        else:
+            reordered_matrix[i, :] = matrix_slice_2[row_idx, :]
+    
+    # Verify that the dimensions match expectations
+    print(f"Matrix dimensions: {reordered_matrix.shape[0]} samples × {reordered_matrix.shape[1]} genes")
+    print(f"Expected samples: {len(siginfo)}")
+    print(f"Expected genes: {len(all_genes_list)}")
     
     # Make sure viability and dose are included
-    row_metadata['viability_clipped'] = np.clip(row_metadata['viability'], 0, 1)
-    row_metadata['pert_dose_log2'] = np.log2(row_metadata['pert_dose'])
+    siginfo['viability_clipped'] = np.clip(siginfo['viability'], 0, 1)
+    siginfo['pert_dose_log2'] = np.log2(siginfo['pert_dose'])
     
-    # Prepare column metadata (genes)
+    # Prepare column metadata (genes) - using original gene order
     col_metadata = pd.DataFrame({
         'gene_symbol': all_genes_list,
         'gene_id': geneinfo_ordered.index,
@@ -211,6 +245,7 @@ def create_gctx_file(data_dict, output_path="output_data.gctx"):
     })
     
     # Create GCTX file
+    print("Writing GCTX file...")
     with h5py.File(output_path, 'w') as f:
         # Set root attributes
         f.attrs['version'] = '1.0'
@@ -228,9 +263,8 @@ def create_gctx_file(data_dict, output_path="output_data.gctx"):
         col_meta_group = meta_group.create_group('COL')
         
         # Store expression matrix
-        # We use all_genes which should contain all 12328 genes
-        # Convert to float32 for consistency with GCTX standards
-        matrix_data = all_genes.astype(np.float32)
+        # We use reordered_matrix which maintains original gene order
+        matrix_data = reordered_matrix.astype(np.float32)
         data_0_group.create_dataset(
             'matrix', 
             data=matrix_data,
@@ -239,8 +273,8 @@ def create_gctx_file(data_dict, output_path="output_data.gctx"):
         )
         
         # Store row metadata
-        for column in row_metadata.columns:
-            col_data = row_metadata[column].values
+        for column in siginfo.columns:
+            col_data = siginfo[column].values
             # Handle different data types
             if pd.api.types.is_numeric_dtype(col_data.dtype):
                 row_meta_group.create_dataset(column, data=col_data)
@@ -255,9 +289,9 @@ def create_gctx_file(data_dict, output_path="output_data.gctx"):
                 )
         
         # Store the row ids (sig_id)
-        sig_ids = np.array([str(x).encode('utf-8') for x in row_metadata['sig_id']])
-        max_length = max([len(x) for x in sig_ids])
-        row_meta_group.create_dataset('id', data=sig_ids, dtype=f'S{max_length}')
+        sig_ids_bytes = np.array([str(x).encode('utf-8') for x in siginfo['sig_id']])
+        max_length = max([len(x) for x in sig_ids_bytes])
+        row_meta_group.create_dataset('id', data=sig_ids_bytes, dtype=f'S{max_length}')
         
         # Store column metadata
         for column in col_metadata.columns:
@@ -275,12 +309,42 @@ def create_gctx_file(data_dict, output_path="output_data.gctx"):
                 )
         
         # Store gene symbols as column ids
-        gene_symbols = np.array([str(x).encode('utf-8') for x in col_metadata['gene_symbol']])
-        max_length = max([len(x) for x in gene_symbols])
-        col_meta_group.create_dataset('id', data=gene_symbols, dtype=f'S{max_length}')
+        gene_ids_bytes = np.array([str(x).encode('utf-8') for x in col_metadata['gene_id']])
+        max_length = max([len(x) for x in gene_ids_bytes])
+        col_meta_group.create_dataset('id', data=gene_ids_bytes, dtype=f'S{max_length}')
+    
+    # Validation check
+    print("Validating GCTX file...")
+    with h5py.File(output_path, 'r') as f:
+        # Check dimensions
+        stored_matrix = f['0']['DATA']['0']['matrix']
+        print(f"Stored matrix dimensions: {stored_matrix.shape}")
         
+        # Check first few gene IDs
+        stored_gene_ids = [x.decode('utf-8') for x in f['0']['META']['COL']['id']]
+        expected_gene_ids = [str(x) for x in geneinfo_ordered.index[:5]]
+        print("First 5 gene IDs in stored file:", stored_gene_ids[:5])
+        print("First 5 expected gene IDs:", expected_gene_ids)
+        
+        # Check a few signature IDs
+        stored_sig_ids = [x.decode('utf-8') for x in f['0']['META']['ROW']['id']]
+        expected_sig_ids = siginfo['sig_id'].astype(str).tolist()[:5]
+        print("First 5 signature IDs in stored file:", stored_sig_ids[:5])
+        print("First 5 expected signature IDs:", expected_sig_ids)
+    
     print(f"GCTX file created successfully at: {output_path}")
     print(f"Dimensions: {matrix_data.shape[0]} samples × {matrix_data.shape[1]} genes")
+    
+    # Also save the key metadata for verification
+    verification_data = {
+        'gene_ids': [str(x) for x in geneinfo_ordered.index],
+        'sig_ids': siginfo['sig_id'].tolist(),
+        'dimensions': matrix_data.shape
+    }
+    with open(output_path + '.verification.json', 'w') as f:
+        json.dump(verification_data, f)
+    
+    return True
 
 # %%
 # ======= Defining columns for matching ========
@@ -524,12 +588,39 @@ data_dict_74709 = {
     'all_genes_list': all_gene_symbol
 }
 
+# Save as pickle first (for comparison with original)
+with open('pk/data_dict_74709.pk', 'wb') as handle:
+    pk.dump(data_dict_74709, handle)
+    print("Pickle file saved for comparison.")
+
 # Create GCTX file with all genes and proper metadata
-create_gctx_file(data_dict_74709, output_path="data/processed/LINCS_CTRP_QC.gctx")
+create_gctx_file(data_dict_74709, output_path="data/processed/LINCS_CTRP_QC2.gctx")
 
-# # Optional: Also save as pickle for backward compatibility
-# with open('pk/data_dict_74709.pk', 'wb') as handle:
-#     pk.dump(data_dict_74709, handle)
+print("Processing complete. GCTX file created with correct gene ordering.")
 
-
-print("Processing complete. GCTX file created with all genes including feature_space metadata.")
+# Optional: Verification step to compare new GCTX with original pickle
+try:
+    # Load original pickle if it exists
+    original_pickle_path = 'pk/data_dict_74709_original.pk'
+    import os
+    if os.path.exists(original_pickle_path):
+        with open(original_pickle_path, 'rb') as handle:
+            original_data = pk.load(handle)
+        
+        # Compare gene ordering
+        same_genes = np.array_equal(original_data['geneinfo_ordered'].index, data_dict_74709['geneinfo_ordered'].index)
+        print(f"Gene IDs match with original pickle: {same_genes}")
+        
+        # Compare matrix dimensions
+        original_shape = original_data['all_genes'].shape
+        new_shape = data_dict_74709['all_genes'].shape
+        print(f"Original matrix shape: {original_shape}")
+        print(f"New matrix shape: {new_shape}")
+        
+        # Check a few values
+        if original_shape == new_shape:
+            # Check first sample, first 5 genes
+            print("First 5 genes of first sample (original):", original_data['all_genes'][0, :5])
+            print("First 5 genes of first sample (new):", data_dict_74709['all_genes'][0, :5])
+except Exception as e:
+    print(f"Could not perform verification against original pickle: {e}")

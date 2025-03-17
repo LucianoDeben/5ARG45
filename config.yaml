@@ -21,7 +21,7 @@ data:
   max_workers: null
   chunk_size: 10000
   feature_space: "landmark"
-  nrows: null
+  nrows: 1000
   normalize: "none"
   random_seed: 42
   cache_data: true
@@ -33,8 +33,8 @@ data:
 
 training:
   batch_size: 256
-  epochs: 50
-  num_runs: 20
+  epochs: 15
+  num_runs: 2
   learning_rate: 0.001
   optimizer: "adam" 
   loss: "mse"
@@ -78,6 +78,9 @@ model:
   transcriptomics_encoder_type: "mlp"
   molecular_encoder_type: "descriptors"
   fusion_type: "simple"
+  fusion_num_heads: 4
+  molecular_num_layers: 6  
+  molecular_num_heads: 8   
   fusion_strategy: "concat"
   activation: "relu"
   dropout: 0.3
@@ -123,7 +126,7 @@ interpretation:
   top_k: 20 
   visualize_features: true
   feature_naming:
-    transcriptomics: "data/raw/LINCS/geneinfo_beta.txt" # Path to gene name mapping
+    transcriptomics: "data/raw/LINCS/geneinfo_beta.txt"
     molecular: null 
   save_attributions: true 
   generate_figures: true

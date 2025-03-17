@@ -9,11 +9,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Enable Tensor Core optimization for better performance on A100 GPUs
 torch.set_float32_matmul_precision('medium')
 
 from src.config.config_utils import setup_logging, get_default_config
-from src.data.loaders import GCTXDataLoader
+from src.data.loaders import GCTXLoader
 from src.data.datasets import DatasetFactory
 from src.training.trainer import MultiRunTrainer
 from src.models.base_module import DrugResponseModule  # Updated to use base module
@@ -72,8 +71,9 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         run_name = f"{model_prefix}_run_{timestamp}"
     
     logger.info("Creating MixSeq dataset for external testing...")
-    _, _, test_ds_mixseq = DatasetFactory.create_and_split_transcriptomics(
-        gctx_loader=mixseq_loader,
+    _, _, test_ds_mixseq = DatasetFactory.create_and_split_datasets(
+        data_loader=mixseq_loader,
+        dataset_type="transcriptomics",
         feature_space=config["data"]["feature_space"],
         nrows=config["data"]["nrows"],
         test_size=0.9,
@@ -89,6 +89,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
     
     dataset_kwargs = {
         "feature_space": config["data"]["feature_space"],
+        "dataset_type": "transcriptomics",
         "nrows": config["data"]["nrows"],
         "test_size": config["training"]["test_size"],
         "val_size": config["training"]["val_size"],
@@ -265,8 +266,8 @@ def main(config_path=None, models_to_run=None):
     
     # Load data
     logger.info("Loading LINCS and MixSeq data...")
-    lincs_loader = GCTXDataLoader(config["data"]["lincs_file"])
-    mixseq_loader = GCTXDataLoader(config["data"]["mixseq_file"])
+    lincs_loader = GCTXLoader(config["data"]["lincs_file"])
+    mixseq_loader = GCTXLoader(config["data"]["mixseq_file"])
     
     # Run training for each model
     all_results = []

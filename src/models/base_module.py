@@ -93,8 +93,11 @@ class DrugResponseModule(pl.LightningModule):
         outputs = self(inputs)
         loss = self.criterion(outputs, targets)
         
-        # Log loss
-        self.log(f"{batch_type}_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Get the actual batch size from the targets
+        batch_size = targets.shape[0]
+        
+        # Log loss with explicit batch_size
+        self.log(f"{batch_type}_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
         
         # Update metrics based on batch type
         if batch_type == "train":
@@ -104,8 +107,8 @@ class DrugResponseModule(pl.LightningModule):
         else:  # test
             metric_outputs = self.test_metrics(outputs, targets)
         
-        # Log all metrics with a single call
-        self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True)
+        # Log all metrics with a single call and explicit batch_size
+        self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         
         # Store outputs and targets for later analysis
         return {"loss": loss, "preds": outputs.detach(), "targets": targets.detach()}
@@ -136,12 +139,15 @@ class DrugResponseModule(pl.LightningModule):
         outputs = self(inputs)
         loss = self.criterion(outputs, targets)
         
-        # Log loss
-        self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Get the actual batch size from the targets
+        batch_size = targets.shape[0]
+        
+        # Log loss with explicit batch_size
+        self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
         
         # Update metrics
         metric_outputs = self.test_metrics(outputs, targets)
-        self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True)
+        self.log_dict(metric_outputs, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         
         # Store outputs and targets for later analysis
         self.test_step_outputs.append({
