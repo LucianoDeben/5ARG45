@@ -1,4 +1,4 @@
-# models/prediction/viability_prediction.py
+# models/prediction/predictors.py
 import logging
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -292,3 +292,54 @@ class MultiTaskViabilityPredictor(nn.Module):
             predictions[task] = self.task_heads[task](shared_features)
 
         return predictions
+
+def create_viability_predictor(
+    predictor_type: str,
+    input_dim: int,
+    **kwargs
+) -> nn.Module:
+    """
+    Factory function to create different types of viability predictors.
+    
+    Args:
+        predictor_type: Type of predictor ('simple', 'multitask', 'uncertainty')
+        input_dim: Dimension of input features
+        **kwargs: Additional arguments specific to predictor types
+    
+    Returns:
+        A viability prediction module
+    """
+    if predictor_type == "simple":
+        return ViabilityPredictor(
+            input_dim=input_dim,
+            hidden_dims=kwargs.get("hidden_dims", [128, 64]),
+            dropout=kwargs.get("dropout", 0.3),
+            activation=kwargs.get("activation", "relu"),
+            use_batch_norm=kwargs.get("use_batch_norm", True),
+            output_activation=kwargs.get("output_activation", "sigmoid"),
+            uncertainty=False
+        )
+    
+    elif predictor_type == "uncertainty":
+        return ViabilityPredictor(
+            input_dim=input_dim,
+            hidden_dims=kwargs.get("hidden_dims", [128, 64]),
+            dropout=kwargs.get("dropout", 0.3),
+            activation=kwargs.get("activation", "relu"),
+            use_batch_norm=kwargs.get("use_batch_norm", True),
+            output_activation=kwargs.get("output_activation", "sigmoid"),
+            uncertainty=True
+        )
+    
+    elif predictor_type == "multitask":
+        return MultiTaskViabilityPredictor(
+            input_dim=input_dim,
+            task_names=kwargs.get("task_names", ["viability", "ic50"]),
+            shared_hidden_dims=kwargs.get("shared_hidden_dims", [256, 128]),
+            task_specific_dims=kwargs.get("task_specific_dims", [64]),
+            dropout=kwargs.get("dropout", 0.3),
+            use_batch_norm=kwargs.get("use_batch_norm", True)
+        )
+    
+    else:
+        raise ValueError(f"Unsupported predictor type: {predictor_type}")

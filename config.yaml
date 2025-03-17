@@ -40,7 +40,6 @@ training:
   loss: "mse"
   test_size: 0.4
   val_size: 0.1
-  random_state: 42
   group_by: "cell_mfc_name"
   stratify_by: "viability_clipped"
   lr_scheduler:
@@ -76,7 +75,7 @@ model:
   fusion_output_dim: 256
   predictor_hidden_dims: [128, 64]
   transcriptomics_encoder_type: "mlp"
-  molecular_encoder_type: "descriptors"
+  molecular_encoder_type: "mlp"
   fusion_type: "simple"
   fusion_num_heads: 4
   molecular_num_layers: 6  
@@ -86,7 +85,7 @@ model:
   dropout: 0.3
   normalize: true
   use_batch_norm: true
-  predictor_type: "standard"
+  predictor_type: "simple"
 
 evaluation:
   metrics: ["r2", "rmse", "mae", "pearson"]

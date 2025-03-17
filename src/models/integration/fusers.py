@@ -1,7 +1,8 @@
-# models/integration/fusion.py
+# models/integration/fusers.py
 import logging
 from typing import Dict, List, Optional, Tuple, Union
 
+from src.models.integration.attention import CrossModalAttention, ModalityAttentionFusion
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -400,3 +401,83 @@ class MultimodalFusion(nn.Module):
 
         # Apply projection
         return self.proj(fused)
+
+def create_feature_fusion(
+    fusion_type: str,
+    modality_dims: Union[Dict[str, int], Tuple[int, int]],
+    output_dim: Optional[int] = None,
+    **kwargs
+) -> nn.Module:
+    """
+    Factory function to create different types of feature fusion modules.
+    
+    Args:
+        fusion_type: Type of fusion ('simple', 'multimodal', 'attention')
+        modality_dims: Dimensions of modalities to fuse 
+            - For simple fusion: (transcriptomics_dim, chemical_dim)
+            - For multimodal: Dictionary of {modality_name: dimension}
+        output_dim: Dimension of output features
+        **kwargs: Additional arguments specific to fusion types
+    
+    Returns:
+        A feature fusion module
+    """
+    if fusion_type == "simple":
+        # For two-modality fusion
+        if isinstance(modality_dims, tuple) and len(modality_dims) == 2:
+            return FeatureFusion(
+                t_dim=modality_dims[0],
+                c_dim=modality_dims[1],
+                output_dim=output_dim,
+                strategy=kwargs.get("strategy", "concat"),
+                projection=kwargs.get("projection", True),
+                dropout=kwargs.get("dropout", 0.1)
+            )
+        else:
+            raise ValueError("Simple fusion requires a tuple of two dimensions")
+    
+    elif fusion_type == "multimodal":
+        # For multiple modalities
+        if isinstance(modality_dims, dict):
+            return MultimodalFusion(
+                modality_dims=modality_dims,
+                output_dim=output_dim,
+                strategy=kwargs.get("strategy", "concat"),
+                projection=kwargs.get("projection", True),
+                hierarchical=kwargs.get("hierarchical", False),
+                learnable_weights=kwargs.get("learnable_weights", False),
+                dropout=kwargs.get("dropout", 0.1)
+            )
+        else:
+            raise ValueError("Multimodal fusion requires a dictionary of modality dimensions")
+    
+    elif fusion_type == "attention":
+        # For attention-based fusion
+        if isinstance(modality_dims, dict):
+            return ModalityAttentionFusion(
+                modality_dims=modality_dims,
+                hidden_dim=kwargs.get("hidden_dim", 128),
+                output_dim=output_dim,
+                num_heads=kwargs.get("num_heads", 4),
+                dropout=kwargs.get("dropout", 0.1),
+                aggregation=kwargs.get("aggregation", "mean")
+            )
+        else:
+            raise ValueError("Attention fusion requires a dictionary of modality dimensions")
+    
+    elif fusion_type == "cross_modal":
+        # For cross-modal attention
+        if isinstance(modality_dims, tuple) and len(modality_dims) == 2:
+            return CrossModalAttention(
+                transcriptomics_dim=modality_dims[0],
+                chemical_dim=modality_dims[1],
+                hidden_dim=kwargs.get("hidden_dim", 128),
+                num_heads=kwargs.get("num_heads", 4),
+                dropout=kwargs.get("dropout", 0.1),
+                use_projection=kwargs.get("use_projection", True)
+            )
+        else:
+            raise ValueError("Cross-modal fusion requires a tuple of two dimensions")
+    
+    else:
+        raise ValueError(f"Unsupported fusion type: {fusion_type}")

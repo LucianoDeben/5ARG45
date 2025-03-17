@@ -78,7 +78,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         nrows=config["data"]["nrows"],
         test_size=0.9,
         val_size=0.05,
-        random_state=config["training"]["random_state"],
+        random_state=config["data"]["random_seed"],
         chunk_size=config["data"]["chunk_size"],
         group_by=config["training"]["group_by"],
         stratify_by=config["training"]["stratify_by"],
@@ -109,7 +109,7 @@ def train_model(model_type, config, lincs_loader, mixseq_loader, base_output_dir
         patience=config["training"]["patience"],
         output_dir=base_output_dir,
         experiment_name=f"{config['experiment']['project_name']}_{run_name}",
-        base_seed=config["training"]["random_state"],
+        base_seed=config["data"]["random_seed"],
         gpu_if_available=(config["inference"]["device"] == "cuda"),
         external_test_loaders={"mixseq": mixseq_loader_dl},
         visualizations_to_generate=["predictions", "boxplot", "feature_importance", "prediction_intervals"],  # Selective visualizations

@@ -587,3 +587,71 @@ class HierarchicalTranscriptomicEncoder(nn.Module):
         output = self.output_projection(pooled_embedding)
 
         return output
+
+def create_transcriptomic_encoder(
+    encoder_type: str,
+    input_dim: int,
+    hidden_dims: List[int],
+    output_dim: int,
+    **kwargs
+) -> nn.Module:
+    """
+    Factory function to create different types of transcriptomic encoders.
+    
+    Args:
+        encoder_type: Type of encoder ("mlp", "cnn", "attention", "hierarchical")
+        input_dim: Number of input genes
+        hidden_dims: List of hidden layer dimensions
+        output_dim: Dimension of output features
+        **kwargs: Additional arguments specific to encoder types
+    
+    Returns:
+        A transcriptomic encoder module
+    """
+    if encoder_type == "mlp":
+        return TranscriptomicEncoder(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            output_dim=output_dim,
+            normalize=kwargs.get("normalize", True),
+            dropout=kwargs.get("dropout", 0.3),
+            activation=kwargs.get("activation", "relu"),
+            residual=kwargs.get("residual", False)
+        )
+    elif encoder_type == "cnn":
+        return CNNTranscriptomicEncoder(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            output_dim=output_dim,
+            kernel_sizes=kwargs.get("kernel_sizes"),
+            normalize=kwargs.get("normalize", True),
+            dropout=kwargs.get("dropout", 0.3)
+        )
+    elif encoder_type == "attention":
+        return AttentionTranscriptomicEncoder(
+            input_dim=input_dim,
+            hidden_dim=hidden_dims[0] if hidden_dims else 128,
+            output_dim=output_dim,
+            num_heads=kwargs.get("num_heads", 4),
+            num_layers=kwargs.get("num_layers", 2),
+            normalize=kwargs.get("normalize", True),
+            dropout=kwargs.get("dropout", 0.2),
+            feed_forward_dim=kwargs.get("feed_forward_dim")
+        )
+    elif encoder_type == "hierarchical":
+        # This requires pathway_groups which is a critical parameter
+        if "pathway_groups" not in kwargs:
+            raise ValueError("pathway_groups is required for hierarchical encoder")
+            
+        return HierarchicalTranscriptomicEncoder(
+            input_dim=input_dim,
+            pathway_groups=kwargs["pathway_groups"],
+            pathway_hidden_dim=kwargs.get("pathway_hidden_dim", 64),
+            global_hidden_dim=kwargs.get("global_hidden_dim", 128),
+            output_dim=output_dim,
+            pathway_encoder_type=kwargs.get("pathway_encoder_type", "attention"),
+            global_num_heads=kwargs.get("global_num_heads", 4),
+            dropout=kwargs.get("dropout", 0.3)
+        )
+    else:
+        raise ValueError(f"Unsupported encoder type: {encoder_type}")
