@@ -21,7 +21,7 @@ data:
   max_workers: null
   chunk_size: 10000
   feature_space: "landmark"
-  nrows: 1000
+  nrows: null
   normalize: "none"
   random_seed: 42
   cache_data: true
@@ -32,9 +32,9 @@ data:
   outlier_threshold: 3.0
 
 training:
-  batch_size: 256
-  epochs: 15
-  num_runs: 2
+  batch_size: 512
+  epochs: 50
+  num_runs: 5
   learning_rate: 0.001
   optimizer: "adam" 
   loss: "mse"

@@ -26,12 +26,6 @@ class MultimodalModel(nn.Module):
     def forward(self, x: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass through the multimodal model.
-        
-        Args:
-            x: Dictionary containing 'transcriptomics', 'molecular', and optionally 'dosage'
-        
-        Returns:
-            Tensor with predicted viability values
         """
         # Extract transcriptomics features
         transcriptomics_features = self.transcriptomics_encoder(x["transcriptomics"])
@@ -50,12 +44,7 @@ class MultimodalModel(nn.Module):
             batch_size = transcriptomics_features.size(0)
             
             # Determine output dimension of molecular encoder
-            if hasattr(self.molecular_encoder, "output_dim"):
-                mol_dim = self.molecular_encoder.output_dim
-            else:
-                # Default dimension if not specified
-                mol_dim = 128
-                
+            mol_dim = getattr(self.molecular_encoder, 'output_dim', 128)
             molecular_features = torch.zeros(batch_size, mol_dim, device=device)
         
         # Include dosage information for fusion if needed
@@ -76,29 +65,17 @@ class MultimodalModel(nn.Module):
 class MultimodalDrugResponseModule(DrugResponseModule):
     """
     Lightning module for multimodal drug response prediction.
-    Combines transcriptomics and molecular data encoders with a fusion module.
     """
     
     def __init__(
         self,
-        transcriptomics_encoder: nn.Module,
-        molecular_encoder: nn.Module,
-        fusion_module: nn.Module,
-        prediction_head: nn.Module,
+        model: MultimodalModel,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
         grad_clip: Optional[float] = None,
         **kwargs
     ):
-        # Create the complete model
-        model = MultimodalModel(
-            transcriptomics_encoder=transcriptomics_encoder,
-            molecular_encoder=molecular_encoder,
-            fusion_module=fusion_module,
-            prediction_head=prediction_head
-        )
-        
-        # Initialize parent class
+        # Initialize parent class with the pre-constructed model
         super().__init__(
             model=model,
             learning_rate=learning_rate,
@@ -106,13 +83,6 @@ class MultimodalDrugResponseModule(DrugResponseModule):
             grad_clip=grad_clip,
             **kwargs
         )
-        
-        # Save individual components for potential separate optimization
-        # or feature analysis
-        self.transcriptomics_encoder = transcriptomics_encoder
-        self.molecular_encoder = molecular_encoder
-        self.fusion_module = fusion_module
-        self.prediction_head = prediction_head
     
     def configure_optimizers(self):
         """

@@ -6,10 +6,9 @@ import torch
 import logging
 import numpy as np
 import pytorch_lightning as pl
-from typing import Dict, Optional, Union
 
 # Import custom modules
-from src.config.config_utils import setup_logging, get_default_config
+from src.config.config_utils import get_default_config
 from src.data.loaders import GCTXLoader
 from src.data.datasets import DatasetFactory
 from src.models.transcriptomics.encoders import create_transcriptomic_encoder
@@ -97,24 +96,6 @@ def main(config_path=None, **kwargs):
         prediction_head=prediction_head
     )
     
-    # Create Lightning module wrapper
-    lightning_module = MultimodalDrugResponseModule(
-        transcriptomics_encoder=transcriptomics_encoder,
-        molecular_encoder=molecular_encoder,
-        fusion_module=fusion_module,
-        prediction_head=prediction_head,
-        learning_rate=config['training']['learning_rate'],
-        weight_decay=config['training']['weight_decay'])
-    
-    # Prepare datasets
-    _, val_ds, test_ds = DatasetFactory.create_and_split_datasets(
-        data_loader=lincs_loader,
-        dataset_type="multimodal",
-        test_size=config['training']['test_size'],
-        val_size=config['training']['val_size'],
-        random_state=config['data']['random_seed']
-    )
-    
     dataset_kwargs = {
         "feature_space": config["data"]["feature_space"],
         "dataset_type": "transcriptomics",
@@ -131,10 +112,7 @@ def main(config_path=None, **kwargs):
     trainer = MultiRunTrainer(
         module_class=MultimodalDrugResponseModule,
         module_kwargs={
-            "transcriptomics_encoder": transcriptomics_encoder,
-            "molecular_encoder": molecular_encoder,
-            "fusion_module": fusion_module,
-            "prediction_head": prediction_head,
+            'model': multimodal_model,
             'learning_rate': config['training']['learning_rate'],
             'weight_decay': config['training']['weight_decay']
         },
